@@ -1,0 +1,32 @@
+[project]
+name = "harvest-convoy"
+version = "0.1.0"
+description = "Agent that reschedules a shared combine harvester's route across a village cluster of farmers as weather and crop maturity change."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "thiru260402" }]
+dependencies = [
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "httpx>=0.27.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harvest_convoy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "network: makes real network calls to Open-Meteo (needs internet)",
+]
