@@ -1,5 +1,6 @@
 from datetime import date
 
+from harvest_convoy.agents.contracts import AdvocateClaim, EscalationPayload
 from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.telegram import webhook
 from harvest_convoy.telegram.client import SendResult
@@ -33,10 +34,10 @@ def _plot(plot_id: str) -> Plot:
     )
 
 
-def _farmer(plot_id: str, chat_id: int) -> Farmer:
+def _farmer(plot_id: str, chat_id: int, name: str | None = None) -> Farmer:
     return Farmer(
-        farmer_id=f"farmer-{plot_id}", name="Test Farmer", cluster_id="c",
-        telegram_chat_id=chat_id,
+        farmer_id=f"farmer-{plot_id}", name=name or f"Farmer {plot_id}",
+        cluster_id="c", telegram_chat_id=chat_id,
     )
 
 
@@ -71,9 +72,19 @@ def test_handle_update_with_no_chat_id_is_ignored() -> None:
     assert client.sent_messages == []
 
 
+def _claim(plot_id: str, days_past_maturity: int, bumped: bool = False) -> AdvocateClaim:
+    return AdvocateClaim(
+        plot_id=plot_id, urgency_score=0.3, days_past_maturity=days_past_maturity,
+        rain_vulnerability="low", acres=2.0, bumped_last_season=bumped,
+        argument="x", concedes=False,
+    )
+
+
 def test_callback_resolves_and_notifies_both_farmers() -> None:
     client = _FakeClient()
-    plots = {"p03": (_farmer("p03", 111), _plot("p03")), "p04": (_farmer("p04", 222), _plot("p04"))}
+    farmer_a = _farmer("p03", 111, name="Kannan Raja")
+    farmer_b = _farmer("p04", 222, name="Meena Subramani")
+    plots = {"p03": (farmer_a, _plot("p03")), "p04": (farmer_b, _plot("p04"))}
 
     update = {
         "callback_query": {
@@ -86,11 +97,45 @@ def test_callback_resolves_and_notifies_both_farmers() -> None:
     webhook.handle_update(client, update, lookup_farmer_for_plot=lambda pid: plots.get(pid))
 
     assert len(client.answered_callbacks) == 1
-    assert "assigned to p03" in client.answered_callbacks[0][1]
+    popup_text = client.answered_callbacks[0][1]
+    assert "p03" not in popup_text  # no raw plot id in a human-read popup
+    assert "Kannan Raja" in popup_text
     assert client.edited_markups == [(999, 55, None)]
     assert len(client.sent_messages) == 2
     chat_ids_notified = {m[0] for m in client.sent_messages}
     assert chat_ids_notified == {111, 222}
+
+
+def test_registered_escalation_gives_loser_a_specific_reason() -> None:
+    client = _FakeClient()
+    farmer_a = _farmer("p03", 111, name="Kannan Raja")
+    farmer_b = _farmer("p04", 222, name="Meena Subramani")
+    plots = {"p03": (farmer_a, _plot("p03")), "p04": (farmer_b, _plot("p04"))}
+
+    escalation = EscalationPayload(
+        cluster_id="reason-test", plot_a_id="p03", plot_b_id="p04",
+        claim_a=_claim("p03", days_past_maturity=6),
+        claim_b=_claim("p04", days_past_maturity=0, bumped=True),
+        rounds_run=3, reason="tied",
+    )
+    webhook.register_escalation(escalation)
+
+    update = {
+        "callback_query": {
+            "id": "cbq-reason",
+            "data": "resolve:reason-test:p03:p04:p03",
+            "message": {"chat": {"id": 999}, "message_id": 1},
+        }
+    }
+    webhook.handle_update(client, update, lookup_farmer_for_plot=lambda pid: plots.get(pid))
+
+    loser_messages = [m for m in client.sent_messages if m[0] == 222]
+    assert len(loser_messages) == 1
+    loser_text = loser_messages[0][1]
+    assert "Kannan Raja" in loser_text
+    assert "6 days" in loser_text
+    assert "round" not in loser_text.lower()
+    assert "negotiat" not in loser_text.lower()
 
 
 def test_double_tap_on_resolved_escalation_does_not_renotify() -> None:

@@ -203,15 +203,22 @@ def main() -> None:
         (d for d in decisions if d.outcome == PlotOutcome.FITS),
         key=lambda d: d.route_position,
     )
-    route_order = [d.plot_id for d in fits]
+    route = [(farmer_of(d.plot_id), plots_by_id[d.plot_id]) for d in fits]
     result = notify.send_operator_route_summary(
-        client, cluster.operator_chat_id, cluster.name, route_order
+        client, cluster.operator_chat_id, cluster, route
     )
-    print(f"    route={route_order} success={result.success} error={result.error}")
+    route_labels = [notify.short_label(f, p) for f, p in route]
+    print(f"    route={route_labels} success={result.success} error={result.error}")
 
     print("\n4/4 Building and sending the escalation (p03 vs p04)...")
     escalation = build_escalation(plots_by_id, decisions_by_id, offline=args.offline)
-    result = notify.send_escalation(client, cluster.operator_chat_id, escalation)
+    webhook.register_escalation(escalation)
+    result = notify.send_escalation(
+        client, cluster.operator_chat_id,
+        escalation.cluster_id,
+        escalation.plot_a_id, farmer_of("p03"), plots_by_id["p03"], escalation.claim_a,
+        escalation.plot_b_id, farmer_of("p04"), plots_by_id["p04"], escalation.claim_b,
+    )
     print(f"    success={result.success} error={result.error}")
 
     def lookup(plot_id: str):
