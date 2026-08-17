@@ -56,3 +56,16 @@ class Storage(Protocol):
         not silently overwrite. See ADR-005 Decision 5, concurrent writes.
         """
         ...
+
+    def get_watcher_last_run(self, cluster_id: str) -> str | None:
+        """ISO date string of the last day the daily watcher completed a
+        check for this cluster (trigger or no-trigger, either counts), or
+        None if it has never run. See ADR-006 Decision 2 -- this is the
+        real idempotency guard against firing twice in one day."""
+        ...
+
+    def set_watcher_last_run(self, cluster_id: str, run_date: str) -> StorageResult:
+        """Only call this after a check actually completed -- not on a
+        failed check (e.g. Open-Meteo down), so a failed day gets retried
+        rather than silently skipped."""
+        ...

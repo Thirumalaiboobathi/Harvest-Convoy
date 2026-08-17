@@ -51,6 +51,33 @@ Return your answer as the structured claim schema. `argument` must be one \
 sentence, at most 25 words.
 """
 
+# Prompt caching: verified live against apac.amazon.nova-pro-v1:0 in
+# ap-south-1 before building this. Three findings, not one:
+# (1) System-prompt caching works, via an explicit cachePoint content
+#     block -- a raw Converse call with one after the system text showed
+#     cacheWriteInputTokens then cacheReadInputTokens on a repeat call.
+# (2) Strands' cache_config=CacheConfig(strategy="auto") does NOT help
+#     this workload: reading its source, "auto" places the cache
+#     boundary at the last USER message, not the system prompt -- useful
+#     for growing multi-turn conversations, useless here since every
+#     advocate call is a fresh single-turn Agent with different plot
+#     facts as the user message each time (nothing repeats there to
+#     cache). Measured: zero cache_read/cache_write tokens across a real
+#     8-call run with "auto" enabled.
+# (3) Tool-config caching (Strands' cache_tools=...) does not work for
+#     this model at all: Bedrock rejects it outright --
+#     "Malformed input request: #/toolConfig/tools/1: extraneous key
+#     [cachePoint] is not permitted" -- confirmed by trying it and
+#     reading the real error, not assumed from docs.
+# So: the system prompt is passed as an explicit SystemContentBlock list
+# with a trailing cachePoint (the modern, non-deprecated API -- the
+# alternative BedrockModel(cache_prompt=...) kwarg works identically but
+# is deprecated in favor of this). Tool schemas are not cached; see (3).
+CACHED_SYSTEM_PROMPT = [
+    {"text": SYSTEM_PROMPT},
+    {"cachePoint": {"type": "default"}},
+]
+
 
 def _build_model() -> Model:
     return BedrockModel(model_id=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION)
@@ -150,7 +177,7 @@ def get_advocate_claim(
             agent = Agent(
                 model=model or _build_model(),
                 tools=[_make_fairness_tool(storage)],
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=CACHED_SYSTEM_PROMPT,
                 structured_output_model=AdvocateClaim,
                 callback_handler=None,
             )

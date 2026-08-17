@@ -202,6 +202,27 @@ class DynamoStorage:
             logger.error("put_ledger_entry failed: %s", exc)
             return StorageResult(success=False, error=str(exc))
 
+    # --- Watcher idempotency marker ---
+
+    def get_watcher_last_run(self, cluster_id: str) -> str | None:
+        try:
+            resp = self._table.get_item(
+                Key={"PK": f"CLUSTER#{cluster_id}", "SK": "WATCHER#RUN"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("get_watcher_last_run(%s) failed: %s", cluster_id, exc)
+            return None
+        item = resp.get("Item")
+        return item.get("last_run_date") if item else None
+
+    def set_watcher_last_run(self, cluster_id: str, run_date: str) -> StorageResult:
+        item = {
+            "PK": f"CLUSTER#{cluster_id}",
+            "SK": "WATCHER#RUN",
+            "last_run_date": run_date,
+        }
+        return self._put(item)
+
     # --- internals ---
 
     def _put(self, item: dict) -> StorageResult:

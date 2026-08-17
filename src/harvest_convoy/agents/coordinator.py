@@ -109,33 +109,59 @@ def negotiate_pair(
     as either side concedes or the scores clearly separate; otherwise the
     losing side (by raw score) gets one re-argue per round with the
     fairness ledger surfaced. No resolution after max_rounds -> escalate.
+
+    Traced explicitly, not left to fall out as flat advocate.get_claim
+    siblings under coordinator.run_cluster: one span for the whole
+    negotiation, one nested span per round, so a trigger -> negotiation ->
+    escalation run reads as a real nested story rather than an
+    undifferentiated list of calls. Checked this by inspecting real
+    exported spans before adding it -- without this, all of a run's
+    advocate calls land as siblings with no round or pairing structure
+    visible.
     """
-    claim_a = get_claim(facts_a, 1, None)
-    claim_b = get_claim(facts_b, 1, None)
+    with tracer.start_as_current_span(
+        "coordinator.negotiate",
+        attributes={"plot_a": facts_a.plot_id, "plot_b": facts_b.plot_id},
+    ) as negotiation_span:
+        with tracer.start_as_current_span("negotiation.round", attributes={"round": 1}):
+            claim_a = get_claim(facts_a, 1, None)
+            claim_b = get_claim(facts_b, 1, None)
 
-    for round_num in range(1, max_rounds + 1):
-        if claim_a.concedes and not claim_b.concedes:
-            return NegotiationResult(facts_b.plot_id, round_num, claim_a, claim_b, False)
-        if claim_b.concedes and not claim_a.concedes:
-            return NegotiationResult(facts_a.plot_id, round_num, claim_a, claim_b, False)
-        if claim_a.concedes and claim_b.concedes:
-            winner = facts_a.plot_id if facts_a.urgency >= facts_b.urgency else facts_b.plot_id
-            return NegotiationResult(winner, round_num, claim_a, claim_b, False)
+        for round_num in range(1, max_rounds + 1):
+            if claim_a.concedes and not claim_b.concedes:
+                negotiation_span.set_attribute("outcome", "resolved")
+                negotiation_span.set_attribute("winner", facts_b.plot_id)
+                return NegotiationResult(facts_b.plot_id, round_num, claim_a, claim_b, False)
+            if claim_b.concedes and not claim_a.concedes:
+                negotiation_span.set_attribute("outcome", "resolved")
+                negotiation_span.set_attribute("winner", facts_a.plot_id)
+                return NegotiationResult(facts_a.plot_id, round_num, claim_a, claim_b, False)
+            if claim_a.concedes and claim_b.concedes:
+                winner = facts_a.plot_id if facts_a.urgency >= facts_b.urgency else facts_b.plot_id
+                negotiation_span.set_attribute("outcome", "resolved")
+                negotiation_span.set_attribute("winner", winner)
+                return NegotiationResult(winner, round_num, claim_a, claim_b, False)
 
-        score_a, score_b = _score(claim_a), _score(claim_b)
-        if abs(score_a - score_b) > CLEAR_MARGIN:
-            winner = facts_a.plot_id if score_a > score_b else facts_b.plot_id
-            return NegotiationResult(winner, round_num, claim_a, claim_b, False)
+            score_a, score_b = _score(claim_a), _score(claim_b)
+            if abs(score_a - score_b) > CLEAR_MARGIN:
+                winner = facts_a.plot_id if score_a > score_b else facts_b.plot_id
+                negotiation_span.set_attribute("outcome", "resolved")
+                negotiation_span.set_attribute("winner", winner)
+                return NegotiationResult(winner, round_num, claim_a, claim_b, False)
 
-        if round_num == max_rounds:
-            break
+            if round_num == max_rounds:
+                break
 
-        if score_a >= score_b:
-            claim_b = get_claim(facts_b, round_num + 1, claim_a.argument)
-        else:
-            claim_a = get_claim(facts_a, round_num + 1, claim_b.argument)
+            with tracer.start_as_current_span(
+                "negotiation.round", attributes={"round": round_num + 1}
+            ):
+                if score_a >= score_b:
+                    claim_b = get_claim(facts_b, round_num + 1, claim_a.argument)
+                else:
+                    claim_a = get_claim(facts_a, round_num + 1, claim_b.argument)
 
-    return NegotiationResult(None, max_rounds, claim_a, claim_b, True)
+        negotiation_span.set_attribute("outcome", "escalated")
+        return NegotiationResult(None, max_rounds, claim_a, claim_b, True)
 
 
 @dataclass(frozen=True)

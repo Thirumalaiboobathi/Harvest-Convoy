@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FILE_PATH = Path(".data/harvest_convoy.json")
 
-_EMPTY: dict = {"clusters": {}, "farmers": {}, "plots": {}, "ledger": {}}
+_EMPTY: dict = {"clusters": {}, "farmers": {}, "plots": {}, "ledger": {}, "watcher": {}}
 
 
 class FileStorage:
@@ -36,7 +36,10 @@ class FileStorage:
     def _load(self) -> dict:
         if self.path.exists():
             try:
-                return json.loads(self.path.read_text())
+                data = json.loads(self.path.read_text())
+                for key, default in _EMPTY.items():
+                    data.setdefault(key, dict(default))
+                return data
             except Exception as exc:  # noqa: BLE001 -- degrade, never throw
                 logger.error("failed to load storage file %s: %s", self.path, exc)
         return {k: dict(v) for k, v in _EMPTY.items()}
@@ -112,4 +115,12 @@ class FileStorage:
                 error="ledger entry already exists for this farmer/season",
             )
         farmer_entries[entry.season_id] = asdict(entry)
+        return self._save()
+
+    # Watcher idempotency marker
+    def get_watcher_last_run(self, cluster_id: str) -> str | None:
+        return self._data["watcher"].get(cluster_id)
+
+    def set_watcher_last_run(self, cluster_id: str, run_date: str) -> StorageResult:
+        self._data["watcher"][cluster_id] = run_date
         return self._save()
