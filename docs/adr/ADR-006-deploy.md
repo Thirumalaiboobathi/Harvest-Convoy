@@ -1,6 +1,10 @@
 # ADR-006: Deployment — AgentCore Runtime, Scheduled Watcher, DynamoDB, Tracing
 
-- Status: Proposed (awaiting go-ahead — **nothing in this ADR has been provisioned**)
+- Status: Implemented — all resources below are live in `ap-south-1`. Two
+  deviations from the original proposal, both found live and both fixed
+  the same session: see Decision 7 (Scheduler can't call
+  `InvokeAgentRuntime` directly) and Decision 8 (ADOT needs one more env
+  var than Decision 5 assumed).
 - Date: 2026-08-17
 
 ## Provisioning summary — read this first
@@ -11,12 +15,14 @@ everything is **ap-south-1** (matches Bedrock/AgentCore already in use).
 | Resource | Purpose | Standing cost |
 |---|---|---|
 | S3 bucket | Holds the zipped code artifact for AgentCore Runtime's `codeConfiguration` deploy path | ~$0.0001/month (few MB) |
-| IAM role (Runtime execution) | Lets AgentCore Runtime call Bedrock, DynamoDB, CloudWatch on the code's behalf | $0 |
-| IAM role (Scheduler invoke) | Lets EventBridge Scheduler call `InvokeAgentRuntime` | $0 |
+| IAM role (Runtime execution) | Lets AgentCore Runtime call Bedrock, DynamoDB, CloudWatch, X-Ray on the code's behalf | $0 |
+| IAM role (Scheduler invoke) | Lets EventBridge Scheduler call `lambda:InvokeFunction` on the shim (Decision 7 — not a direct `InvokeAgentRuntime` call as originally planned) | $0 |
+| Lambda function (`harvest-convoy-watcher-invoker`) | Thin shim: Scheduler → this → boto3 `invoke_agent_runtime()` → Runtime (Decision 7) | ~$0 (one ~0.1-25s invocation/day, free tier) |
+| IAM role (Lambda execution) | Lets the shim call `bedrock-agentcore:InvokeAgentRuntime` + basic CloudWatch Logs | $0 |
 | AgentCore Runtime (1 resource) | Runs `app.py`, `PUBLIC` network mode (no VPC) | ~$0.05/month at daily-run scale (below) |
-| EventBridge Schedule (1 rule) | Fires the daily watcher | ~$0 (14M free invocations/month; we use ~30) |
+| EventBridge Schedule (1 rule) | Fires the daily watcher via the Lambda shim | ~$0 (14M free invocations/month; we use ~30) |
 | DynamoDB table `harvest_convoy` | On-demand (`PAY_PER_REQUEST`) billing, schema from ADR-005 | ~$0.01/month at this scale |
-| CloudWatch Logs / X-Ray traces | AgentCore Runtime's native ADOT auto-instrumentation | Traces likely within free tier; logs negligible (KB/day) |
+| CloudWatch Logs / X-Ray traces | AgentCore Runtime's ADOT integration, direct-to-X-Ray SigV4 export (Decision 8) | Traces likely within free tier; logs negligible (KB/day) |
 
 **Nova Pro inference (Bedrock, already in use, not new)**: measured, not
 estimated — see Decision 6. Real 8-plot run: **$0.0227**. Dominates every
@@ -249,55 +255,170 @@ the contested pair instead of 2 (round 1 both sides, rounds 2-3 the
 losing side only) — roughly 6 + 4 = 10 calls instead of 8, ≈ **$0.028**
 per scenario. Still trivial.
 
-**One concrete tightening, worth doing regardless of the dollar amount
-because it's structural, not cosmetic:** enable Bedrock prompt caching
-(`BedrockModel(..., cache_config=CacheConfig(strategy="auto"))`) for the
-system prompt and tool configuration, which are byte-identical across
-every one of the 8+ calls in a run. This is the actual lever — trimming
-prose in the system prompt saves tens of tokens; caching the ~2,400
-repeated tokens (system prompt + both tool schemas) across calls is the
-one that matters. Proposing to implement this as part of Phase 6, not
-defer it.
+**One concrete tightening, implemented this phase:** Bedrock prompt
+caching via an explicit `cachePoint` block on the system prompt
+(`CACHED_SYSTEM_PROMPT = [{"text": SYSTEM_PROMPT}, {"cachePoint":
+{"type": "default"}}]`), not Strands' `CacheConfig(strategy="auto")` —
+that caches at the wrong message boundary and measurably didn't help;
+tool-config caching was tried and rejected outright by Nova Pro (a real
+`ValidationException`, not a guess). Measured before/after on the same
+8-call scenario: **$0.0227 → $0.0081, a 64% reduction** — the cached
+system prompt is reused across all 8 advocate calls in a run instead of
+re-sent in full every time.
+
+## Decision 7: EventBridge Scheduler can't call `InvokeAgentRuntime` directly — Lambda shim in between
+
+The original plan (Decision 1's fallback aside) was a direct Scheduler
+**universal target** calling `bedrock-agentcore:InvokeAgentRuntime`. Built
+it, and it fails live: `AssumeRole` on the Scheduler's invoke role
+succeeds, but the actual API call errors before reaching the runtime —
+confirmed via CloudWatch (`AWS/Scheduler` namespace, dimensioned by
+`ScheduleGroup`): `InvocationAttemptCount=1`, `TargetErrorCount=1`,
+`InvocationDroppedCount=1`, and zero new lines in the runtime's own log
+group for that window.
+
+Root cause, found by reading `InvokeAgentRuntimeRequest`'s botocore model
+directly: its request body is a `payload` **payload-trait blob** (the
+entire HTTP body, not a JSON object), with `contentType`/`accept` as
+header-located fields, not body fields. Universal targets marshal a plain
+JSON object into a standard JSON request body — that shape doesn't fit an
+API whose body *is* a blob. (Confirmed the resource ARN and IAM action
+name were right — `create-schedule` validated the JSON shape and even
+told me the exact required field names, `AgentRuntimeArn`/`Payload` in
+PascalCase, once I got the service identifier — `bedrockagentcore`, no
+hyphen, differs from the boto3 client name — right. The failure is
+specifically the blob body, not a naming mistake.)
+
+**Fix: a ~20-line Lambda (`harvest-convoy-watcher-invoker`) as a thin
+shim.** It calls `bedrock_agentcore.invoke_agent_runtime()` via boto3
+(handles the blob-body marshalling correctly, since that's what the SDK
+is for) and returns the response. EventBridge Scheduler targets the
+Lambda instead, using the ordinary, well-supported Lambda target type —
+no universal-target ambiguity. The daily schedule
+(`harvest-convoy-daily-watch`, `cron(0 6 * * ? *)`, `Asia/Kolkata`) now
+points at this Lambda; `harvest-convoy-scheduler-invoke`'s permissions
+changed from (unused) `bedrock-agentcore:InvokeAgentRuntime` to
+`lambda:InvokeFunction` scoped to the shim.
+
+One more real finding along the way, not a guess: IAM resource-level
+authorization for `InvokeAgentRuntime` is checked against
+`.../runtime/<id>/runtime-endpoint/DEFAULT`, not the bare runtime ARN —
+the Lambda's execution role needed both ARNs in its policy `Resource`
+list before a direct boto3 call succeeded (verified via a live
+`AccessDeniedException` naming the exact resource it checked).
+
+`app.py`'s payload contract gained one optional field, `force: bool`
+(default `false`) — bypasses the rain-trigger gate so a real invocation
+can exercise the full pipeline (including negotiation) on demand, for
+verification and for `scripts/check_watcher_health.py --invoke`, without
+waiting for an actual rainy forecast. Every scheduled run still uses the
+real trigger condition; nothing about production behavior changed.
+
+## Decision 8: ADOT needs `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` set explicitly — Decision 5's env var list was incomplete
+
+Decision 5 assumed `AGENT_OBSERVABILITY_ENABLED=true` plus the standard
+`OTEL_TRACES_EXPORTER=otlp`/`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`
+pair would be enough for AWS's ADOT distro to export straight to
+CloudWatch. Live, it wasn't: every span export attempt failed with
+`Connection refused` to `localhost:4318` — confirmed with a one-line
+socket-reachability diagnostic added to `observability/otel.py` and
+deployed, which reported both `4318` and `4317` unreachable inside the
+running container. No local collector is present in this
+`codeConfiguration` (direct-code, non-container) deployment mode.
+
+Root cause, found by reading the installed
+`aws_opentelemetry_configurator.py` source directly rather than guessing
+further: `_customize_span_exporter()` only swaps in AWS's SigV4-signed
+direct-to-X-Ray exporter when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (or
+`OTEL_EXPORTER_OTLP_ENDPOINT`) is set **and** matches the pattern
+`https://xray.<region>.amazonaws.com/v1/traces`. Without it, the SDK
+falls through to a plain `OTLPSpanExporter` pointed at the OTel-standard
+default (`localhost:4318`), which nothing in this deployment mode is
+listening on. This isn't documented as a required variable anywhere in
+AWS's AgentCore observability guide for the "hosted inside AgentCore
+Runtime" path — found by reading the library, not the docs.
+
+**Fix: added `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://xray.ap-south-1.amazonaws.com/v1/traces`**
+to the runtime's environment variables. No code or dependency change.
+Verified live: the `Connection refused` spam is gone, replaced by
+successful span export, and CloudWatch Logs (`aws/spans`) shows real
+records with correct `traceId`/`spanId`/`parentSpanId` nesting — 9 levels
+deep for a real negotiation run: `app.daily_watch` → `coordinator.run_cluster`
+→ `advocate.get_claim` → Strands' own `invoke_agent Strands Agents` →
+`execute_event_loop_cycle` → `chat`/`execute_tool AdvocateClaim`.
+
+**One open item, disclosed rather than papered over:** the specific
+`coordinator.negotiate`/`negotiation.round` spans (added earlier this
+phase specifically for round-by-round visibility) weren't exercised
+during this verification. `run_cluster()` only calls `negotiate_pair()`
+for plots the full cluster-wide `solve()` classifies as `CONTESTED`
+against each other — the live seeded data doesn't currently produce that
+(confirmed by temporarily reproducing `trigger_scenario.py`'s known
+deadlock dates for p03/p04 directly in the live DynamoDB table, then
+reverting them: still zero pairing, meaning the full-cluster capacity
+solve treats them differently than the isolated two-plot harness
+`trigger_scenario.py` uses). What *is* verified: (a) the span code itself
+nests `coordinator.negotiate`/`negotiation.round` correctly — confirmed
+earlier this phase with a local custom `SpanExporter` capturing real
+parent/child span IDs; (b) the export pipeline faithfully preserves deep,
+correct nesting for whatever spans a run actually produces, proven live
+just above. Nothing about the export mechanism is span-name-specific, so
+these two facts together are strong evidence this pair would export
+correctly too — but it has not been directly, individually observed
+landing in CloudWatch, and I'm not claiming it has.
 
 ## Gate: runs unattended 24h, trace is showable — verification harness
 
 Since 24h outlives this session, `scripts/check_watcher_health.py` (new)
-is what you run tomorrow. It does not require me to be present:
+is what you run tomorrow. Read-only by default, does not require me to be
+present:
 
 ```bash
-uv run python -m scripts.check_watcher_health --cluster kamatchipuram
+uv run python -m scripts.check_watcher_health --cluster-id kamatchipuram
+uv run python -m scripts.check_watcher_health --invoke   # also makes one real call
 ```
 
-Checks, in order, each printed pass/fail:
-1. Reads the `WATCHER#RUN` marker from DynamoDB for the cluster — confirms
-   `last_run_date` is today (proves the scheduled invocation actually
-   fired and completed, not just that EventBridge attempted it).
-2. Prints the CloudWatch Logs group/stream ARN and the last invocation's
-   log lines, so you can see the actual watcher output.
-3. Prints a direct CloudWatch console URL, pre-filtered to this
-   invocation's trace ID, for the visual "show the trace" ask —
-   `invoke_agent` → `execute_event_loop_cycle` → `chat`/`execute_tool`
-   spans nested exactly as observed locally in Decision 6, now in
-   CloudWatch instead of console output.
-4. If a trigger fired: confirms the escalation (if any) and the Telegram
-   sends succeeded, cross-checked against the DynamoDB ledger if a bump
-   was recorded.
-5. If no trigger: confirms the no-op was logged (the "silence is the
-   product" case), not just silent absence of evidence.
+Checks, in order, each printed `[OK]`/`[WARN]`/`[FAIL]`:
+1. Reads the `WATCHER#RUN` marker from DynamoDB for the cluster (forces
+   `HARVEST_CONVOY_STORAGE=dynamo` regardless of local `.env` — this
+   script only ever checks deployed state) — confirms `last_run_date` is
+   today, proving the scheduled invocation actually fired and completed,
+   not just that EventBridge attempted it.
+2. Checks the Lambda shim's CloudWatch metrics/logs for the last 25h:
+   at least one invocation recorded, zero `ERROR`-level log lines.
+3. Filters the AgentCore Runtime's own log group for the last 25h for
+   `ERROR`/`Traceback` lines.
+4. With `--invoke`: makes one real (non-forced) call through the same
+   Lambda shim the schedule uses, and reports the returned status.
+
+Trace inspection itself is manual (CloudWatch console → Logs Insights →
+`aws/spans`, or `aws logs filter-log-events` on that log group) — the
+health-check script confirms the pipeline ran and didn't error, not the
+trace shape specifically; Decision 8 documents how that was verified
+live during this session.
 
 ## Consequences
 
-- First AgentCore Runtime resource this account has created — genuine,
-  disclosed uncertainty about a clean first attempt, with a stated
-  fallback (Lambda + EventBridge) that doesn't require rewriting the
-  watcher logic.
-- DynamoDB becomes real for this project for the first time; FileStorage
-  remains the code default.
-- No custom OTLP/SigV4 code — deliberately deferring to AgentCore
-  Runtime's native ADOT integration rather than building a second,
-  untested path to the same destination.
+- AgentCore Runtime deployment succeeded — `codeConfiguration`, arm64,
+  `PYTHON_3_12`, `READY`. One earlier `create-agent-runtime` attempt
+  failed first (`CREATE_FAILED`, the `opentelemetry-instrument` launcher
+  issue fixed in `observability/otel.py`); disclosed, not hidden. The
+  Lambda-fallback contingency in Decision 1 was **not** needed for the
+  runtime itself — only for the narrower Scheduler→API link (Decision 7).
+- DynamoDB is real for this project for the first time; FileStorage
+  remains the code default. Live round trip against the seeded
+  Kamatchipuram scenario confirmed.
+- Tracing lands in CloudWatch with correct, deep span nesting — but
+  getting there needed one more explicit env var than Decision 5
+  predicted (Decision 8), found by reading the ADOT source rather than
+  by further guessing.
+- One extra resource beyond the original plan: a small Lambda shim
+  (Decision 7), because EventBridge Scheduler's universal target can't
+  marshal `InvokeAgentRuntime`'s blob request body. Still no hand-rolled
+  SigV4 code of our own — the shim just calls boto3, which already
+  handles that correctly.
 - AgentCore Memory stays out, now on a re-examined basis specific to
   deployment, not a copy-pasted Phase 5 answer.
 - Real, measured token/dollar cost on record before any scaling decision,
-  plus one concrete structural optimization (prompt caching) queued for
-  implementation.
+  plus prompt caching implemented and measured (Decision 6): $0.0227 →
+  $0.0081, a 64% reduction.

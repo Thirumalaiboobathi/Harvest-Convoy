@@ -1,12 +1,27 @@
 """OpenTelemetry tracing setup.
 
 Every agent turn and tool call is expected to open a span under the tracer
-returned by get_tracer(). Exporter wiring (OTLP endpoint, AgentCore's
-observability sink, etc.) is decided in Phase 6; until then this defaults to
-a console exporter so traces are visible locally during Phases 1-5.
+returned by get_tracer(). Locally, this defaults to a synchronous console
+exporter. Deployed on AgentCore Runtime (AGENT_OBSERVABILITY_ENABLED=true,
+set as an environment variable on the Runtime resource, not in this repo),
+it delegates to AWS's own OTel distro configurator instead -- see
+docs/adr/ADR-006-deploy.md Decision 5 and the deployment postmortem in the
+phase report: the documented `opentelemetry-instrument` CLI launcher
+approach failed in practice (`CREATE_FAILED`,
+"OpenTelemetry instrumentation executable not found") because pip/uv
+generates that console-script's executable in the HOST platform's format
+(a Windows .exe on the machine that built the deployment zip), not the
+target arm64 Linux runtime's -- a real, verified finding, not a
+theoretical concern. Calling AwsOpenTelemetryConfigurator().configure()
+directly in Python does the identical setup without depending on a
+platform-specific launcher shim.
 """
 
 from __future__ import annotations
+
+import logging
+import os
+import socket
 
 from opentelemetry import trace
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
@@ -19,6 +34,22 @@ from opentelemetry.sdk.trace.export import (
 )
 
 _configured = False
+_diag_logger = logging.getLogger(__name__)
+
+
+def _log_local_collector_reachability() -> None:
+    """One-time diagnostic: is anything listening on the OTLP default port?
+    Deployed AgentCore Runtime invocations were observed exporting spans to
+    localhost:4318 and getting Connection refused -- this pins down whether
+    that's because no local collector is present at all (a platform/mode
+    limitation worth disclosing) versus some other export misconfiguration.
+    """
+    for port in (4318, 4317):
+        try:
+            with socket.create_connection(("localhost", port), timeout=1):
+                _diag_logger.warning("otel diagnostic: localhost:%d is reachable", port)
+        except OSError as exc:
+            _diag_logger.warning("otel diagnostic: localhost:%d unreachable (%s)", port, exc)
 
 
 def configure_tracing(
@@ -31,6 +62,16 @@ def configure_tracing(
     provider = trace.get_tracer_provider()
     if _configured:
         return provider  # type: ignore[return-value]
+
+    if os.environ.get("AGENT_OBSERVABILITY_ENABLED", "").lower() == "true":
+        _log_local_collector_reachability()
+        from amazon.opentelemetry.distro.aws_opentelemetry_configurator import (
+            AwsOpenTelemetryConfigurator,
+        )
+
+        AwsOpenTelemetryConfigurator().configure()
+        _configured = True
+        return trace.get_tracer_provider()  # type: ignore[return-value]
 
     resource = Resource.create({SERVICE_NAME: service_name})
     provider = TracerProvider(resource=resource)

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -33,8 +35,15 @@ PRECIPITATION_FIELD = "precipitation_sum"
 FORECAST_MAX_HORIZON_DAYS = 16  # confirmed empirically; see ADR-001
 FORECAST_MAX_PAST_DAYS = 92  # Open-Meteo documented limit
 
-DEFAULT_CACHE_DIR = Path(".cache/open-meteo")
+# The system temp dir, not a relative ".cache/" path: a real deployment
+# (AgentCore Runtime) found this the hard way -- /var/task (the working
+# directory there) is read-only, so a relative path raised PermissionError
+# and took the whole watcher run down before it ever reached the weather
+# data. tempfile.gettempdir() resolves to a genuinely writable location
+# both locally (Windows/Linux dev machines) and in that environment.
+DEFAULT_CACHE_DIR = Path(tempfile.gettempdir()) / "harvest_convoy" / "open-meteo"
 
+logger = logging.getLogger(__name__)
 tracer = get_tracer(__name__)
 
 
@@ -72,9 +81,12 @@ def _fetch(
     once settled.
     """
     if cache_dir is not None:
-        path = cache_dir / f"{key}.json"
-        if path.exists():
-            return json.loads(path.read_text())
+        try:
+            path = cache_dir / f"{key}.json"
+            if path.exists():
+                return json.loads(path.read_text())
+        except OSError as exc:  # noqa: BLE001 -- degrade, never let caching break a fetch
+            logger.warning("cache read failed for %s, fetching fresh: %s", cache_dir, exc)
 
     with tracer.start_as_current_span("openmeteo.fetch", attributes={"url": url}):
         try:
@@ -85,8 +97,11 @@ def _fetch(
         data = response.json()
 
     if cache_dir is not None and not _has_null_daily_values(data):
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        (cache_dir / f"{key}.json").write_text(json.dumps(data))
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / f"{key}.json").write_text(json.dumps(data))
+        except OSError as exc:  # noqa: BLE001 -- degrade, never let caching break a fetch
+            logger.warning("cache write failed for %s, continuing without caching: %s", cache_dir, exc)
 
     return data
 

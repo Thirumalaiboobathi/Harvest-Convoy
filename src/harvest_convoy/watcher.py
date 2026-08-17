@@ -48,6 +48,7 @@ def run_daily_watch(
     today: date | None = None,
     telegram_client: TelegramClient | None = None,
     get_claim=None,
+    force: bool = False,
 ) -> dict:
     """Entry point for one scheduled invocation. Returns a plain dict
     summary (never raises) -- this is what app.py's AgentCore handler and
@@ -61,6 +62,14 @@ def run_daily_watch(
     via coordinator.run_cluster(). Tests inject a fake here for the same
     reason every other test in this codebase avoids unmarked live Bedrock
     calls -- keeps the default suite hermetic and free.
+
+    force: skip the rain-trigger gate and run the full pipeline (real
+    weather, real GDD, real coordinator negotiation) regardless of
+    whether a reschedule is actually warranted today. Off by default --
+    every scheduled run uses real trigger logic. For on-demand health
+    checks and deployment verification (scripts/check_watcher_health.py,
+    manual invokes) where the point is to exercise the negotiation path
+    itself, not to wait for a rainy forecast.
     """
     storage = storage or get_storage()
     today = today or date.today()
@@ -105,7 +114,7 @@ def run_daily_watch(
 
     try:
         usable_days = usable_harvest_days(forecast, RAIN_THRESHOLD_MM)
-        if usable_days >= len(forecast):
+        if usable_days >= len(forecast) and not force:
             logger.info(
                 "watcher no-op: cluster=%s, no rain in the %d-day forecast -- nothing sent",
                 cluster_id, len(forecast),
@@ -114,8 +123,8 @@ def run_daily_watch(
             return {"cluster_id": cluster_id, "date": today.isoformat(), "status": "no_trigger"}
 
         logger.info(
-            "watcher triggered: cluster=%s, %d of %d forecast days usable before rain",
-            cluster_id, usable_days, len(forecast),
+            "watcher triggered%s: cluster=%s, %d of %d forecast days usable before rain",
+            " (forced)" if usable_days >= len(forecast) else "", cluster_id, usable_days, len(forecast),
         )
         decisions = solve(
             plots, plot_days, cluster, forecast,
