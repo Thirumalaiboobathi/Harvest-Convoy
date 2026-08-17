@@ -49,11 +49,13 @@ from harvest_convoy.agronomy.gdd import DailyTemperature
 from harvest_convoy.models import Farmer
 from harvest_convoy.scheduling.capacity import ForecastDay
 from harvest_convoy.scheduling.solver import PlotOutcome, solve
+from harvest_convoy.storage import get_storage
 from harvest_convoy.telegram import notify, webhook
 from harvest_convoy.telegram.client import TelegramClient
 from scripts import seed_cluster
 
 REFERENCE_TODAY = date(2026, 8, 16)
+CURRENT_SEASON_ID = "2026-kuruvai"
 # Fixed synthetic forecast: 1 usable day then rain -- forces contestation
 # among the ready plots. Same fixture the Phase 2/3 gate tests use.
 FIXED_FORECAST = [ForecastDay("d0", 0.0), ForecastDay("d1", 20.0)]
@@ -82,9 +84,9 @@ def _offline_argument(facts) -> str:
     return f"{facts.days_past_maturity} days past maturity, {facts.acres} acres at risk."
 
 
-def build_escalation(plots_by_id, decisions_by_id, *, offline: bool) -> EscalationPayload:
-    facts_a = build_plot_facts(plots_by_id["p03"], decisions_by_id["p03"])
-    facts_b = build_plot_facts(plots_by_id["p04"], decisions_by_id["p04"])
+def build_escalation(plots_by_id, decisions_by_id, storage, *, offline: bool) -> EscalationPayload:
+    facts_a = build_plot_facts(plots_by_id["p03"], decisions_by_id["p03"], storage)
+    facts_b = build_plot_facts(plots_by_id["p04"], decisions_by_id["p04"], storage)
 
     if offline:
         argument_a = _offline_argument(facts_a)
@@ -93,9 +95,9 @@ def build_escalation(plots_by_id, decisions_by_id, *, offline: bool) -> Escalati
         from harvest_convoy.agents.advocate import get_advocate_claim
 
         print("Calling live Bedrock for p03's advocate argument...")
-        argument_a = get_advocate_claim(facts_a).argument
+        argument_a = get_advocate_claim(facts_a, storage=storage).argument
         print("Calling live Bedrock for p04's advocate argument...")
-        argument_b = get_advocate_claim(facts_b).argument
+        argument_b = get_advocate_claim(facts_b, storage=storage).argument
 
     claim_a = AdvocateClaim.from_facts(facts_a, argument=argument_a, concedes=False)
     claim_b = AdvocateClaim.from_facts(facts_b, argument=argument_b, concedes=False)
@@ -111,7 +113,7 @@ def build_escalation(plots_by_id, decisions_by_id, *, offline: bool) -> Escalati
     )
 
 
-def wait_for_resolution(client: TelegramClient, lookup) -> bool:
+def wait_for_resolution(client: TelegramClient, storage, lookup) -> bool:
     """Long-poll getUpdates until the escalation callback arrives, or
     CALLBACK_WAIT_MAX_SECONDS elapses. Returns True if resolved."""
     print(
@@ -140,7 +142,10 @@ def wait_for_resolution(client: TelegramClient, lookup) -> bool:
         for update in data.get("result", []):
             offset = update["update_id"] + 1
             if "callback_query" in update:
-                webhook.handle_update(client, update, lookup_farmer_for_plot=lookup)
+                webhook.handle_update(
+                    client, update, storage, CURRENT_SEASON_ID,
+                    lookup_farmer_for_plot=lookup,
+                )
                 return True
             # Not a callback -- still consume it so it doesn't get replayed.
     return False
@@ -162,6 +167,7 @@ def main() -> None:
         sys.exit(1)
 
     chat_id = args.chat_id
+    storage = get_storage()
 
     # Everyone's chat_id is overridden to yours -- this is a solo
     # verification run, not a multi-farmer broadcast.
@@ -211,7 +217,7 @@ def main() -> None:
     print(f"    route={route_labels} success={result.success} error={result.error}")
 
     print("\n4/4 Building and sending the escalation (p03 vs p04)...")
-    escalation = build_escalation(plots_by_id, decisions_by_id, offline=args.offline)
+    escalation = build_escalation(plots_by_id, decisions_by_id, storage, offline=args.offline)
     webhook.register_escalation(escalation)
     result = notify.send_escalation(
         client, cluster.operator_chat_id,
@@ -226,7 +232,7 @@ def main() -> None:
             return None
         return farmer_of(plot_id), plots_by_id[plot_id]
 
-    resolved = wait_for_resolution(client, lookup)
+    resolved = wait_for_resolution(client, storage, lookup)
     if resolved:
         print("\nEscalation resolved -- check your phone for the two resolution messages.")
     else:

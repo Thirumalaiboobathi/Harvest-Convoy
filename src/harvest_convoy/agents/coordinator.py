@@ -25,24 +25,49 @@ from harvest_convoy.agents.contracts import (
     PlotFacts,
     classify_rain_vulnerability,
 )
-from harvest_convoy.agents.fairness_stub import was_bumped_last_season
+from harvest_convoy.agronomy import crop_params
 from harvest_convoy.models import Plot
 from harvest_convoy.observability.otel import get_tracer
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome
+from harvest_convoy.storage import Storage
+from harvest_convoy.storage.fairness import was_bumped_last_season, weighted_bump_days
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer(__name__)
 
 MAX_NEGOTIATION_ROUNDS = 3
+CLEAR_MARGIN = 0.15  # score gap above which a round resolves outright.
 # Negotiation tuning, not an agronomy constant -- arbitrary, documented
-# design choices for the score comparison, not sourced from anywhere.
-FAIRNESS_WEIGHT = 0.3  # added to urgency_score when comparing bumped vs non-bumped
-CLEAR_MARGIN = 0.15  # score gap above which a round resolves outright
+# design choice, not sourced from anywhere.
+
+# Fairness weighting -- see ADR-005 Decision 4 for the full derivation.
+#
+# Urgency scale: AdvocateClaim.urgency_score is in [0.0, 1.0], produced by
+# agronomy/decay.py's decay_fraction() -- min(1.0, days_past_maturity /
+# DECAY_HORIZON_DAYS_ESTIMATED) for an INTEGER days_past_maturity. That's a
+# discrete step function, not a continuum: its granularity (the smallest
+# gap between "maximally urgent" and the next value below it) is
+# 1 / DECAY_HORIZON_DAYS_ESTIMATED.
+#
+# INVARIANT: fairness must be able to tilt a close call, but a
+# less-than-maximally-urgent plot must never outscore a maximally urgent
+# one on fairness alone. MAX_FAIRNESS_BONUS is therefore derived from that
+# granularity, not picked independently -- so it stays correct even if
+# DECAY_HORIZON_DAYS_ESTIMATED changes later. See test_coordinator.py for
+# the behavioral assertion of this invariant, not just this assert.
+_URGENCY_GRANULARITY = 1.0 / crop_params.DECAY_HORIZON_DAYS_ESTIMATED  # 0.05 today
+MAX_FAIRNESS_BONUS = _URGENCY_GRANULARITY * 0.8  # comfortable margin below it
+assert MAX_FAIRNESS_BONUS < _URGENCY_GRANULARITY, (
+    "MAX_FAIRNESS_BONUS must stay below the urgency scale's granularity, "
+    "or a maximally urgent plot could lose a negotiation to fairness alone"
+)
+
+FAIRNESS_WEIGHT_PER_BUMPED_DAY = 0.01  # DERIVED, tuning constant, not sourced
 
 ClaimProvider = Callable[[PlotFacts, int, str | None], AdvocateClaim]
 
 
-def build_plot_facts(plot: Plot, decision: PlotDecision) -> PlotFacts:
+def build_plot_facts(plot: Plot, decision: PlotDecision, storage: Storage) -> PlotFacts:
     is_ready = decision.outcome != PlotOutcome.TOO_GREEN
     return PlotFacts(
         plot_id=plot.plot_id,
@@ -52,7 +77,8 @@ def build_plot_facts(plot: Plot, decision: PlotDecision) -> PlotFacts:
         urgency=decision.urgency,
         rain_vulnerability=classify_rain_vulnerability(is_ready, decision.urgency),
         acres=plot.area_acres,
-        bumped_last_season=was_bumped_last_season(plot.farmer_id),
+        bumped_last_season=was_bumped_last_season(plot.farmer_id, storage),
+        weighted_bump_days=weighted_bump_days(plot.farmer_id, storage),
     )
 
 
@@ -65,8 +91,12 @@ class NegotiationResult:
     escalated: bool
 
 
+def _fairness_bonus(claim: AdvocateClaim) -> float:
+    return min(MAX_FAIRNESS_BONUS, claim.weighted_bump_days * FAIRNESS_WEIGHT_PER_BUMPED_DAY)
+
+
 def _score(claim: AdvocateClaim) -> float:
-    return claim.urgency_score + (FAIRNESS_WEIGHT if claim.bumped_last_season else 0.0)
+    return claim.urgency_score + _fairness_bonus(claim)
 
 
 def negotiate_pair(
@@ -126,6 +156,7 @@ def run_cluster(
     plots: list[Plot],
     decisions: list[PlotDecision],
     cluster_id: str,
+    storage: Storage,
     *,
     model=None,
 ) -> ClusterResult:
@@ -133,16 +164,18 @@ def run_cluster(
 
     def default_get_claim(facts, round_num, opponent_argument):
         return get_advocate_claim(
-            facts, model=model, round_num=round_num, opponent_argument=opponent_argument
+            facts, model=model, storage=storage,
+            round_num=round_num, opponent_argument=opponent_argument,
         )
 
-    return run_cluster_with_claims(plots, decisions, cluster_id, default_get_claim)
+    return run_cluster_with_claims(plots, decisions, cluster_id, storage, default_get_claim)
 
 
 def run_cluster_with_claims(
     plots: list[Plot],
     decisions: list[PlotDecision],
     cluster_id: str,
+    storage: Storage,
     get_claim: ClaimProvider,
 ) -> ClusterResult:
     """Same orchestration, with an injectable claim provider -- used for
@@ -164,14 +197,14 @@ def run_cluster_with_claims(
         )
 
         for d in too_green + fits:
-            facts = build_plot_facts(plots_by_id[d.plot_id], d)
+            facts = build_plot_facts(plots_by_id[d.plot_id], d, storage)
             claim = get_claim(facts, 1, None)
             outcomes.append(CoordinatorOutcome(d.plot_id, d.outcome, claim))
 
         for i in range(0, len(contested) - 1, 2):
             d_a, d_b = contested[i], contested[i + 1]
-            facts_a = build_plot_facts(plots_by_id[d_a.plot_id], d_a)
-            facts_b = build_plot_facts(plots_by_id[d_b.plot_id], d_b)
+            facts_a = build_plot_facts(plots_by_id[d_a.plot_id], d_a, storage)
+            facts_b = build_plot_facts(plots_by_id[d_b.plot_id], d_b, storage)
             result = negotiate_pair(facts_a, facts_b, get_claim)
 
             outcomes.append(CoordinatorOutcome(facts_a.plot_id, PlotOutcome.CONTESTED, result.claim_a))
@@ -203,7 +236,7 @@ def run_cluster_with_claims(
 
         if len(contested) % 2 == 1:
             d = contested[-1]
-            facts = build_plot_facts(plots_by_id[d.plot_id], d)
+            facts = build_plot_facts(plots_by_id[d.plot_id], d, storage)
             claim = get_claim(facts, 1, None)
             outcomes.append(CoordinatorOutcome(d.plot_id, PlotOutcome.CONTESTED, claim))
 

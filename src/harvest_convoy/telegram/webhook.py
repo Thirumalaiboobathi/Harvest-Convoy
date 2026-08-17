@@ -7,6 +7,15 @@ Keeps the full EscalationPayload (not just a resolved/not-resolved flag)
 so the resolution message to the losing farmer can state a real, specific
 reason -- "they were bumped last season" or "their grain has been
 standing longer" -- instead of vague "a closer conflict" copy.
+
+Phase 5 (ADR-005 Decision 4): resolution now records a real fairness
+ledger entry. The storage layer's conditional write
+(Storage.put_ledger_entry) is the actual idempotency boundary, not just
+the in-memory _RESOLVED_ESCALATIONS set -- that set is a fast local
+cache, but a second resolution attempt across a process restart (where
+the set is empty again) still can't double-record, because the durable
+ledger write for the loser is attempted first and fails cleanly if it
+already exists.
 """
 
 from __future__ import annotations
@@ -16,6 +25,8 @@ from typing import Callable
 
 from harvest_convoy.agents.contracts import AdvocateClaim, EscalationPayload
 from harvest_convoy.models import Farmer, Plot
+from harvest_convoy.storage import Storage
+from harvest_convoy.storage.fairness import record_bump
 from harvest_convoy.telegram import notify, registration
 from harvest_convoy.telegram.client import TelegramClient
 from harvest_convoy.telegram.registration import IncomingMessage
@@ -24,8 +35,14 @@ logger = logging.getLogger(__name__)
 
 FarmerPlotLookup = Callable[[str], tuple[Farmer, Plot] | None]
 
-# Phase 4 placeholder stores -- see ADR-004 Decision 4. Replaced by
-# DynamoDB in Phase 5; neither survives a process restart.
+# DERIVED, placeholder: days_bumped recorded per lost escalation. Refining
+# this to actual calendar days lost (vs. a flat 1) is a reasonable future
+# improvement, not blocking this phase. See ADR-005 Decision 4.
+DEFAULT_DAYS_BUMPED = 1
+
+# Phase 4 placeholder stores -- see ADR-004 Decision 4. The fast local
+# cache; the real idempotency guarantee is now the storage layer's
+# conditional write (see module docstring).
 _PENDING_ESCALATIONS: dict[str, EscalationPayload] = {}
 _RESOLVED_ESCALATIONS: set[str] = set()
 
@@ -58,8 +75,7 @@ def _resolution_reason(winner_claim: AdvocateClaim, loser_claim: AdvocateClaim) 
 
 def _default_lookup(plot_id: str) -> tuple[Farmer, Plot] | None:
     logger.error(
-        "no farmer/plot lookup wired for webhook.py (Phase 5 not built yet); "
-        "cannot resolve plot_id=%s",
+        "no farmer/plot lookup wired for webhook.py; cannot resolve plot_id=%s",
         plot_id,
     )
     return None
@@ -78,6 +94,8 @@ def parse_callback_data(data: str) -> tuple[str, str, str, str] | None:
 def handle_callback_query(
     client: TelegramClient,
     callback_query: dict,
+    storage: Storage,
+    season_id: str,
     lookup_farmer_for_plot: FarmerPlotLookup = _default_lookup,
 ) -> None:
     callback_query_id = callback_query.get("id", "")
@@ -99,11 +117,59 @@ def handle_callback_query(
         )
         return
 
-    _RESOLVED_ESCALATIONS.add(key)
-
     loser_plot_id = plot_b_id if chosen_plot_id == plot_a_id else plot_a_id
     winner_result = lookup_farmer_for_plot(chosen_plot_id)
     loser_result = lookup_farmer_for_plot(loser_plot_id)
+
+    # The durable idempotency boundary: attempt the loser's ledger write
+    # before doing anything else. If it already exists, this escalation
+    # was already resolved by an earlier (possibly pre-restart) attempt --
+    # treat it exactly like the in-memory-cache hit above, and do not
+    # send a second round of notifications.
+    if loser_result is not None:
+        loser_farmer, _ = loser_result
+        bump_result = record_bump(
+            loser_farmer.farmer_id, season_id,
+            days_bumped=DEFAULT_DAYS_BUMPED, outcome="bumped",
+            cluster_id=cluster_id, plot_id=loser_plot_id,
+            opponent_plot_id=chosen_plot_id, storage=storage,
+        )
+        if not bump_result.success:
+            logger.info(
+                "escalation %s: ledger write already exists (%s) -- "
+                "treating as already resolved, no new notifications sent",
+                key, bump_result.error,
+            )
+            _RESOLVED_ESCALATIONS.add(key)
+            client.answer_callback_query(
+                callback_query_id, "This conflict was already resolved.", show_alert=True
+            )
+            return
+    else:
+        logger.error(
+            "escalation %s: no farmer/plot found for loser %s -- "
+            "cannot record a fairness ledger entry for them",
+            key, loser_plot_id,
+        )
+
+    if winner_result is not None:
+        winner_farmer, _ = winner_result
+        winner_bump = record_bump(
+            winner_farmer.farmer_id, season_id,
+            days_bumped=0, outcome="won",
+            cluster_id=cluster_id, plot_id=chosen_plot_id,
+            opponent_plot_id=loser_plot_id, storage=storage,
+        )
+        if not winner_bump.success:
+            # Not fatal -- the loser's record is the one that matters for
+            # fairness weighting; log and continue to notifications.
+            logger.warning(
+                "escalation %s: winner ledger write failed (%s) -- "
+                "continuing, this is not the idempotency-critical write",
+                key, winner_bump.error,
+            )
+
+    _RESOLVED_ESCALATIONS.add(key)
 
     winner_name = winner_result[0].name if winner_result else "the selected plot"
     client.answer_callback_query(callback_query_id, f"Machine assigned to {winner_name}.")
@@ -167,11 +233,19 @@ def parse_incoming_message(message: dict) -> IncomingMessage:
 def handle_update(
     client: TelegramClient,
     update: dict,
+    storage: Storage,
+    season_id: str,
     lookup_farmer_for_plot: FarmerPlotLookup = _default_lookup,
 ) -> None:
-    """Top-level entrypoint for one Telegram Update payload."""
+    """Top-level entrypoint for one Telegram Update payload. `storage` and
+    `season_id` are required even though only the escalation-callback path
+    uses them -- keeps the signature uniform rather than branching on
+    which fields are needed for which update type.
+    """
     if "callback_query" in update:
-        handle_callback_query(client, update["callback_query"], lookup_farmer_for_plot)
+        handle_callback_query(
+            client, update["callback_query"], storage, season_id, lookup_farmer_for_plot
+        )
         return
 
     message = update.get("message")

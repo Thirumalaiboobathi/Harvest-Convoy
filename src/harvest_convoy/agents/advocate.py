@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import logging
 
-from strands import Agent
+from strands import Agent, tool
 from strands.models.bedrock import BedrockModel
 from strands.models.model import Model
 
 from harvest_convoy.agents.contracts import AdvocateClaim, PlotFacts
-from harvest_convoy.agents.fairness_stub import fairness_lookup
 from harvest_convoy.observability.otel import get_tracer
+from harvest_convoy.storage import Storage, get_storage
+from harvest_convoy.storage.fairness import get_ledger_history
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer(__name__)
@@ -53,6 +54,38 @@ sentence, at most 25 words.
 
 def _build_model() -> Model:
     return BedrockModel(model_id=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION)
+
+
+def _make_fairness_tool(storage: Storage):
+    """Real, storage-backed replacement for the Phase 3 fairness_stub.
+    Bound to a specific Storage instance via closure so the @tool-decorated
+    function the LLM calls still takes only the arguments it should see
+    (farmer_id) -- the storage backend is a wiring detail, not something
+    the model should reason about.
+    """
+
+    @tool
+    def fairness_lookup(farmer_id: str) -> dict:
+        """Look up this farmer's bump history across past seasons. Use
+        this before deciding how hard to argue -- a farmer bumped
+        repeatedly has a stronger fairness claim than one bumped once or
+        never."""
+        history = get_ledger_history(farmer_id, storage)
+        return {
+            "farmer_id": farmer_id,
+            "seasons_recorded": len(history),
+            "bumped_last_season": bool(history and history[0].days_bumped > 0),
+            "history": [
+                {
+                    "season_id": e.season_id,
+                    "days_bumped": e.days_bumped,
+                    "outcome": e.outcome,
+                }
+                for e in history
+            ],
+        }
+
+    return fairness_lookup
 
 
 def _build_prompt(
@@ -97,6 +130,7 @@ def get_advocate_claim(
     facts: PlotFacts,
     *,
     model: Model | None = None,
+    storage: Storage | None = None,
     round_num: int = 1,
     opponent_argument: str | None = None,
 ) -> AdvocateClaim:
@@ -107,6 +141,7 @@ def get_advocate_claim(
     current facts (and, from round 2 on, the opponent's prior argument),
     not a multi-turn conversation with memory.
     """
+    storage = storage or get_storage()
     with tracer.start_as_current_span(
         "advocate.get_claim",
         attributes={"plot_id": facts.plot_id, "round": round_num},
@@ -114,7 +149,7 @@ def get_advocate_claim(
         try:
             agent = Agent(
                 model=model or _build_model(),
-                tools=[fairness_lookup],
+                tools=[_make_fairness_tool(storage)],
                 system_prompt=SYSTEM_PROMPT,
                 structured_output_model=AdvocateClaim,
                 callback_handler=None,

@@ -23,6 +23,30 @@ uv sync --all-groups
 uv run pytest
 ```
 
+## Storage
+
+No AWS account is needed to run this project. By default it uses a plain
+JSON file on disk (`.data/harvest_convoy.json`, created automatically) —
+nothing to install, nothing to configure.
+
+To use real DynamoDB instead (either actual AWS, or DynamoDB Local if you
+have it running), set:
+
+```bash
+export HARVEST_CONVOY_STORAGE=dynamo
+# against real AWS: normal AWS credentials (env vars, ~/.aws/credentials, etc.)
+# against DynamoDB Local instead: also set
+export DYNAMODB_ENDPOINT_URL=http://localhost:8000
+```
+
+Both backends implement the same interface (`storage/interface.py`)
+against the same single-table key scheme — see `docs/adr/ADR-005-persistence-fairness.md`
+for the design. Seed the demo cluster into whichever backend is active:
+
+```bash
+uv run python -m scripts.seed_cluster --write
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -51,6 +51,11 @@ class PlotFacts:
     rain_vulnerability: RainVulnerability
     acres: float
     bumped_last_season: bool
+    weighted_bump_days: float = 0.0  # decayed sum across all recorded
+    # seasons (storage/fairness.py:weighted_bump_days) -- see ADR-005
+    # Decision 4. bumped_last_season stays as the plain fact for
+    # farmer-facing copy; this is what coordinator.py's scoring actually
+    # uses.
 
 
 class AdvocateClaim(BaseModel):
@@ -62,6 +67,7 @@ class AdvocateClaim(BaseModel):
     rain_vulnerability: RainVulnerability
     acres: float = Field(ge=0.0)
     bumped_last_season: bool
+    weighted_bump_days: float = Field(ge=0.0, default=0.0)
     argument: str = Field(description="One sentence, max 25 words.")
     concedes: bool
 
@@ -86,6 +92,7 @@ class AdvocateClaim(BaseModel):
             rain_vulnerability=facts.rain_vulnerability,
             acres=facts.acres,
             bumped_last_season=facts.bumped_last_season,
+            weighted_bump_days=facts.weighted_bump_days,
             argument=argument,
             concedes=concedes,
         )

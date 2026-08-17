@@ -9,9 +9,15 @@ and deterministically.
 from __future__ import annotations
 
 from harvest_convoy.agents.contracts import AdvocateClaim, PlotFacts
-from harvest_convoy.agents.coordinator import negotiate_pair, run_cluster_with_claims
+from harvest_convoy.agents.coordinator import (
+    CLEAR_MARGIN,
+    MAX_FAIRNESS_BONUS,
+    negotiate_pair,
+    run_cluster_with_claims,
+)
 from harvest_convoy.models import Plot
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome
+from harvest_convoy.storage.file_storage import FileStorage
 
 
 def _facts(plot_id: str, **overrides) -> PlotFacts:
@@ -88,26 +94,52 @@ def test_negotiate_pair_escalates_after_max_rounds_when_genuinely_tied() -> None
     assert result.rounds_used == 3
 
 
-def test_negotiate_pair_reargue_uses_fairness_to_break_a_tie() -> None:
-    a = _facts("a", urgency=0.5, bumped_last_season=False)
-    b = _facts("b", urgency=0.5, bumped_last_season=True)
-
-    calls: list[tuple[str, int]] = []
+def test_negotiate_pair_fairness_tilts_a_close_call_but_only_a_close_one() -> None:
+    # a is raw-urgency ahead of b by 0.12 -- under CLEAR_MARGIN (0.15) on
+    # its own, so without fairness this would need extra rounds rather
+    # than resolve in round 1. b's weighted_bump_days=4.0 gives it the
+    # maximum fairness bonus (MAX_FAIRNESS_BONUS, capped at 4*0.01=0.04),
+    # which pushes the effective gap to 0.16 -- just over CLEAR_MARGIN --
+    # flipping the round-1 winner from a to b. This is "tilts a close
+    # call," not "fairness alone decides": see the companion invariant
+    # test below for the case fairness must NOT be able to flip.
+    a = _facts("a", urgency=0.30)
+    b = _facts("b", urgency=0.42, weighted_bump_days=4.0)
+    assert 0.42 - 0.30 < CLEAR_MARGIN  # raw gap alone would not resolve decisively
+    assert 0.42 + MAX_FAIRNESS_BONUS - 0.30 > CLEAR_MARGIN  # boosted gap does
 
     def get_claim(facts, round_num, opponent_argument):
-        calls.append((facts.plot_id, round_num))
         return _claim(
-            facts,
-            argument="claim",
-            concedes=False,
-            bumped_last_season=facts.bumped_last_season,
+            facts, argument="claim", concedes=False,
+            weighted_bump_days=facts.weighted_bump_days,
         )
 
     result = negotiate_pair(a, b, get_claim, max_rounds=3)
 
-    # b's fairness weight (bumped_last_season) breaks the urgency tie.
     assert result.escalated is False
     assert result.winner_plot_id == "b"
+    assert result.rounds_used == 1
+
+
+def test_negotiate_pair_fairness_cannot_flip_an_already_clear_margin() -> None:
+    # a leads by more than CLEAR_MARGIN + MAX_FAIRNESS_BONUS -- no amount
+    # of fairness bonus available to b can flip this. Companion to the
+    # test above: fairness tilts close calls, it does not override a
+    # decisive urgency gap.
+    a = _facts("a", urgency=0.80)
+    b = _facts("b", urgency=0.30, weighted_bump_days=4.0)  # max bonus
+    assert 0.80 - (0.30 + MAX_FAIRNESS_BONUS) > CLEAR_MARGIN
+
+    def get_claim(facts, round_num, opponent_argument):
+        return _claim(
+            facts, argument="claim", concedes=False,
+            weighted_bump_days=facts.weighted_bump_days,
+        )
+
+    result = negotiate_pair(a, b, get_claim, max_rounds=3)
+
+    assert result.escalated is False
+    assert result.winner_plot_id == "a"
 
 
 def _plot(plot_id: str, area_acres: float = 1.0) -> Plot:
@@ -137,7 +169,8 @@ def _decision(plot_id: str, outcome: PlotOutcome, days_past_maturity=None, urgen
     )
 
 
-def test_run_cluster_too_green_plots_all_concede() -> None:
+def test_run_cluster_too_green_plots_all_concede(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "storage.json")
     plots = [_plot("p05"), _plot("p06")]
     decisions = [
         _decision("p05", PlotOutcome.TOO_GREEN),
@@ -147,14 +180,15 @@ def test_run_cluster_too_green_plots_all_concede() -> None:
     def get_claim(facts, round_num, opponent_argument):
         return _claim(facts, argument="not ready", concedes=not facts.is_ready)
 
-    result = run_cluster_with_claims(plots, decisions, "c", get_claim)
+    result = run_cluster_with_claims(plots, decisions, "c", storage, get_claim)
 
     assert len(result.outcomes) == 2
     assert all(o.claim.concedes for o in result.outcomes)
     assert result.escalations == []
 
 
-def test_run_cluster_produces_exactly_one_escalation_for_a_tied_contested_pair() -> None:
+def test_run_cluster_produces_exactly_one_escalation_for_a_tied_contested_pair(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "storage.json")
     plots = [_plot("p01"), _plot("p05"), _plot("p03"), _plot("p04")]
     decisions = [
         _decision("p01", PlotOutcome.FITS, days_past_maturity=17, urgency=0.85),
@@ -171,7 +205,7 @@ def test_run_cluster_produces_exactly_one_escalation_for_a_tied_contested_pair()
             return _claim(facts, argument=f"round {round_num}", concedes=False, urgency_score=0.5)
         return _claim(facts, argument="fits", concedes=False)
 
-    result = run_cluster_with_claims(plots, decisions, "kamatchipuram", get_claim)
+    result = run_cluster_with_claims(plots, decisions, "kamatchipuram", storage, get_claim)
 
     assert len(result.escalations) == 1
     escalation = result.escalations[0]

@@ -23,9 +23,11 @@ too-green, comfortably-ready, and contested plots as of that date.
 
 from __future__ import annotations
 
+import argparse
 from datetime import date
 
 from harvest_convoy.models import Cluster, Farmer, Plot
+from harvest_convoy.storage import Storage, get_storage
 
 VILLAGE_LAT = 9.86500
 VILLAGE_LON = 77.45389
@@ -155,7 +157,33 @@ PLOTS: list[Plot] = [
 ]
 
 
+def seed_into_storage(storage: Storage) -> None:
+    """Write the fixture data above into a real Storage backend. The
+    PLOTS/FARMERS/CLUSTER module-level fixtures stay exactly as they are
+    for every test that imports them directly -- this just persists a
+    copy, it doesn't replace them. See ADR-005 Decision 3."""
+    result = storage.put_cluster(CLUSTER)
+    if not result.success:
+        print(f"  failed to write cluster: {result.error}")
+    for farmer in FARMERS:
+        result = storage.put_farmer(farmer)
+        if not result.success:
+            print(f"  failed to write farmer {farmer.farmer_id}: {result.error}")
+    for plot in PLOTS:
+        result = storage.put_plot(plot)
+        if not result.success:
+            print(f"  failed to write plot {plot.plot_id}: {result.error}")
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--write", action="store_true",
+        help="Write this fixture data into the configured Storage backend "
+        "(HARVEST_CONVOY_STORAGE env var; defaults to FileStorage).",
+    )
+    args = parser.parse_args()
+
     print(f"Cluster: {CLUSTER.name} ({CLUSTER.cluster_id})")
     print(f"Machine capacity: {CLUSTER.machine_capacity_acres_per_day} acres/day")
     print(f"{len(FARMERS)} farmers, {len(PLOTS)} plots")
@@ -165,6 +193,11 @@ def main() -> None:
             f"  {plot.plot_id} ({farmer.name}): {plot.area_acres} acres, "
             f"transplanted {plot.transplant_date}, ({plot.lat:.4f}, {plot.lon:.4f})"
         )
+
+    if args.write:
+        print("\nWriting into storage backend...")
+        seed_into_storage(get_storage())
+        print("Done.")
 
 
 if __name__ == "__main__":
