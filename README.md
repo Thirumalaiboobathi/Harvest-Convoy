@@ -20,41 +20,46 @@ matters and how it's enforced in code, not just convention.
 
 ## Quickstart — zero AWS required
 
-No AWS account, no credentials, no Docker. Everything runs against a local
-JSON file and a scripted (non-LLM) claim provider.
+No AWS account, no AWS credentials, no Docker.
 
 ```bash
 uv sync --all-groups
-uv run python -m scripts.seed_cluster --write
-uv run python -m scripts.trigger_scenario <any_number> --offline
-```
-
-`<any_number>` is a placeholder Telegram chat ID — offline mode never
-makes a network call, so nothing is actually sent anywhere; it prints
-what each of the four message types would say. This walks the seeded
-8-plot Kamatchipuram cluster through one full scheduling pass, including
-a plot-vs-plot negotiation, using a canned claim provider instead of a
-live Bedrock call (labeled `[scripted offline mode]` in the output so
-it's never mistaken for live LLM judgment).
-
-Run the test suite the same way:
-
-```bash
 uv run pytest
 ```
 
-133 tests, no AWS account or network access needed for the default suite
-(a few are marked `network`/`bedrock` and skipped unless you opt in — see
-`pyproject.toml`).
+133 tests pass with genuinely nothing else set up — no `.env`, no
+network access, no credentials of any kind (a handful are marked
+`network`/`bedrock` and skip unless you opt in — see `pyproject.toml`).
+This is the fastest way to confirm the deterministic core (GDD, capacity,
+route, fairness) actually works.
+
+To see the full scheduling pass end to end — including a plot-vs-plot
+negotiation — `scripts/trigger_scenario.py` actually sends real Telegram
+messages, so it needs one piece of free setup even in `--offline` mode
+(it exits immediately without a token; `--offline` only skips the *Bedrock*
+call, not the Telegram send, which is the whole point of the script):
+
+```bash
+cp .env.example .env
+# message @BotFather on Telegram, /newbot, paste the token into .env — ~1 minute, no AWS involved
+uv run python -m scripts.seed_cluster --write
+uv run python -m scripts.trigger_scenario <your_telegram_chat_id> --offline
+```
+
+Message your own bot once first so it has a chat to reply to, then check
+your phone — the four message types (harvest scheduled, not-ready, route
+summary, escalation) arrive for real. `--offline` mode uses a canned
+claim provider instead of live Bedrock, labeled `[scripted offline mode]`
+in the arguments shown so it's never mistaken for live LLM judgment.
 
 ## Full setup — with AWS
 
 ### Local run against real Bedrock
 
 ```bash
-cp .env.example .env
-# fill in TELEGRAM_BOT_TOKEN from @BotFather (only needed for real Telegram sends)
-export AWS credentials however you normally do (env vars, ~/.aws/credentials, SSO, ...)
+cp .env.example .env   # fill in TELEGRAM_BOT_TOKEN from @BotFather
+# then set AWS credentials however you normally do: env vars, ~/.aws/credentials, SSO, etc.
+uv run python -m scripts.seed_cluster --write
 uv run python -m scripts.trigger_scenario <your_real_chat_id>
 ```
 
