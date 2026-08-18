@@ -47,6 +47,7 @@ class PlotOutcome(str, Enum):
     TOO_GREEN = "too_green"  # below maturity GDD -- excluded from contention entirely
     FITS = "fits"  # ready, and the capacity budget covers it
     CONTESTED = "contested"  # ready, but the budget ran out before it
+    HARVESTED = "harvested"  # already dispatched this season -- excluded, not ranked. See ADR-009 Part 1.5.
 
 
 @dataclass(frozen=True)
@@ -114,10 +115,18 @@ def solve(
     forecast: list[ForecastDay],
     rain_threshold_mm: float,
     today: date,
+    *,
+    harvested_plot_ids: frozenset[str] = frozenset(),
 ) -> list[PlotDecision]:
     """Full scheduling pass over a cluster's plots for one weather trigger.
 
-    1. Assess every plot: TOO_GREEN plots are excluded from everything below.
+    0. Plots in `harvested_plot_ids` (already dispatched earlier this
+       season -- ADR-009 Part 1.5) are excluded from everything below,
+       the same way TOO_GREEN plots are excluded: a distinct outcome
+       decided before ranking runs, not a plot ranked last. No
+       `assess_plot()` call and no `plot_days` lookup happens for them.
+    1. Assess every remaining plot: TOO_GREEN plots are excluded from
+       everything below too.
     2. Rank ready plots by urgency (most decayed first; ties broken by
        days_past_maturity, then plot_id, for determinism).
     3. Greedily allocate acreage against the capacity budget computed from
@@ -126,8 +135,9 @@ def solve(
     4. Order the FITS plots into a route by straight-line distance from the
        cluster's machine start position, and record each one's position.
 
-    Returns one PlotDecision per input plot, sorted by plot_id so the
-    result shape doesn't depend on dict/set iteration order.
+    Returns one PlotDecision per input plot (including harvested ones),
+    sorted by plot_id so the result shape doesn't depend on dict/set
+    iteration order.
 
     Maturity threshold resolution (ADR-008 Decision 2): uses
     `cluster.maturity_gdd_override` if this cluster has been calibrated
@@ -150,9 +160,23 @@ def solve(
             cluster.cluster_id, maturity_gdd,
         )
 
+    harvested = [
+        PlotDecision(
+            plot_id=p.plot_id,
+            outcome=PlotOutcome.HARVESTED,
+            accumulated_gdd=0.0,
+            days_past_maturity=None,
+            urgency=0.0,
+            route_position=None,
+        )
+        for p in plots
+        if p.plot_id in harvested_plot_ids
+    ]
+    schedulable = [p for p in plots if p.plot_id not in harvested_plot_ids]
+
     assessed = [
         assess_plot(p, plot_days[p.plot_id], today, maturity_gdd=maturity_gdd)
-        for p in plots
+        for p in schedulable
     ]
 
     ready = [d for d in assessed if d.outcome == PlotOutcome.FITS]
@@ -209,5 +233,5 @@ def solve(
         for d in fits
     ]
 
-    result = too_green + fits_routed + contested
+    result = too_green + fits_routed + contested + harvested
     return sorted(result, key=lambda d: d.plot_id)

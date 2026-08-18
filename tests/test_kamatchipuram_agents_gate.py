@@ -80,7 +80,8 @@ def _run_gate_scenario(storage):
         today=REFERENCE_TODAY,
     )
     return run_cluster_with_claims(
-        seed_cluster.PLOTS, decisions, "kamatchipuram", storage, _truthful_claim
+        seed_cluster.PLOTS, decisions, "kamatchipuram", storage,
+        "2026-kuruvai", REFERENCE_TODAY, _truthful_claim,
     )
 
 

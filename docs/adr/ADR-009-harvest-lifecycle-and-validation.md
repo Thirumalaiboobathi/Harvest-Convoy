@@ -1,10 +1,11 @@
-# ADR-009: Historical Backtest, Harvest Confirmation, Maturity Projection, Post-Harvest Drying Alert
+# ADR-009: Historical Backtest, Plot Harvest Lifecycle, Harvest Confirmation, Maturity Projection, Post-Harvest Drying Alert
 
-- Status: **Approved, with adjustments (2026-08-18). Implementing Part 1
-  now; stop-and-report after each part, per-part sign-off before the
-  next; nothing touches the deployed AgentCore artifact unless and until
-  separately approved.**
-- Date: 2026-08-18
+- Status: **Approved, with adjustments (2026-08-18). Part 1 implemented
+  and committed. Part 1.5 (plot harvest lifecycle) added after Part 1's
+  backtest surfaced a real correctness bug in `solve()` — see below —
+  and implemented next, before Part 2. Nothing touches the deployed
+  AgentCore artifact unless and until separately approved.**
+- Date: 2026-08-18 (Part 1.5 addendum same day, after Part 1's real run)
 
 ## Context
 
@@ -274,12 +275,233 @@ of the season. This is a real property of the deployed system, not a
 backtest artifact (the real watcher calls `solve()` fresh every trigger
 day too) — it was only surfaced now because this is the first time the
 solver has been run across ~170 sequential trigger days instead of a
-single-run demo. It's related to, but not fixed by, Part 2's
-confirmation loop below: that loop records whether a harvest happened,
-but as scoped does not remove a confirmed plot from future watcher runs.
-Not fixing this now — out of scope for a validation script — but
-disclosed here, and in the README, rather than left for a judge to find
-first. Full tables and narrative in the README's new section.
+single-run demo. **Not a validation-script problem to shrug off — see
+Part 1.5 immediately below, which fixes this in the core scheduling
+loop itself, before any of Parts 2–4 are built.** Full tables and
+narrative (both the buggy and the fixed run) are in the README's
+backtest section.
+
+---
+
+## Part 1.5: plot harvest lifecycle
+
+**Added after Part 1's real run, before Part 2 — a correctness bug in
+`solve()`, not a stylistic addition, and it blocks trusting Parts 2–4's
+design on top of an unfixed scheduling core.**
+
+`solve()` has no concept of "this plot was already harvested" — it
+recomputes every plot's classification from scratch on every trigger
+day, reading whatever `Storage.get_plots_for_cluster()` returns. Every
+demo and every gate test so far has been a single trigger on a single
+day, so this never surfaced. Part 1's backtest ran ~170 sequential
+trigger days per cluster and found it immediately: 5/8 Kamatchipuram
+plots and 6/8 Naducauvery plots were first classified FITS, then
+regressed to CONTESTED later in the same season, because a plot that
+fit early keeps re-entering capacity contention against every
+later-maturing plot for the rest of the season.
+
+Two real production consequences, not just a backtest artifact:
+
+1. **A farmer whose crop is already in gets messaged again** —
+   `notify.send_harvest_scheduled` has no memory between trigger days.
+2. **More seriously: the capacity budget is consumed by plots that no
+   longer need it.** `scheduling/solver.py:solve()`'s greedy allocation
+   (`ready_ranked`, sorted by urgency) ranks an already-harvested plot
+   as if it still needed a slot, which means it can out-rank — and take
+   budget away from — a genuinely urgent unharvested plot that should
+   have won that slot instead. This is not a cosmetic bug; it can
+   produce a wrong schedule.
+
+### Decision A: new persisted state, keyed per plot per season
+
+No new dataclass entity — this is a boolean-per-key marker, the same
+shape as `Storage.get/set_watcher_last_run`'s idempotency marker, not a
+rich record like `LedgerEntry`. Three new `Storage` Protocol methods
+(`storage/interface.py`):
+
+```python
+def mark_plot_harvested(
+    self, plot_id: str, cluster_id: str, season_id: str, dispatched_at: str,
+) -> StorageResult:
+    """Overwrite semantics, like every put_* here except put_ledger_entry
+    -- a plot legitimately marked twice (e.g. a retried write) should
+    just update dispatched_at, not error."""
+
+def clear_plot_harvest(self, plot_id: str, cluster_id: str, season_id: str) -> StorageResult:
+    """Removes the marker -- returns the plot to the schedulable pool on
+    solve()'s next call. Safe on a plot never marked (no-op, not an
+    error). See Decision E for who calls this today, and the Part 2
+    reversal hook this is designed for."""
+
+def get_harvested_plot_ids(self, cluster_id: str, season_id: str) -> set[str]:
+    """Every plot_id marked harvested for this cluster/season. Empty set
+    for a season with no records -- see Decision D."""
+```
+
+`DynamoStorage` stores these as `PK=PLOT#{plot_id}, SK=HARVEST#{season_id}`,
+`GSI1PK=CLUSTER#{cluster_id}, GSI1SK=HARVEST#{season_id}#{plot_id}` —
+reusing the exact `GSI1`/`_query_gsi1` machinery `Farmer`/`Plot` already
+use for their own `CLUSTER#{cluster_id}` lookups, no schema change.
+`FileStorage` adds one more top-level dict, `harvest[cluster_id][season_id][plot_id] = dispatched_at`.
+
+### Decision B: `solve()` gains a fourth outcome, `HARVESTED` — excluded, not ranked
+
+```python
+class PlotOutcome(str, Enum):
+    TOO_GREEN = "too_green"
+    FITS = "fits"
+    CONTESTED = "contested"
+    HARVESTED = "harvested"  # already dispatched this season
+```
+
+`solve()` gains a keyword-only `harvested_plot_ids: frozenset[str] = frozenset()`
+parameter. Every plot in it gets a `PlotDecision(outcome=HARVESTED, ...)`
+built directly — no `assess_plot()` call, no GDD/urgency computed, no
+`plot_days` lookup needed for it at all — and is removed from the set
+that `assess_plot`/ranking/capacity allocation ever sees. This is
+structurally identical to how `TOO_GREEN` already works (a plot excluded
+from contention before ranking runs, not a plot ranked last), which is
+exactly the shape you asked for. `solve()` still returns one
+`PlotDecision` per input plot (the existing contract), so a caller can
+always see a harvested plot's status in the result — it just never
+competes for a route position or a budget acre.
+
+Because harvested plots need no weather data, `watcher.py` fetches
+`harvested_plot_ids` from storage *before* calling
+`get_daily_temperatures`, and skips the weather fetch for them entirely
+— one fewer Open-Meteo call per already-harvested plot, every day, for
+the rest of the season it's excluded.
+
+### Decision C: the coordinator marks the plot harvested at dispatch — not Part 2's confirmation
+
+Per your instruction, this is deliberately not coupled to Part 2.
+`agents/coordinator.py:run_cluster`/`run_cluster_with_claims` gain two
+new required parameters, `season_id: str` and `today: date` (both
+already resolved by `watcher.py` before it calls in — a threading
+change, not a new dependency). Inside the existing
+`for d in too_green + fits:` loop, immediately after a `FITS` outcome is
+processed, the coordinator calls
+`storage.mark_plot_harvested(d.plot_id, cluster_id, season_id, dispatched_at=today.isoformat())`.
+This is the exact scheduling fact the coordinator already has in hand —
+"solve() says this plot fits, so the machine is going there this
+run" — nothing about Part 2's farmer confirmation is involved, and
+nothing here waits on it. A `CONTESTED` plot that wins a negotiation
+round is *not* marked harvested — negotiation only sets priority for a
+future capacity opening (per this file's own docstring: "it does not
+manufacture capacity Phase 2's budget didn't allocate"), so it correctly
+stays `CONTESTED`, still fully in future contention, exactly as before.
+
+### Decision D: season boundary — there is no separate `Season` entity, and that's fine
+
+This codebase has no `Season` object with an explicit start/end date;
+`season_id` is an opaque string threaded through every call
+(`LedgerEntry`, and now this). "Season boundary resets the state" is
+therefore automatic by construction: `get_harvested_plot_ids(cluster_id,
+"2026-samba")` for a season with zero prior records simply returns an
+empty set — nothing to reset, nothing to migrate, no special-cased
+"first run of a new season" branch anywhere. A plot harvested under
+`season_id="2026-kuruvai"` is unconditionally schedulable again under
+`season_id="2026-samba"` because the two season_ids never share a
+storage key. Documented here explicitly so "no boundary defined" reads
+as "handled by construction," not "unhandled."
+
+### Decision E: failure handling, and the reversal hook for Part 2
+
+**A plot marked harvested that shouldn't have been** (operator
+correction, e.g. a false trigger or a data-entry mistake upstream):
+`clear_plot_harvest` is the fix, callable today. No Telegram surface for
+it — building a farmer/operator-facing command wasn't asked for and
+isn't needed for this to be a real, usable fix; a minimal
+`scripts/clear_plot_harvest.py` (same `--cluster-id`/`--season-id`/
+`--plot-id` shape as this project's other maintenance scripts) exposes
+it without anyone touching DynamoDB directly.
+
+**A plot whose state write fails mid-run**: `mark_plot_harvested`
+returns the same `StorageResult` every other write does. On failure,
+the coordinator logs a loud, explicit warning (matching
+`solve()`'s existing `MATURITY THRESHOLD FALLBACK` convention) and
+*continues* — it does not abort the trigger run over one failed write.
+Consequence, stated plainly: that one plot's harvested status isn't
+persisted, so it's eligible to be reassessed and re-notified on the next
+trigger day — the same double-notification Part 1.5 exists to reduce,
+recurring for just that one plot, not a crash or data corruption. Safe
+degrade, not silent data loss (the failure is logged, not swallowed).
+
+**The Part 2 reversal hook, designed now, not implemented**: when Part 2
+lands, a farmer reporting "the machine never came" should call
+`clear_plot_harvest` (returning the plot to the schedulable pool) *and*
+credit the fairness ledger — both already-designed operations, not new
+ones. Nothing in Part 2's design is built yet; this ADR only confirms
+the interface Part 2 will call is already clean and already tested.
+
+### Decision F: re-running the backtest without Storage or the coordinator
+
+Part 1's script deliberately never touches `Storage` and never calls the
+coordinator (no Bedrock, no LLM calls — see Part 1's Decision 3). It
+can't fetch `harvested_plot_ids` from a real backend the way `watcher.py`
+now does. Instead it keeps a local, in-memory `set[str]` per
+cluster/season backtest run (never persisted, discarded at the end of
+each cluster's simulation — the backtest's own stand-in for "one
+season's worth of storage state"): after each trigger day's `solve()`
+call, every plot decided `FITS` that day is added to the set, and the
+set is passed as `solve()`'s `harvested_plot_ids` on every subsequent
+day. This exercises the exact same `solve()` code path production now
+uses, without needing a real `Storage` backend or any LLM calls — the
+backtest stays exactly as "pure verification of the deterministic core"
+as Part 1 first described it.
+
+### Tests
+
+`tests/test_solver.py` (or wherever solver tests already live): a
+harvested plot is excluded from `ready`/ranking entirely, never appears
+in `fits`/`contested`, still appears exactly once in the returned list
+with outcome `HARVESTED`; a harvested plot never consumes capacity
+budget that an unharvested urgent plot needed (the actual bug, tested
+directly: construct a case where, without the fix, a harvested plot
+would have out-ranked a genuinely urgent one for the last budget slot).
+`tests/test_coordinator.py`: a `FITS` decision triggers
+`mark_plot_harvested`; a `CONTESTED`-negotiation winner does not;
+a failed write logs and doesn't raise (a `FileStorage` subclass whose
+`mark_plot_harvested` always fails, same "no hand-rolled Storage fake
+needed" approach the rest of this file already uses).
+`tests/test_file_storage.py`: mark/clear/get round-trip, a fresh
+season_id returns an empty set, `clear_plot_harvest` on an unmarked plot
+is a no-op success, state survives a reload. **Not** adding
+`DynamoStorage`-specific round-trip tests for these methods — this
+project's existing, disclosed practice
+(`tests/test_dynamo_storage.py`'s own docstring: "No real AWS table is
+created or used by anything in this file... FileStorage is what every
+other test in this suite actually exercises") already doesn't test
+`get_cluster`/`put_cluster`/etc. against a mocked table, and `moto`
+isn't a project dependency. Adding table-mocked tests for only the new
+methods, while every existing `DynamoStorage` CRUD method stays
+untested that way, would be inconsistent scope creep, not a fix — this
+is a pre-existing, already-disclosed gap, not one Part 1.5 introduces.
+
+### Re-run results
+
+See the README's backtest section for the full before/after tables —
+both runs are kept side by side there, not replaced, per your
+instruction. Summary of the real re-run, same fixture data, same real
+2025 weather, only `solve()` changed:
+
+- **Kamatchipuram**: CONTESTED days 59 → **3**. All 5 plots whose first
+  ready trigger was FITS regressed to CONTESTED before the fix (5 of 5);
+  0 of 5 regress after.
+- **Naducauvery**: CONTESTED days 65 → **6**. All 6 plots whose first
+  ready trigger was FITS regressed before the fix (6 of 6); 0 of 6
+  regress after.
+- Across both clusters: 11 of 11 plots that ever reached FITS regressed
+  to CONTESTED before the fix — this was not an edge case, it was what
+  happened to every plot that got far enough to matter. 0 of 11 regress
+  now; every plot that fits ends the season `harvested` instead.
+- The remaining CONTESTED days (3 and 6) are genuine capacity
+  contention — several plots ready at once before earlier ones cleared
+  the pool — not a residual bug. Some plots that were CONTESTED on
+  their *first* ready trigger (p02/p07/p08, nc-p01/nc-p05) later became
+  `harvested` anyway once capacity freed up — the fairness/priority
+  mechanism working as intended, only visible now that plots correctly
+  leave contention for good instead of piling back up in it.
 
 ---
 

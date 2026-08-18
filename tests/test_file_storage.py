@@ -201,3 +201,62 @@ def test_legacy_cluster_record_without_operator_language_key_defaults_to_tamil(t
     cluster = reloaded.get_cluster("legacyc2")
     assert cluster is not None
     assert cluster.operator_language == "ta"
+
+
+# --- Plot harvest lifecycle -- ADR-009 Part 1.5 ---
+
+def test_mark_and_get_harvested_plot_ids_round_trips(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.mark_plot_harvested("p01", "c1", "2026-kuruvai", dispatched_at="2026-08-16")
+    storage.mark_plot_harvested("p02", "c1", "2026-kuruvai", dispatched_at="2026-08-16")
+
+    assert storage.get_harvested_plot_ids("c1", "2026-kuruvai") == {"p01", "p02"}
+
+
+def test_a_season_with_no_records_returns_an_empty_set(tmp_path) -> None:
+    """No separate Season entity -- season_id is just an opaque string, so
+    a fresh one has no prior harvest state by construction. See ADR-009
+    Part 1.5, Decision D."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage.mark_plot_harvested("p01", "c1", "2026-kuruvai", dispatched_at="2026-08-16")
+
+    assert storage.get_harvested_plot_ids("c1", "2026-samba") == set()
+    assert storage.get_harvested_plot_ids("unknown-cluster", "2026-kuruvai") == set()
+
+
+def test_clear_plot_harvest_returns_a_plot_to_the_schedulable_pool(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.mark_plot_harvested("p01", "c1", "2026-kuruvai", dispatched_at="2026-08-16")
+
+    result = storage.clear_plot_harvest("p01", "c1", "2026-kuruvai")
+
+    assert result.success
+    assert storage.get_harvested_plot_ids("c1", "2026-kuruvai") == set()
+
+
+def test_clear_plot_harvest_on_an_unmarked_plot_is_a_no_op_success(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+
+    result = storage.clear_plot_harvest("never-marked", "c1", "2026-kuruvai")
+
+    assert result.success
+    assert storage.get_harvested_plot_ids("c1", "2026-kuruvai") == set()
+
+
+def test_mark_plot_harvested_is_overwrite_not_error_on_a_second_call(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.mark_plot_harvested("p01", "c1", "2026-kuruvai", dispatched_at="2026-08-16")
+
+    result = storage.mark_plot_harvested("p01", "c1", "2026-kuruvai", dispatched_at="2026-08-17")
+
+    assert result.success
+    assert storage.get_harvested_plot_ids("c1", "2026-kuruvai") == {"p01"}
+
+
+def test_harvest_state_persists_across_a_reload(tmp_path) -> None:
+    path = tmp_path / "s.json"
+    storage = FileStorage(path)
+    storage.mark_plot_harvested("p01", "c1", "2026-kuruvai", dispatched_at="2026-08-16")
+
+    reloaded = FileStorage(path)
+    assert reloaded.get_harvested_plot_ids("c1", "2026-kuruvai") == {"p01"}

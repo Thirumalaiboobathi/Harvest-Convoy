@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date
 from typing import Callable
 
 from harvest_convoy.agents.advocate import get_advocate_claim
@@ -186,6 +187,8 @@ def run_cluster(
     decisions: list[PlotDecision],
     cluster_id: str,
     storage: Storage,
+    season_id: str,
+    today: date,
     *,
     model=None,
 ) -> ClusterResult:
@@ -197,7 +200,9 @@ def run_cluster(
             round_num=round_num, opponent_argument=opponent_argument,
         )
 
-    return run_cluster_with_claims(plots, decisions, cluster_id, storage, default_get_claim)
+    return run_cluster_with_claims(
+        plots, decisions, cluster_id, storage, season_id, today, default_get_claim
+    )
 
 
 def run_cluster_with_claims(
@@ -205,10 +210,18 @@ def run_cluster_with_claims(
     decisions: list[PlotDecision],
     cluster_id: str,
     storage: Storage,
+    season_id: str,
+    today: date,
     get_claim: ClaimProvider,
 ) -> ClusterResult:
     """Same orchestration, with an injectable claim provider -- used for
-    deterministic tests and by run_cluster() for the real agent path."""
+    deterministic tests and by run_cluster() for the real agent path.
+
+    season_id/today (ADR-009 Part 1.5): needed to mark a FITS plot
+    harvested at the point it's dispatched -- see the loop below. Both
+    are already resolved by watcher.py before it calls in here, so this
+    is a threading change, not a new dependency.
+    """
     plots_by_id = {p.plot_id: p for p in plots}
 
     with tracer.start_as_current_span(
@@ -229,6 +242,23 @@ def run_cluster_with_claims(
             facts = build_plot_facts(plots_by_id[d.plot_id], d, storage)
             claim = get_claim(facts, 1, None)
             outcomes.append(CoordinatorOutcome(d.plot_id, d.outcome, claim))
+
+            if d.outcome == PlotOutcome.FITS:
+                # The coordinator dispatching a plot IS the harvested
+                # signal -- ADR-009 Part 1.5. Deliberately not coupled to
+                # Part 2's farmer confirmation, which is a separate,
+                # sometimes-absent signal that arrives later, if at all.
+                mark_result = storage.mark_plot_harvested(
+                    d.plot_id, cluster_id, season_id, dispatched_at=today.isoformat()
+                )
+                if not mark_result.success:
+                    logger.error(
+                        "HARVEST STATE WRITE FAILED: plot=%s cluster=%s "
+                        "season=%s -- not persisted, so this plot remains "
+                        "eligible to be reassessed and re-notified on the "
+                        "next trigger day: %s",
+                        d.plot_id, cluster_id, season_id, mark_result.error,
+                    )
 
         for i in range(0, len(contested) - 1, 2):
             d_a, d_b = contested[i], contested[i + 1]

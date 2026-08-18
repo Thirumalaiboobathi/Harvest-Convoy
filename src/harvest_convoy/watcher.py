@@ -133,6 +133,14 @@ def _run_daily_watch_one(
         storage.set_watcher_last_run(cluster_id, today.isoformat())
         return {"cluster_id": cluster_id, "date": today.isoformat(), "status": "no_plots"}
 
+    harvested_plot_ids = storage.get_harvested_plot_ids(cluster_id, season_id)
+    if harvested_plot_ids:
+        logger.info(
+            "watcher: cluster=%s excluding %d already-harvested plot(s) "
+            "this season, no weather fetched for them: %s",
+            cluster_id, len(harvested_plot_ids), sorted(harvested_plot_ids),
+        )
+
     try:
         forecast = get_precipitation_forecast(
             cluster.machine_start_lat,
@@ -143,6 +151,7 @@ def _run_daily_watch_one(
         plot_days = {
             p.plot_id: get_daily_temperatures(p.lat, p.lon, p.transplant_date, today)
             for p in plots
+            if p.plot_id not in harvested_plot_ids
         }
     except WeatherError as exc:
         logger.error(
@@ -168,11 +177,14 @@ def _run_daily_watch_one(
         decisions = solve(
             plots, plot_days, cluster, forecast,
             rain_threshold_mm=RAIN_THRESHOLD_MM, today=today,
+            harvested_plot_ids=frozenset(harvested_plot_ids),
         )
         if get_claim is not None:
-            result = run_cluster_with_claims(plots, decisions, cluster_id, storage, get_claim)
+            result = run_cluster_with_claims(
+                plots, decisions, cluster_id, storage, season_id, today, get_claim
+            )
         else:
-            result = run_cluster(plots, decisions, cluster_id, storage)
+            result = run_cluster(plots, decisions, cluster_id, storage, season_id, today)
 
         farmers_by_id = {f.farmer_id: f for f in storage.get_farmers_for_cluster(cluster_id)}
         plots_by_id = {p.plot_id: p for p in plots}

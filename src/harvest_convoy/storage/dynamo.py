@@ -233,6 +233,42 @@ class DynamoStorage:
         }
         return self._put(item)
 
+    # --- Plot harvest lifecycle -- ADR-009 Part 1.5 ---
+
+    def mark_plot_harvested(
+        self, plot_id: str, cluster_id: str, season_id: str, dispatched_at: str
+    ) -> StorageResult:
+        item = {
+            "PK": f"PLOT#{plot_id}",
+            "SK": f"HARVEST#{season_id}",
+            "GSI1PK": f"CLUSTER#{cluster_id}",
+            "GSI1SK": f"HARVEST#{season_id}#{plot_id}",
+            "plot_id": plot_id,
+            "cluster_id": cluster_id,
+            "season_id": season_id,
+            "dispatched_at": dispatched_at,
+        }
+        return self._put(item)
+
+    def clear_plot_harvest(
+        self, plot_id: str, cluster_id: str, season_id: str
+    ) -> StorageResult:
+        try:
+            self._table.delete_item(
+                Key={"PK": f"PLOT#{plot_id}", "SK": f"HARVEST#{season_id}"}
+            )
+            return StorageResult(success=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "clear_plot_harvest(%s, %s, %s) failed: %s",
+                plot_id, cluster_id, season_id, exc,
+            )
+            return StorageResult(success=False, error=str(exc))
+
+    def get_harvested_plot_ids(self, cluster_id: str, season_id: str) -> set[str]:
+        items = self._query_gsi1(cluster_id, f"HARVEST#{season_id}#")
+        return {i["plot_id"] for i in items}
+
     # --- internals ---
 
     def _put(self, item: dict) -> StorageResult:

@@ -21,6 +21,11 @@ from harvest_convoy.agents.coordinator import (
 from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome
 from harvest_convoy.storage.file_storage import FileStorage
+from harvest_convoy.storage.interface import StorageResult
+
+
+TEST_SEASON_ID = "2026-kuruvai"
+TEST_TODAY = date(2026, 8, 16)
 
 
 def _facts(plot_id: str, **overrides) -> PlotFacts:
@@ -225,7 +230,9 @@ def test_run_cluster_too_green_plots_all_concede(tmp_path) -> None:
     def get_claim(facts, round_num, opponent_argument):
         return _claim(facts, argument="not ready", concedes=not facts.is_ready)
 
-    result = run_cluster_with_claims(plots, decisions, "c", storage, get_claim)
+    result = run_cluster_with_claims(
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+    )
 
     assert len(result.outcomes) == 2
     assert all(o.claim.concedes for o in result.outcomes)
@@ -250,7 +257,9 @@ def test_run_cluster_produces_exactly_one_escalation_for_a_tied_contested_pair(t
             return _claim(facts, argument=f"round {round_num}", concedes=False, urgency_score=0.5)
         return _claim(facts, argument="fits", concedes=False)
 
-    result = run_cluster_with_claims(plots, decisions, "kamatchipuram", storage, get_claim)
+    result = run_cluster_with_claims(
+        plots, decisions, "kamatchipuram", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+    )
 
     assert len(result.escalations) == 1
     escalation = result.escalations[0]
@@ -259,3 +268,90 @@ def test_run_cluster_produces_exactly_one_escalation_for_a_tied_contested_pair(t
 
     too_green_outcomes = [o for o in result.outcomes if o.plot_id == "p05"]
     assert too_green_outcomes[0].claim.concedes is True
+
+
+# --- ADR-009 Part 1.5: plot harvest lifecycle -- coordinator marks the
+# plot harvested at dispatch, deliberately not coupled to Part 2's
+# (not-yet-built) farmer confirmation. ---
+
+class _FailingMarkStorage(FileStorage):
+    """Wraps a real FileStorage but makes every mark_plot_harvested call
+    fail, to test the coordinator's degrade-and-log path without needing
+    a hand-rolled fake for the rest of the Storage surface."""
+
+    def mark_plot_harvested(self, plot_id, cluster_id, season_id, dispatched_at):
+        return StorageResult(success=False, error="simulated write failure")
+
+
+def test_run_cluster_marks_a_fits_plot_harvested(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "storage.json")
+    plots = [_plot("p01")]
+    decisions = [_decision("p01", PlotOutcome.FITS, days_past_maturity=5, urgency=0.5)]
+
+    def get_claim(facts, round_num, opponent_argument):
+        return _claim(facts, argument="fits", concedes=False)
+
+    run_cluster_with_claims(
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+    )
+
+    assert storage.get_harvested_plot_ids("c", TEST_SEASON_ID) == {"p01"}
+
+
+def test_run_cluster_does_not_mark_too_green_plots_harvested(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "storage.json")
+    plots = [_plot("p05")]
+    decisions = [_decision("p05", PlotOutcome.TOO_GREEN)]
+
+    def get_claim(facts, round_num, opponent_argument):
+        return _claim(facts, argument="not ready", concedes=True)
+
+    run_cluster_with_claims(
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+    )
+
+    assert storage.get_harvested_plot_ids("c", TEST_SEASON_ID) == set()
+
+
+def test_run_cluster_does_not_mark_a_contested_negotiation_winner_harvested(tmp_path) -> None:
+    """Winning a negotiation only sets priority for a future capacity
+    opening -- it does not manufacture capacity, so the winner must stay
+    CONTESTED and unmarked, exactly as before Part 1.5."""
+    storage = FileStorage(tmp_path / "storage.json")
+    plots = [_plot("p03"), _plot("p04")]
+    decisions = [
+        _decision("p03", PlotOutcome.CONTESTED, days_past_maturity=10, urgency=0.6),
+        _decision("p04", PlotOutcome.CONTESTED, days_past_maturity=2, urgency=0.1),
+    ]
+
+    def get_claim(facts, round_num, opponent_argument):
+        return _claim(facts, argument="contesting", concedes=False)
+
+    result = run_cluster_with_claims(
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+    )
+
+    assert result.resolved_negotiations == [("p03", "p04")]
+    assert storage.get_harvested_plot_ids("c", TEST_SEASON_ID) == set()
+
+
+def test_run_cluster_logs_and_continues_when_the_harvest_write_fails(tmp_path, caplog) -> None:
+    import logging
+
+    storage = _FailingMarkStorage(tmp_path / "storage.json")
+    plots = [_plot("p01")]
+    decisions = [_decision("p01", PlotOutcome.FITS, days_past_maturity=5, urgency=0.5)]
+
+    def get_claim(facts, round_num, opponent_argument):
+        return _claim(facts, argument="fits", concedes=False)
+
+    with caplog.at_level(logging.ERROR):
+        result = run_cluster_with_claims(
+            plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+        )
+
+    # Never raises -- the trigger run completes, the FITS outcome still
+    # reaches the farmer, only the harvest-state write was lost.
+    assert len(result.outcomes) == 1
+    assert result.outcomes[0].outcome == PlotOutcome.FITS
+    assert any("HARVEST STATE WRITE FAILED" in r.message for r in caplog.records)

@@ -119,9 +119,22 @@ def test_narrative_flags_plots_that_regressed_from_fits_to_contested() -> None:
     assert "p01" in narrative
 
 
-def test_narrative_omits_regression_line_when_nothing_regressed() -> None:
+def test_narrative_confirms_no_regression_when_a_plot_stays_fits() -> None:
+    """Post-Part-1.5 shape: a plot that reached FITS and never regressed
+    gets a positive confirmation line, not silence -- the fix's absence
+    of a bug is itself worth stating, not just the presence of one."""
     result = _cluster_backtest()
     result.trigger_days = {"2025-07-28": {"p01": PlotOutcome.FITS}}
+
+    narrative = format_narrative(result)
+
+    assert "first appeared as FITS but end" not in narrative
+    assert "0 of 1 plot(s) that reached FITS regressed to CONTESTED" in narrative
+
+
+def test_narrative_has_no_regression_line_at_all_when_nothing_ever_fit() -> None:
+    result = _cluster_backtest()
+    result.trigger_days = {"2025-06-01": {"p01": PlotOutcome.TOO_GREEN}}
 
     narrative = format_narrative(result)
 

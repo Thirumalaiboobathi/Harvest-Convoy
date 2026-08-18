@@ -304,7 +304,16 @@ also doubles as a second independent proof point for per-cluster
 calibration, on a different 5-year window than the one
 [ADR-008](docs/adr/ADR-008-tn-generalization-and-tamil.md) originally used.
 
-### Kamatchipuram
+### Before Part 1.5: the FITS→CONTESTED regression bug
+
+The backtest's first real run used `scheduling/solver.py:solve()` as it
+existed at the time — no concept of a harvested plot. Kept here
+unedited, not quietly replaced by the fixed run below, because **a bug
+found by backtesting and fixed is stronger evidence than a clean run
+ever would be.**
+
+**Kamatchipuram** (172 trigger days, 2025-05-01 to 2025-12-05,
+threshold 1637.0 GDD, 59 days with a CONTESTED plot):
 
 | Plot | Farmer | Area (ac) | Transplanted | Projected Maturity | First Ready Trigger | Final Outcome |
 |---|---|---|---|---|---|---|
@@ -317,12 +326,9 @@ calibration, on a different 5-year window than the one
 | p07 | Karthik Murugan | 1.5 | 2025-07-20 | 2025-10-19 | 2025-10-19 (contested) | contested |
 | p08 | Valli Chinnasamy | 1.0 | 2025-07-28 | 2025-10-27 | 2025-10-27 (contested) | contested |
 
-172 trigger day(s) in the simulated window (2025-05-01 to 2025-12-05).
-Calibrated maturity threshold: 1637.0 GDD. 59 of those days had at least
-one CONTESTED plot — ready, but the rain-shortened capacity budget
-didn't cover it.
-
-### Naducauvery
+**Naducauvery** (172 trigger days, 2025-05-10 to 2025-12-07, threshold
+1931.4 GDD — ~10.6% above Kamatchipuram's, consistent with ADR-008's
+original comparison — 65 days with a CONTESTED plot):
 
 | Plot | Farmer | Area (ac) | Transplanted | Projected Maturity | First Ready Trigger | Final Outcome |
 |---|---|---|---|---|---|---|
@@ -335,34 +341,92 @@ didn't cover it.
 | nc-p07 | Ganesan Pillai | 1.25 | 2025-07-25 | 2025-10-31 | 2025-10-31 (fits) | contested |
 | nc-p08 | Valliammai Naidu | 1.0 | 2025-08-02 | 2025-11-08 | 2025-11-08 (fits) | contested |
 
-172 trigger day(s) in the simulated window (2025-05-10 to 2025-12-07).
-Calibrated maturity threshold: 1931.4 GDD (~10.6% above Kamatchipuram's
-1637.0, consistent with ADR-008's original 5-year comparison — this is
-now confirmed on a second, non-overlapping 5-year window too, not just
-the one ADR-008 originally measured). 65 of those days had at least one
-CONTESTED plot.
+**The finding: "Final Outcome" converges toward CONTESTED for most
+plots by season's end.** 5 of 8 plots at Kamatchipuram and 6 of 8 at
+Naducauvery were first classified FITS — ready, budget covered them —
+but end the simulated season CONTESTED instead. The reason was a real,
+previously undisclosed gap: **the system had no mechanism to remove a
+plot from future scheduling once it was marked FITS.**
+`scheduling/solver.py:solve()` recomputed from scratch on every trigger
+day, reading every plot currently in storage — nothing marked a plot
+"already harvested," so a plot that fit early kept re-competing for the
+day's capacity budget against every later-maturing plot for the rest of
+the season. This was a genuine property of the deployed system, not a
+backtest artifact (the real watcher called `solve()` fresh every
+trigger day too) — only visible here because the backtest ran ~170
+trigger days in sequence instead of the single-run 8-plot demos this
+project had exercised before. Two real production consequences: a
+farmer whose crop was already in would get messaged again, and — more
+seriously — the capacity budget could be consumed by plots that no
+longer needed it, so a genuinely urgent unharvested plot could lose a
+slot it should have won.
 
-**A real finding, not a backtest artifact: "Final Outcome" converges
-toward CONTESTED for most plots by season's end.** 5 of 8 plots at
-Kamatchipuram and 6 of 8 at Naducauvery were first classified FITS —
-ready, budget covered them — but end the simulated season CONTESTED
-instead. The reason is a real, previously undisclosed gap: **the system
-has no mechanism today to remove a plot from future scheduling once
-it's been marked FITS.** `scheduling/solver.py:solve()` recomputes from
-scratch on every trigger day, reading every plot currently in storage —
-nothing marks a plot "already harvested," so a plot that fit early
-keeps re-competing for the day's capacity budget against every
-later-maturing plot for the rest of the season. This is a genuine
-property of the deployed system today (the real watcher would behave
-identically — it calls `solve()` fresh every trigger day too), only
-visible here because the backtest runs ~170 trigger days in sequence
-instead of the single-run 8-plot demos this project has exercised
-before. It's directly related to, but not fixed by,
-[ADR-009](docs/adr/ADR-009-harvest-lifecycle-and-validation.md) Part 2's
-harvest confirmation loop — that loop records whether a harvest
-happened, but as scoped it does not yet remove a confirmed plot from
-future watcher runs. Flagging this here as a disclosed, real limitation
-surfaced by validation, not something quietly patched over.
+### After Part 1.5: plot harvest lifecycle
+
+[ADR-009](docs/adr/ADR-009-harvest-lifecycle-and-validation.md), Part
+1.5, fixes this in the core scheduling loop, not the backtest script:
+`scheduling/solver.py` gains a fourth outcome, `PlotOutcome.HARVESTED`
+— a plot the coordinator has already dispatched is excluded from
+`solve()`'s classification entirely, the same way a `TOO_GREEN` plot is
+excluded rather than ranked last, not coupled to the (separate, later,
+sometimes-absent) farmer confirmation signal. Same script, same fixture
+data, same real 2025 weather — only `solve()` changed:
+
+**Kamatchipuram** (172 trigger days, threshold unchanged at 1637.0 GDD,
+now only **3** days with a CONTESTED plot, down from 59):
+
+| Plot | Farmer | Area (ac) | Transplanted | Projected Maturity | First Ready Trigger | Final Outcome |
+|---|---|---|---|---|---|---|
+| p01 | Muthu Pandian | 2.5 | 2025-05-01 | 2025-07-28 | 2025-07-28 (fits) | **harvested** |
+| p02 | Selvi Karuppiah | 0.75 | 2025-05-05 | 2025-08-05 | 2025-08-05 (contested) | **harvested** |
+| p03 | Kannan Raja | 3.0 | 2025-05-12 | 2025-08-13 | 2025-08-25 (fits) | **harvested** |
+| p04 | Meena Subramani | 1.25 | 2025-05-18 | 2025-08-19 | 2025-08-25 (fits) | **harvested** |
+| p05 | Raja Gounder | 2.0 | 2025-05-24 | 2025-08-21 | 2025-08-25 (fits) | **harvested** |
+| p06 | Lakshmi Nadar | 0.5 | 2025-05-30 | 2025-08-26 | 2025-08-26 (fits) | **harvested** |
+| p07 | Karthik Murugan | 1.5 | 2025-07-20 | 2025-10-19 | 2025-10-19 (contested) | **harvested** |
+| p08 | Valli Chinnasamy | 1.0 | 2025-07-28 | 2025-10-27 | 2025-10-27 (contested) | **harvested** |
+
+**Naducauvery** (172 trigger days, threshold unchanged at 1931.4 GDD,
+now only **6** days with a CONTESTED plot, down from 65):
+
+| Plot | Farmer | Area (ac) | Transplanted | Projected Maturity | First Ready Trigger | Final Outcome |
+|---|---|---|---|---|---|---|
+| nc-p01 | Marimuthu Iyer | 2.0 | 2025-05-10 | 2025-08-09 | 2025-08-09 (contested) | **harvested** |
+| nc-p02 | Kamala Pillai | 1.0 | 2025-05-16 | 2025-08-16 | 2025-08-22 (fits) | **harvested** |
+| nc-p03 | Rajendran Mudaliar | 2.5 | 2025-05-22 | 2025-08-22 | 2025-08-22 (fits) | **harvested** |
+| nc-p04 | Meenakshi Iyengar | 1.5 | 2025-05-30 | 2025-08-29 | 2025-08-29 (fits) | **harvested** |
+| nc-p05 | Sundaram Chettiar | 3.0 | 2025-06-08 | 2025-09-07 | 2025-09-07 (contested) | **harvested** |
+| nc-p06 | Pappathi Naidu | 0.75 | 2025-06-20 | 2025-09-20 | 2025-09-20 (fits) | **harvested** |
+| nc-p07 | Ganesan Pillai | 1.25 | 2025-07-25 | 2025-10-31 | 2025-10-31 (fits) | **harvested** |
+| nc-p08 | Valliammai Naidu | 1.0 | 2025-08-02 | 2025-11-08 | 2025-11-08 (fits) | **harvested** |
+
+**Every plot at both clusters now ends the season `harvested`, not
+`contested` — 0 of 11 plots whose first ready trigger was FITS
+regressed to CONTESTED later in the season, down from 11 of 11 (every
+single one) before the fix.** The remaining
+CONTESTED days (3 and 6, down from 59 and 65) are genuine — real
+capacity contention on days when several plots were ready at once
+before earlier ones had cleared the pool, not an artifact of the bug.
+One more thing worth naming: some plots (p02, p07, p08 at Kamatchipuram;
+nc-p01, nc-p05 at Naducauvery) were `CONTESTED` on their *first* ready
+trigger, then later ended up `harvested` anyway — capacity freed up as
+earlier plots left the pool for good, and they eventually won a slot.
+That's the fairness/capacity mechanism working as designed, visible
+now that plots correctly leave contention instead of piling up in it
+forever.
+
+**Real production consequences this fixes**: a farmer whose crop is
+already in no longer gets `harvest_scheduled` messaged again on a later
+trigger day, and the capacity budget is no longer spent on a plot that
+doesn't need it — a genuinely urgent unharvested plot can no longer
+lose a slot to one that's already done. Not coupled to
+[ADR-009](docs/adr/ADR-009-harvest-lifecycle-and-validation.md) Part
+2's harvest confirmation loop (still to be built): the coordinator marks
+a plot harvested at dispatch time, because that's a scheduling fact it
+already has — Part 2's farmer confirmation is a separate, later,
+sometimes-absent signal that will eventually be able to *reverse* this
+(a farmer reporting "it never came" returns the plot to the schedulable
+pool), not one this fix waits on.
 
 ## What we learned deploying
 

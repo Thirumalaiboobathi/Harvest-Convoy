@@ -13,7 +13,17 @@ precipitation window), and on a trigger day run the exact same
 deterministic scheduling.solver.solve() production uses.
 
 See docs/adr/ADR-009-harvest-lifecycle-and-validation.md Part 1 for the
-full design.
+full design, and Part 1.5 for a correctness bug this backtest's first
+real run found: solve() had no concept of a harvested plot, so a plot
+that fit early kept re-entering capacity contention for the rest of the
+season. Fixed in scheduling/solver.py (PlotOutcome.HARVESTED,
+harvested_plot_ids parameter); this script models the same state
+in-memory per cluster run (it never touches Storage -- see below), so
+it exercises the fix the same way watcher.py does in production.
+
+See the README's "Backtest against the real 2025 Kuruvai season"
+section for both the buggy run's numbers and this fixed run's, kept
+side by side rather than replaced.
 
 WHAT THIS BACKTEST DOES NOT PROVE -- READ THIS BEFORE TRUSTING THE
 NUMBERS BELOW. Open-Meteo has no archive of what a 16-day forecast said
@@ -141,6 +151,16 @@ def run_cluster_backtest(cluster_module) -> ClusterBacktest:
             plot_full_temps[p.plot_id], T_BASE_C, maturity_gdd
         )
 
+    # In-memory only, one set per cluster/season backtest run -- never
+    # persisted, discarded at the end of this function. The backtest
+    # never touches Storage or the coordinator (no Bedrock, no LLM calls
+    # -- see Decision 3), so it can't fetch this from a real backend the
+    # way watcher.py now does; this is its own stand-in for "one season's
+    # worth of harvest state." Every plot solve() decides FITS on a
+    # trigger day is added here and excluded from every later day this
+    # same run. See ADR-009 Part 1.5, Decision F.
+    harvested_plot_ids: set[str] = set()
+
     simulated_today = season_start
     trigger_count = 0
     while simulated_today <= season_end:
@@ -161,14 +181,19 @@ def run_cluster_backtest(cluster_module) -> ClusterBacktest:
                             if p.transplant_date.isoformat() <= t.date <= simulated_today.isoformat()
                         ]
                         for p in active_plots
+                        if p.plot_id not in harvested_plot_ids
                     }
                     decisions = solve(
                         active_plots, plot_days, cluster, forecast,
                         rain_threshold_mm=RAIN_THRESHOLD_MM, today=simulated_today,
+                        harvested_plot_ids=frozenset(harvested_plot_ids),
                     )
                     result.trigger_days[simulated_today.isoformat()] = {
                         d.plot_id: d.outcome for d in decisions
                     }
+                    harvested_plot_ids.update(
+                        d.plot_id for d in decisions if d.outcome == PlotOutcome.FITS
+                    )
                     trigger_count += 1
         simulated_today += timedelta(days=1)
 
@@ -178,11 +203,13 @@ def run_cluster_backtest(cluster_module) -> ClusterBacktest:
 
 def _first_ready_trigger(result: ClusterBacktest, plot_id: str) -> tuple[str | None, str | None]:
     """(date, outcome) of the first trigger day this plot was ready
-    (FITS or CONTESTED, i.e. not TOO_GREEN) -- the day the system would
-    first have offered to schedule or contest it."""
+    (FITS or CONTESTED specifically -- not merely "not TOO_GREEN",
+    since HARVESTED also isn't TOO_GREEN but was never "ready" in the
+    contention sense) -- the day the system would first have offered to
+    schedule or contest it."""
     for d in sorted(result.trigger_days):
         outcome = result.trigger_days[d].get(plot_id)
-        if outcome is not None and outcome != PlotOutcome.TOO_GREEN:
+        if outcome in (PlotOutcome.FITS, PlotOutcome.CONTESTED):
             return d, outcome.value
     return None, None
 
@@ -239,6 +266,10 @@ def format_narrative(result: ClusterBacktest) -> str:
         f"- {len(contested_days)} day(s) had at least one CONTESTED plot "
         f"(ready, but the rain-shortened capacity budget didn't cover it).",
     ]
+    fits_plots = [
+        p.plot_id for p in result.plots
+        if _first_ready_trigger(result, p.plot_id)[1] == "fits"
+    ]
     if regressed_to_contested:
         lines.append(
             f"- {len(regressed_to_contested)} plot(s) first appeared as FITS "
@@ -250,6 +281,13 @@ def format_narrative(result: ClusterBacktest) -> str:
             f"the rest of the season. This is a real property of the deployed "
             f"system, surfaced by running many trigger days in sequence, not a "
             f"backtest artifact -- see the README's discussion of this finding."
+        )
+    elif fits_plots:
+        lines.append(
+            f"- 0 of {len(fits_plots)} plot(s) that reached FITS regressed to "
+            f"CONTESTED later in the season -- the plot harvest lifecycle fix "
+            f"(ADR-009 Part 1.5) holds: once dispatched, a plot stays out of "
+            f"contention for the rest of the season."
         )
     return "\n".join(lines)
 

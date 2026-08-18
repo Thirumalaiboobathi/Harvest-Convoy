@@ -25,7 +25,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FILE_PATH = Path(".data/harvest_convoy.json")
 
-_EMPTY: dict = {"clusters": {}, "farmers": {}, "plots": {}, "ledger": {}, "watcher": {}}
+_EMPTY: dict = {
+    "clusters": {}, "farmers": {}, "plots": {}, "ledger": {}, "watcher": {},
+    "harvest": {},  # harvest[cluster_id][season_id][plot_id] = dispatched_at
+}
 
 
 class FileStorage:
@@ -124,3 +127,22 @@ class FileStorage:
     def set_watcher_last_run(self, cluster_id: str, run_date: str) -> StorageResult:
         self._data["watcher"][cluster_id] = run_date
         return self._save()
+
+    # Plot harvest lifecycle -- ADR-009 Part 1.5
+    def mark_plot_harvested(
+        self, plot_id: str, cluster_id: str, season_id: str, dispatched_at: str
+    ) -> StorageResult:
+        cluster_seasons = self._data["harvest"].setdefault(cluster_id, {})
+        season_plots = cluster_seasons.setdefault(season_id, {})
+        season_plots[plot_id] = dispatched_at
+        return self._save()
+
+    def clear_plot_harvest(
+        self, plot_id: str, cluster_id: str, season_id: str
+    ) -> StorageResult:
+        season_plots = self._data["harvest"].get(cluster_id, {}).get(season_id, {})
+        season_plots.pop(plot_id, None)
+        return self._save()
+
+    def get_harvested_plot_ids(self, cluster_id: str, season_id: str) -> set[str]:
+        return set(self._data["harvest"].get(cluster_id, {}).get(season_id, {}).keys())

@@ -69,3 +69,32 @@ class Storage(Protocol):
         failed check (e.g. Open-Meteo down), so a failed day gets retried
         rather than silently skipped."""
         ...
+
+    def mark_plot_harvested(
+        self, plot_id: str, cluster_id: str, season_id: str, dispatched_at: str
+    ) -> StorageResult:
+        """A plot the coordinator dispatched the machine to this trigger --
+        excludes it from scheduling.solver.solve() for the rest of this
+        season. Overwrite semantics, like every put_* here except
+        put_ledger_entry -- a plot legitimately marked twice (e.g. a
+        retried write) should just update dispatched_at, not error. See
+        ADR-009 Part 1.5."""
+        ...
+
+    def clear_plot_harvest(
+        self, plot_id: str, cluster_id: str, season_id: str
+    ) -> StorageResult:
+        """Removes the marker -- returns the plot to the schedulable pool
+        on solve()'s next call. Safe on a plot never marked (a no-op
+        success, not an error). Used today for an operator correcting a
+        bad mark (scripts/clear_plot_harvest.py); designed to also be the
+        reversal hook Part 2's farmer "it never came" confirmation will
+        call once that loop is built -- not wired up yet."""
+        ...
+
+    def get_harvested_plot_ids(self, cluster_id: str, season_id: str) -> set[str]:
+        """Every plot_id marked harvested for this cluster/season. Empty
+        set for a season with no records yet -- there is no separate
+        Season entity in this codebase; season_id is an opaque string, and
+        a new one has no prior harvest state by construction."""
+        ...

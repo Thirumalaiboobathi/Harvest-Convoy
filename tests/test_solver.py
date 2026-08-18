@@ -263,3 +263,95 @@ def test_solve_is_deterministic_across_runs() -> None:
     result2 = solve(plots, plot_days, cluster, forecast, rain_threshold_mm=5.0, today=today)
 
     assert result1 == result2
+
+
+# --- ADR-009 Part 1.5: plot harvest lifecycle ---
+
+def test_harvested_plot_is_excluded_not_merely_ranked_last() -> None:
+    """Same shape as test_too_green_plot_is_excluded_not_merely_ranked_last
+    -- a harvested plot never reaches assess_plot() or ranking at all, not
+    just "ranked last". No plot_days entry needed for it either: passing
+    an empty dict proves assess_plot() is genuinely never called for it."""
+    today = date(2026, 8, 16)
+    plot = _plot("p_harvested", today - timedelta(days=30), area_acres=1.0)
+    cluster = Cluster("c", "c", 3.5, 10.0, 77.5)
+    forecast = [ForecastDay("2026-08-16", 0.0)] * 5
+
+    result = solve(
+        [plot], {}, cluster, forecast, rain_threshold_mm=5.0, today=today,
+        harvested_plot_ids=frozenset({"p_harvested"}),
+    )
+
+    assert len(result) == 1
+    assert result[0].outcome == PlotOutcome.HARVESTED
+    assert result[0].route_position is None
+
+
+def test_harvested_plot_does_not_steal_capacity_from_an_urgent_unharvested_plot() -> None:
+    """The actual bug Part 1's backtest found: solve() had no way to know
+    a plot was already dispatched, so it kept ranking (and winning
+    capacity for) a plot that no longer needed it -- at a genuinely
+    urgent plot's expense. Same fixture run twice: without excluding the
+    already-dispatched plot (pre-Part-1.5 behavior), it wins the only
+    budget slot over the urgent plot purely because it's more overdue;
+    with harvested_plot_ids (the fix), the urgent plot wins instead."""
+    days_needed = _days_to_maturity()
+    today = date(2026, 8, 16)
+    # Maximally overdue -- would rank first by urgency if still eligible.
+    already_dispatched = _plot(
+        "already_dispatched", today - timedelta(days=days_needed + 30), area_acres=3.5
+    )
+    # Also ready and overdue, but less so -- loses the ranking race if
+    # both compete for the same single-day budget.
+    genuinely_urgent = _plot(
+        "genuinely_urgent", today - timedelta(days=days_needed + 5), area_acres=3.5
+    )
+    plot_days = {
+        p.plot_id: _make_days(p.transplant_date, (today - p.transplant_date).days + 1)
+        for p in (already_dispatched, genuinely_urgent)
+    }
+    cluster = Cluster(
+        "c", "c", machine_capacity_acres_per_day=3.5,
+        machine_start_lat=10.0, machine_start_lon=77.5,
+    )
+    forecast = [ForecastDay("2026-08-16", 0.0)]  # 1 usable day -> 3.5 acre budget, room for one plot
+
+    without_exclusion = solve(
+        [already_dispatched, genuinely_urgent], plot_days, cluster, forecast,
+        rain_threshold_mm=5.0, today=today,
+    )
+    by_id = {d.plot_id: d for d in without_exclusion}
+    assert by_id["already_dispatched"].outcome == PlotOutcome.FITS
+    assert by_id["genuinely_urgent"].outcome == PlotOutcome.CONTESTED  # the bug
+
+    with_exclusion = solve(
+        [already_dispatched, genuinely_urgent], plot_days, cluster, forecast,
+        rain_threshold_mm=5.0, today=today,
+        harvested_plot_ids=frozenset({"already_dispatched"}),
+    )
+    by_id = {d.plot_id: d for d in with_exclusion}
+    assert by_id["already_dispatched"].outcome == PlotOutcome.HARVESTED
+    assert by_id["genuinely_urgent"].outcome == PlotOutcome.FITS  # the fix
+
+
+def test_solve_returns_one_decision_per_plot_including_harvested() -> None:
+    today = date(2026, 8, 16)
+    days_needed = _days_to_maturity()
+    ready = _plot("ready", today - timedelta(days=days_needed + 2), area_acres=1.0)
+    harvested = _plot("harvested", today - timedelta(days=60), area_acres=1.0)
+    plot_days = {
+        ready.plot_id: _make_days(ready.transplant_date, (today - ready.transplant_date).days + 1)
+    }
+    cluster = Cluster("c", "c", 3.5, 10.0, 77.5)
+    forecast = [ForecastDay("2026-08-16", 0.0)] * 5
+
+    result = solve(
+        [ready, harvested], plot_days, cluster, forecast,
+        rain_threshold_mm=5.0, today=today,
+        harvested_plot_ids=frozenset({"harvested"}),
+    )
+
+    assert {d.plot_id for d in result} == {"ready", "harvested"}
+    by_id = {d.plot_id: d for d in result}
+    assert by_id["ready"].outcome == PlotOutcome.FITS
+    assert by_id["harvested"].outcome == PlotOutcome.HARVESTED
