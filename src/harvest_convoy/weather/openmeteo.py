@@ -287,8 +287,36 @@ def get_precipitation_forecast(
     )
     data = _fetch(FORECAST_URL, params, cache_dir, key)
     daily = data["daily"]
+    entries = list(zip(daily["time"], daily[PRECIPITATION_FIELD]))
+
+    # Open-Meteo computes near-term forecast days first; the tail of a
+    # long-horizon request can come back null simply because that day's
+    # model run hasn't completed yet -- confirmed live requesting the
+    # full 16-day FORECAST_MAX_HORIZON_DAYS window, where day 16 was
+    # reproducibly null for several minutes while days 1-15 were real
+    # data. Trimming only a TRAILING run of nulls treats "not computed
+    # yet" as "don't rely on it" (a shorter, still-real usable window),
+    # not fabricated data -- a null anywhere else in the series is a
+    # genuine gap/anomaly, not this, and still fails loud below.
+    trimmed = 0
+    while entries and entries[-1][1] is None:
+        entries.pop()
+        trimmed += 1
+    if trimmed:
+        logger.warning(
+            "FORECAST HORIZON TRUNCATED: %d trailing day(s) not yet "
+            "computed by Open-Meteo, proceeding with %d real day(s) "
+            "instead of the requested %s..%s window",
+            trimmed, len(entries), start_date, end_date,
+        )
+    if not entries:
+        raise WeatherError(
+            f"Forecast API returned no usable precipitation data for "
+            f"{start_date}..{end_date}"
+        )
+
     result = []
-    for d, precip in zip(daily["time"], daily[PRECIPITATION_FIELD]):
+    for d, precip in entries:
         if precip is None:
             raise WeatherError(f"Forecast API returned null precipitation for {d}")
         result.append(ForecastDay(date=d, precipitation_mm=precip))

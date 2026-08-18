@@ -151,7 +151,7 @@ d.text((130, 347), "DETERMINISTIC CORE", font=f_section, fill=DETERMINISTIC_EDGE
 d.text((130, 377), "pure Python — no LLM call anywhere in this box", font=f_small, fill=MUTED)
 
 sub_boxes_det = [
-    ("agronomy/gdd.py + crop_params.py", ["Growing Degree Days accumulation,", "MATURITY_GDD_ESTIMATED threshold", "→ TOO_GREEN vs ready"]),
+    ("agronomy/gdd.py + crop_params.py + calibration.py", ["Growing Degree Days accumulation,", "per-cluster derived maturity threshold", "→ TOO_GREEN vs ready"]),
     ("scheduling/capacity.py + solver.py", ["usable_harvest_days() rain budget,", "greedy acreage allocation", "→ FITS vs CONTESTED"]),
     ("scheduling/route.py", ["straight-line route ordering", "for FITS plots"]),
     ("storage/decay.py + fairness.py", ["geometric season-decay,", "fairness ledger score"]),
@@ -176,7 +176,7 @@ d.text((725, 377), "Strands Agents + Bedrock Nova Pro (ap-south-1) — only for 
 
 sub_boxes_llm = [
     ("agents/coordinator.py", ["negotiate_pair(): up to 3 rounds,", "each round = both advocates' claims"]),
-    ("agents/advocate.py", ["one Strands agent per plot,", "fairness_lookup tool + AdvocateClaim", "structured output, prompt-cached", "system prompt (cachePoint)"]),
+    ("agents/advocate.py", ["one Strands agent per plot,", "fairness_lookup tool + AdvocateClaim", "structured output, prompt-cached", "system prompt; Tamil argument templated"]),
     ("resolution (deterministic)", ["clear win → route updated,", "no resolution after 3 rounds", "→ escalate to human operator"]),
 ]
 by = 405
@@ -206,7 +206,7 @@ wrapped_lines((dynamo[0]+dynamo[2])/2, row_y+38, ["single-table, PK/SK + GSI1", 
 
 rounded_box(notify, EXTERNAL_FILL, EXTERNAL_EDGE)
 centered_text((notify[0]+notify[2])/2, row_y+12, "Telegram notify.py / webhook.py", f_box_title)
-wrapped_lines((notify[0]+notify[2])/2, row_y+38, ["harvest_scheduled, not_ready, route_summary,", "escalation → operator resolves via inline button"], f_small, MUTED)
+wrapped_lines((notify[0]+notify[2])/2, row_y+38, ["harvest_scheduled, not_ready, route_summary, escalation", "Tamil default / English opt-in — messages_ta.py / _en.py"], f_small, MUTED)
 
 elbow_arrow((det_box[0]+150, det_box[3]+2), (dynamo[0]+145, row_y))
 elbow_arrow((llm_box[0]+230, llm_box[3]+2), (notify[0]+220, row_y), color=LLM_EDGE)
@@ -255,6 +255,11 @@ deploy_lines = [
     "  TRACES_ENDPOINT set explicitly",
     "  (no local collector in",
     "  code-deploy mode)",
+    "Clusters: watcher.py iterates",
+    "  a list in code (any TN cluster,",
+    "  GDD is per-plot) -- deployed",
+    "  schedule still targets one",
+    "  cluster_id per Schedule rule",
 ]
 for line in deploy_lines:
     d.text((lx, ly), line, font=f_small, fill=MUTED)
@@ -264,9 +269,9 @@ ly += 16
 d.text((lx, ly), "Cost (measured)", font=f_section, fill=INK)
 ly += 36
 cost_lines = [
-    "$0.0081 / full 8-plot run",
+    "~$0.011 / full 8-plot run",
     "  (Nova Pro, prompt-cached,",
-    "  64% below uncached)",
+    "  measured range across 3 runs)",
     "~$2/month standing infra",
     "  worst case",
 ]

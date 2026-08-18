@@ -41,8 +41,18 @@ def _to_decimal(value):
 
 
 def _from_decimal(value):
+    # DynamoDB's Number type doesn't distinguish int from float -- every
+    # numeric field round-trips through here regardless of which one the
+    # dataclass declares. Unconditionally casting to float (the previous
+    # behavior) silently turned every int field, e.g. Farmer.telegram_chat_id,
+    # into e.g. 1276258406.0 -- caught live wiring up a real chat_id for
+    # deployment verification (ADR-008 follow-up): a JSON float in that
+    # position is not a valid Telegram chat_id. An integral Decimal now
+    # comes back as int; a genuinely fractional one (area_acres, GDD
+    # values, etc.) still comes back as float.
     if isinstance(value, Decimal):
-        return float(value)
+        as_int = int(value)
+        return as_int if as_int == value else float(value)
     return value
 
 

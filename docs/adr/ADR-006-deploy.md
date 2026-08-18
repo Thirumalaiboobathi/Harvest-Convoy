@@ -1,11 +1,17 @@
 # ADR-006: Deployment — AgentCore Runtime, Scheduled Watcher, DynamoDB, Tracing
 
-- Status: Implemented — all resources below are live in `ap-south-1`. Two
-  deviations from the original proposal, both found live and both fixed
-  the same session: see Decision 7 (Scheduler can't call
-  `InvokeAgentRuntime` directly) and Decision 8 (ADOT needs one more env
-  var than Decision 5 assumed).
-- Date: 2026-08-17
+- Status: Implemented — all resources below are live in `ap-south-1`.
+  Runtime redeployed 2026-08-18 with ADR-008's code (Tamil support,
+  per-cluster GDD, multi-cluster-capable watcher), version 6 → 10 across
+  that round — see Decision 9 for why it took four updates, not one, and
+  what each found. Deviations from the original proposal, all found live
+  and fixed the same session they were found: Decision 7 (Scheduler
+  can't call `InvokeAgentRuntime` directly), Decision 8 (ADOT needs one
+  more env var than Decision 5 assumed), Decision 9 (a DynamoDB int/float
+  bug, an unhandled Open-Meteo forecast gap, and a never-set
+  `TELEGRAM_BOT_TOKEN` — the last one meaning no scheduled run had ever
+  actually delivered a message before this was caught).
+- Date: 2026-08-17; redeploy round 2026-08-18
 
 ## Provisioning summary — read this first
 
@@ -396,6 +402,139 @@ Trace inspection itself is manual (CloudWatch console → Logs Insights →
 health-check script confirms the pipeline ran and didn't error, not the
 trace shape specifically; Decision 8 documents how that was verified
 live during this session.
+
+## Decision 9: redeploying with ADR-008's code (2026-08-18) — two more live-found bugs, and a build process that didn't exist
+
+ADR-008 (Tamil Nadu generalization, Tamil-language interface) changed
+`harvest_convoy`'s source but the deployed AgentCore Runtime still ran
+the pre-ADR-008 code from Decision 1's original deployment (version 6) —
+the standing instruction throughout ADR-008 was explicitly to leave the
+deployed artifact alone until asked. Asked, here: redeploy with current
+code, verify the schedule/shim survive, prove real messages land.
+
+**No committed build process existed for the deployment package.** The
+zip AgentCore Runtime actually runs (`main.py` + vendored `arm64`
+dependencies + the `harvest_convoy` source tree, ~36MB) was built once,
+ad hoc, in the original Decision 1 session, and never turned into a
+script. Reconstructed the exact recipe by downloading and inspecting the
+live zip directly rather than guessing: `uv export --no-emit-project
+--no-dev --no-hashes --frozen` for the pinned dependency list (confirmed
+byte-identical package/version set to what was already deployed, since
+`uv.lock` hadn't changed), `uv pip install --target <dir>
+--python-platform aarch64-unknown-linux-gnu --python 3.12 -r
+<that list>`, then the current `src/harvest_convoy/` tree and an
+unchanged `main.py` wrapper copied in alongside it, zipped with
+permission bits preserved. Verified before uploading anything: identical
+top-level package set to the currently-deployed zip (`old - new` and
+`new - old` both empty), and every copied `.py` file compiles cleanly.
+
+**Redeploy mechanics, verified rather than assumed**: `update-agent-runtime`
+against the existing `agentRuntimeId` creates a new numbered version
+(6→7) without changing the runtime's ARN; the `DEFAULT` runtime endpoint
+tracks the latest version automatically (`list-agent-runtime-endpoints`
+showed `liveVersion` advance on its own after each update, no separate
+endpoint-repoint call needed). The Lambda shim invokes by the stable
+runtime ARN, not a version-pinned one, so it needed no changes. Confirmed
+directly, not inferred: the Lambda's `LastModified` and the EventBridge
+Schedule's `LastModificationDate` were both still their original
+Decision 7 values after every update in this round — the schedule and
+shim were never touched, only the runtime's code artifact.
+
+**Two more real bugs, found by actually trying to receive a message, not
+by reading code:**
+
+1. **`DynamoStorage._from_decimal` always cast to `float`.** DynamoDB's
+   Number type doesn't distinguish int from float, so every numeric
+   field — including `Farmer.telegram_chat_id`, typed `int` — round-tripped
+   through a real table as `Decimal` and got unconditionally converted to
+   `float`. A live farmer's chat ID, wired up for this verification, came
+   back as `1276258406.0`. `telegram/client.py` puts that value straight
+   into the JSON request body; a JSON float is not a valid Telegram
+   `chat_id`. Fixed: `_from_decimal` now returns `int(value)` when the
+   `Decimal` has no fractional part, `float(value)` otherwise — a
+   genuinely fractional value (acreage, GDD figures) is unaffected.
+   Pre-existing bug, not introduced by ADR-008; never caught before
+   because no prior session had written a real int through this path and
+   then read it back through a real table.
+2. **The forecast fetch had no tolerance for Open-Meteo's own rolling
+   compute schedule.** Requesting the full `FORECAST_MAX_HORIZON_DAYS`
+   (16 days) window returned `precipitation_sum: null` for day 16,
+   reproducibly, confirmed with a direct API call outside this project's
+   code — Open-Meteo computes near-term days first, and the far edge of
+   a 16-day request isn't always populated yet. `get_precipitation_forecast`
+   raised `WeatherError` on any null value, which meant the watcher
+   failed before reaching the scheduling logic at all — and `force: true`
+   does not bypass this, since the forecast fetch happens before the
+   force check. Fixed: a trailing run of null days is now trimmed (a
+   shorter, still-real usable window), while a null anywhere else in the
+   series still raises — that distinction matters, since a null in the
+   *middle* of the series is a genuine gap, not "not computed yet," and
+   silently dropping it would be exactly the kind of data fabrication
+   this project's weather client is built to refuse.
+
+**A third, independent finding, not a code bug**: the deployed runtime's
+`TELEGRAM_BOT_TOKEN` environment variable had never been set, at any
+point since the original Decision 1 deployment. Every Telegram call
+failed with `404 Not Found` against `https://api.telegram.org/botNone/sendMessage`,
+visible directly in the runtime's own CloudWatch logs. This means no
+scheduled 06:00 run has ever actually delivered a message to anyone,
+silently, since this was first deployed — the fire-and-forget degrade
+path (Decision 2's design) did exactly what it was built to do, log and
+move on, which is also exactly why this went unnoticed until someone
+checked for a received message instead of a "did it run" status. Fixed
+by adding the token (read from local `.env`, never printed to any log or
+transcript) to the runtime's environment variables.
+
+**Verification, in order, each a real live check**:
+1. Redeployed with current code (version 7) — `READY`, `DEFAULT`
+   endpoint's `liveVersion` advanced automatically.
+2. Wired a real `operator_chat_id` and four (of eight) farmers'
+   `telegram_chat_id` on the live Kamatchipuram cluster — deliberately
+   left four unset, to prove the missing-chat-ID path degrades cleanly
+   (confirmed in code: `notify.py`'s `send_*` functions log and return
+   early, no exception; `watcher.py` doesn't inspect the return value
+   either, so a missing chat ID can never crash the run).
+3. Seeded Naducauvery into the same live table — confirmed independent
+   from Kamatchipuram (`nc-` prefix), 8 farmers/8 plots, no collisions.
+4. First real invoke through the Lambda shim (the same path EventBridge
+   uses, not a shortcut) surfaced the forecast-horizon bug live; fixed,
+   redeployed (version 8, then 9 after the horizon fix).
+5. Second invoke surfaced the `float` chat-ID bug and the missing-token
+   gap via the runtime's own logs (`telegram sendMessage ... 404`); fixed
+   both, redeployed (version 10).
+6. Reset the per-cluster daily watcher marker via the project's own
+   `Storage.set_watcher_last_run` (not a raw DynamoDB delete — same
+   effect, uses the code's own path) and re-invoked. Response body:
+   `{"status": "triggered", "usable_days": 15, "escalations": 0}`. Runtime
+   logs for this invoke show zero Telegram failures and exactly four
+   `no chat_id for farmer ...` lines — matching the four farmers
+   deliberately left unwired, nothing else.
+7. `escalations: 0` is a genuine result, not a shortfall: today's real
+   weather and the cluster's real 3.5 acres/day capacity classify every
+   non-too-green plot as `FITS`, none `CONTESTED` — re-confirms, live,
+   the same thing Decision 8 already found (the full 8-plot cluster
+   doesn't naturally reproduce a tie the way the standalone
+   `trigger_scenario.py` two-plot harness deliberately engineers one).
+   Not treated as a problem to fix under time pressure — see
+   `docs/DEMO.md`'s Beat 4/Beat 5 split for how the demo accounts for
+   this honestly instead of forcing an outcome.
+
+**One open item, disclosed rather than assumed resolved**: distributed
+trace visibility. CloudWatch Application Signals shows the
+`app.daily_watch` operation as live (`Service: harvest-convoy-watcher`),
+which confirms the ADOT pipeline is running and processing spans. A
+fresh individual trace was **not** independently reproducible via
+`aws logs filter-log-events` against `aws/spans` (`storedBytes: 0`,
+zero events across a 24h window) or via `aws xray get-trace-summaries`
+(zero results, including across the window Decision 8's originally-
+captured trace claims to be from). The account-level X-Ray trace
+destination is confirmed correctly set (`get-trace-segment-destination`
+→ `CloudWatchLogs`/`ACTIVE`), so this isn't the account-level
+misconfiguration Decision 8 already fixed reappearing. Root cause not
+found in the time available — not pursued further live, to avoid
+destabilizing a working deployment chasing an observability nice-to-have
+minutes before a filming deadline. `docs/DEMO.md` was written to not
+depend on this being resolved.
 
 ## Consequences
 

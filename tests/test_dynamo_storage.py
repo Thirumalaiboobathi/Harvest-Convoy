@@ -42,6 +42,31 @@ def test_from_decimal_converts_back_to_float() -> None:
     assert isinstance(_from_decimal(Decimal("2.5")), float)
 
 
+def test_from_decimal_preserves_int_for_integral_values() -> None:
+    """DynamoDB's Number type doesn't distinguish int from float -- any
+    plain int a real table stores (e.g. Farmer.telegram_chat_id) comes
+    back from boto3 as a Decimal regardless. Unconditionally casting to
+    float turned a real chat_id like 1276258406 into 1276258406.0 --
+    caught live wiring up deployment verification, a JSON float in that
+    position is not a valid Telegram chat_id. A genuinely fractional
+    Decimal (acreage, GDD values) must still come back as float."""
+    result = _from_decimal(Decimal("1276258406"))
+    assert result == 1276258406
+    assert isinstance(result, int)
+
+
+def test_from_decimal_round_trip_preserves_int_chat_id() -> None:
+    """The realistic path: an int chat_id survives _to_decimal (encode)
+    then _from_decimal (decode) as the same int, not a float."""
+    encoded = _to_decimal(1276258406)
+    assert encoded == 1276258406  # _to_decimal only Decimal-izes floats
+    # A real DynamoDB table returns this as Decimal on read regardless of
+    # how it was written -- simulate that boundary directly.
+    decoded = _from_decimal(Decimal(1276258406))
+    assert decoded == 1276258406
+    assert isinstance(decoded, int)
+
+
 def test_encode_decode_round_trip() -> None:
     original = {"acres": 2.5, "name": "x", "count": 3}
     encoded = _encode(original)

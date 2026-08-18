@@ -7,6 +7,12 @@ something to type or a URL to open. Total target: under 5:00.
 Run through Setup once, before you hit record — don't discover a missing
 `.env` value on camera.
 
+Updated after the ADR-008 round (Tamil-language interface, per-cluster
+GDD, second cluster, redeploy) — see "What changed since the last
+version of this runbook" at the bottom for exactly what's different and
+why, including one open item (fresh trace visibility) this version does
+not depend on.
+
 ## Setup (before recording, not on camera)
 
 ```bash
@@ -18,20 +24,27 @@ cp .env.example .env   # fill in TELEGRAM_BOT_TOKEN from @BotFather if not alrea
 Have these open in browser tabs, ready to switch to:
 1. `docs/architecture.png` (or `ARCHITECTURE.md` rendered on GitHub)
 2. Your phone, Telegram app open, chat with your bot
-3. AWS Console → CloudWatch → already navigated to the trace (steps below,
-   do this once now so you know the click path cold)
+3. AWS Console → CloudWatch, already logged in, `ap-south-1` selected
 4. A terminal in the repo root
 
 Know your Telegram chat ID (message your bot once, or check
 `scripts/trigger_scenario.py`'s docstring for how it's used) — call it
-`<CHAT_ID>` below.
-
----
+`<CHAT_ID>` below. Two separate things use it:
+- **Local demo** (Beats 3–4): `trigger_scenario.py <CHAT_ID>` overrides
+  every farmer's chat ID in memory for that one run — nothing to
+  pre-configure.
+- **Deployed runtime** (Beat 5): the live Kamatchipuram cluster's
+  `operator_chat_id` and four of its eight farmers' `telegram_chat_id`
+  are already wired to a real chat in DynamoDB (done once, ahead of
+  filming — see "What changed" at the bottom if you need to redo this
+  for a different chat ID). The other four farmers are deliberately left
+  unset, to prove the missing-chat-ID path degrades cleanly instead of
+  crashing.
 
 ## Beat 1 — The problem (0:00–0:30)
 
 Say it in one breath, don't read a slide: *"A village cluster in Tamil
-Nadu shares one combine harvester across eight paddy plots. Someone has
+Nadu shares one combine harvester across its paddy plots. Someone has
 to decide, every day, whose plot gets harvested first — normally that's
 a phone-tag argument. Harvest Convoy automates the 95% of days where the
 answer is obvious, and only asks a human when two plots genuinely tie."*
@@ -48,7 +61,11 @@ argues one plot's case against another, and only when the math has
 already produced a genuine tie. It never computes a number itself."*
 
 That sentence is the whole Technical Implementation argument — don't
-rush past it.
+rush past it. If there's time, one more line: *"This works anywhere in
+Tamil Nadu, not just one village — the maturity threshold is derived per
+cluster from that cluster's own weather history, and every farmer-facing
+message is Tamil by default."* (see the legend's "Clusters" note on the
+diagram itself if you want to point at it instead of saying it).
 
 ## Beat 3 — Zero-AWS quickstart (1:15–2:00)
 
@@ -63,11 +80,20 @@ While it runs, narrate: *"No AWS account needed for this — offline mode
 uses a scripted claim provider instead of live Bedrock, so a judge can
 clone this and run it in thirty seconds."* Let the four message types
 scroll by in the terminal output; point out the `[scripted offline mode]`
-label so it's clear this take isn't claiming to be live judgment.
+label so it's clear this take isn't claiming to be live judgment. These
+messages are Tamil by default (the seeded farmers don't set a language
+override) — a natural, honest place to mention that without a separate
+beat for it.
 
 ## Beat 4 — Live negotiation, real Bedrock (2:00–3:15)
 
-This is the centerpiece. Terminal:
+This is the centerpiece — and, as of this version of the runbook, the
+**only** reliable way to show an actual escalation. The deployed
+8-plot Kamatchipuram cluster doesn't naturally produce a tie under real
+capacity and real weather (verified live — everything either fits the
+route or is still too green most days); `trigger_scenario.py` engineers
+a genuine two-plot capacity deadlock on purpose, specifically so this
+beat doesn't depend on today's weather cooperating. Terminal:
 
 ```bash
 uv run python -m scripts.trigger_scenario <CHAT_ID>
@@ -76,7 +102,8 @@ uv run python -m scripts.trigger_scenario <CHAT_ID>
 (no `--offline` — real Bedrock calls, ~10–15 seconds). While it runs,
 switch to your phone: Telegram messages should start arriving — harvest
 scheduled, not-ready, and (per the engineered p03/p04 deadlock scenario)
-an escalation with both farmers' real arguments side by side.
+an escalation with both farmers' real arguments side by side, in Tamil
+(the default; both engineered farmers use it here).
 
 **If it resolves cleanly instead of escalating**: that's a real, honest
 result — one side's case was genuinely weaker and the model conceded
@@ -86,92 +113,170 @@ once more (~$0.02/run) for a take that escalates. Do not re-run more than
 twice chasing a specific outcome — if it keeps resolving, that's the
 honest result and the video should say that plainly.
 
-## Beat 5 — The deployed trace (3:15–4:15)
+## Beat 5 — The deployed runtime, live (3:15–4:15)
 
-Switch to AWS Console, already logged in, `ap-south-1` region selected.
+Different centerpiece from Beat 4: this shows the *actual deployed*
+AgentCore Runtime — real weather, real DynamoDB, real Telegram — running
+on the same path EventBridge fires every morning at 06:00 IST. Terminal:
+
+```bash
+aws lambda invoke --function-name harvest-convoy-watcher-invoker \
+  --payload '{"cluster_id":"kamatchipuram","season_id":"2026-kuruvai","force":true}' \
+  --cli-binary-format raw-in-base64-out --region ap-south-1 /tmp/out.json && cat /tmp/out.json
+```
+
+This calls the exact Lambda the EventBridge Schedule calls — `force:
+true` just skips the "wait for rain in the forecast" gate so it runs
+right now instead of waiting for a real trigger condition; every
+scheduled run still uses the real gate. Say: *"This is the same shim,
+same runtime, same DynamoDB the 6am cron job hits — I'm just triggering
+it on demand instead of waiting for tomorrow."*
+
+While it runs, switch to your phone: real Telegram messages should
+land — Tamil `harvest_scheduled` for the fitting plots, Tamil
+`not_ready` for the too-green one, and (mixed-language, on purpose) one
+plot's message in **English**, since one of the wired-up farmers is
+registered in English — a real demonstration of the per-farmer language
+field, not a staged screenshot.
+
+**If nothing arrives**: check the response body's `"status"` field.
+`"already_ran"` means today's watcher marker is already set — see
+"Re-running Beat 5" below. `"error"` with `"reason":
+"weather_unavailable"` means Open-Meteo's forecast didn't return usable
+data at all (rare — the far-horizon-day gap this project found and
+fixed live is now handled automatically, see "What changed" below); wait
+a minute and retry.
+
+**On escalations**: today's real weather/capacity split may not produce
+a tie (see Beat 4's note — this is expected and disclosed, not a bug).
+The response body's `"escalations"` count tells you; if it's `0`, that's
+the honest live result and the video can say so in one line, the same
+way Beat 4 handles a clean resolve. Don't try to force one here — Beat 4
+is the dedicated, reliable place for a negotiation, and forcing an
+escalation on the live cluster means temporarily throttling its real
+capacity, which risks leaving production data in a bad state if the
+revert step is rushed. Not worth the risk for one beat.
+
+**CloudWatch, if you want to show it's real, not a mock**: the runtime's
+own log group has real, readable evidence of live computation happening —
+more useful on camera than an empty trace view.
 
 ```
 CloudWatch → Logs → Log groups
 → /aws/bedrock-agentcore/runtimes/harvest_convoy_watcher-7DW91DHIBA-DEFAULT
-→ Log streams → "spans"
 ```
 
-Filter the stream to `2026-08-17` around `10:32` UTC (`16:02` IST) — or
-use **Logs Insights** instead for a cleaner on-screen query, pointed at
-the same log group:
+Filter for `FORECAST HORIZON TRUNCATED` or `MATURITY THRESHOLD FALLBACK`
+or `no chat_id for farmer` — these are real log lines from real
+decisions this project made live (a forecast day not yet computed by
+Open-Meteo, a cluster with no calibrated threshold yet, farmers
+deliberately left unwired). Say: *"These aren't canned log lines — this
+is the actual deterministic core making real calls against real data,
+today."*
 
-```
-fields @timestamp, name, traceId, spanId, parentSpanId, attributes.round, attributes.outcome
-| filter traceId = "360de14942b4643e8d9f23e3ed2adca9"
-| sort @timestamp asc
-```
-
-This is a real, already-captured trace from a genuine live negotiation
-(escalated, p02 vs p03, 3 rounds) — you'll see `coordinator.negotiate`
-(with `outcome: escalated`) as the parent of three `negotiation.round`
-spans (`round: 1`, `2`, `3`), each holding its own `advocate.get_claim` →
-Strands `invoke_agent`/`execute_event_loop_cycle` subtree. Say: *"This
-is the actual negotiation, traced end to end, running on AgentCore
-Runtime — not a mock."* Retention on this log group is indefinite, so
-it'll still be there whenever you film.
-
-If you'd rather show a **fresh** trace instead of this captured one, see
-"Regenerating a live trace" below — it requires temporarily throttling
-the cluster's machine capacity in DynamoDB, which needs care to revert.
+*A note on distributed tracing, honestly stated rather than glossed
+over*: this project's OpenTelemetry spans are documented (ADR-006) to
+export to CloudWatch/X-Ray with correct, deep nesting, verified during
+the original deployment session. As of this runbook's last check, a
+fresh individual trace was not independently reproducible via the AWS
+CLI in the few minutes available — CloudWatch Application Signals
+*does* show the `app.daily_watch` operation as live and healthy (proof
+the tracing pipeline itself is running), but the raw per-span trace view
+wasn't confirmed. If you have time before filming, check
+`CloudWatch → Application Signals → Services → harvest-convoy-watcher`
+for a live trace list; if one's there, great, show it. If not, skip this
+sub-beat rather than promise something that might not render live on
+camera — the log-line evidence above already makes the "this is real"
+point on its own.
 
 ## Beat 6 — Cost and honesty (4:15–4:45)
 
 One screen, either the README's Cost section or just say it: *"A full
-scheduling run costs $0.008 with prompt caching — measured, not
-estimated. Standing infrastructure is about two dollars a month."* Then,
-briefly: *"This is a simulated cluster on real Theni coordinates and real
-weather data — no live farmers are onboarded yet. The maturity threshold
-is a derived estimate, not an agronomist-sourced number, and the README
-shows exactly how it's derived."* Ten seconds, not a caveat-dump — it's
-there to show the project is honest about its own limits, not to
-undersell it.
+scheduling run costs about a cent and a half with prompt caching —
+measured across multiple real runs, not estimated. Standing
+infrastructure is about two dollars a month."* Then, briefly: *"This is
+a simulated cluster on real coordinates and real weather data — no live
+farmers are onboarded yet. The maturity threshold is a derived estimate
+where a cluster hasn't been calibrated against its own climatology, and
+the README shows exactly how it's derived either way. We also tested
+whether the model could write Tamil directly — it couldn't, reliably —
+so that one field is templated from facts instead of generated. The
+README has the actual garbled samples, not just the claim."* Ten to
+fifteen seconds, not a caveat-dump — it's there to show the project is
+honest about its own limits, not to undersell it.
 
 ## Beat 7 — Close (4:45–5:00)
 
 *"Harvest Convoy — deterministic scheduling, LLM judgment only where it's
-actually needed. Repo link and license in the description."* Cut.
+actually needed, in the language the farmer actually uses. Repo link and
+license in the description."* Cut.
 
 ---
 
-## Regenerating a live trace (optional, if you want a fresh one on camera)
+## Re-running Beat 5
 
-Only do this if you specifically want to show the trace-capture *process*
-live rather than an already-proven one. It temporarily mutates live
-DynamoDB data and must be reverted — don't do this without watching the
-revert step complete.
+Each cluster only runs once per calendar day (the watcher's idempotency
+marker) — `force: true` skips the *rain-trigger* gate, not this one. If
+you need a second take, reset the marker first:
 
 ```bash
-# 1. Throttle capacity so there's a genuine capacity-constrained tie today
-aws dynamodb update-item --table-name harvest_convoy \
-  --key '{"PK":{"S":"CLUSTER#kamatchipuram"},"SK":{"S":"METADATA"}}' \
-  --update-expression "SET machine_capacity_acres_per_day = :c" \
-  --expression-attribute-values '{":c":{"N":"0.2"}}' --region ap-south-1
-
-# 2. Clear today's watcher marker so it actually re-checks
-aws dynamodb delete-item --table-name harvest_convoy \
-  --key '{"PK":{"S":"CLUSTER#kamatchipuram"},"SK":{"S":"WATCHER#RUN"}}' --region ap-south-1
-
-# 3. Invoke the deployed runtime through the real Scheduler path (Lambda shim)
-aws lambda invoke --function-name harvest-convoy-watcher-invoker \
-  --payload '{"cluster_id":"kamatchipuram","season_id":"2026-kuruvai","force":true}' \
-  --cli-binary-format raw-in-base64-out --region ap-south-1 /tmp/out.json && cat /tmp/out.json
-
-# 4. REVERT — do this immediately, before anything else
-aws dynamodb update-item --table-name harvest_convoy \
-  --key '{"PK":{"S":"CLUSTER#kamatchipuram"},"SK":{"S":"METADATA"}}' \
-  --update-expression "SET machine_capacity_acres_per_day = :c" \
-  --expression-attribute-values '{":c":{"N":"3.5"}}' --region ap-south-1
+uv run python -c "
+from harvest_convoy.storage import get_storage
+import os
+os.environ['HARVEST_CONVOY_STORAGE'] = 'dynamo'
+get_storage().set_watcher_last_run('kamatchipuram', '2026-08-17')
+"
 ```
 
-Step 3's response body includes `"escalations": <N>`. If `N >= 1`, a
-fresh `coordinator.negotiate` span exists in the same log
-group/stream — find it by timestamp (the invoke just ran, so "now" in
-CloudWatch's time range picker). If `N == 0`, the real weather forecast
-that day didn't produce a tie even under throttled capacity; re-run step
-3 once, and if it still doesn't escalate, fall back to Beat 5's captured
-trace instead of spending more time chasing it live on camera.
+(Any date before today works — this rolls the marker back by one day
+rather than deleting the item outright, using the project's own storage
+API instead of a raw DynamoDB call.) Then re-run the `aws lambda invoke`
+command from Beat 5.
+
+## What changed since the last version of this runbook
+
+This runbook was rewritten after redeploying the AgentCore Runtime with
+current code (Tamil support, per-cluster GDD derivation, multi-cluster-
+capable watcher) and re-verifying the deployed path end to end, not just
+assuming the redeploy made everything work:
+
+- **Two real bugs found and fixed live, both required for Beat 5 to
+  work at all**, neither specific to Tamil: (1) `DynamoStorage` decoded
+  every DynamoDB Number as a Python `float`, so a farmer's real
+  `telegram_chat_id` (an int) round-tripped as e.g. `1276258406.0` — a
+  JSON float where Telegram's Bot API needs an integer, silently
+  breaking every deployed send. (2) Requesting the full 16-day forecast
+  horizon hit a real Open-Meteo gap — the far day hadn't been computed
+  yet — which hard-failed the whole watcher run before it could do
+  anything; a trailing not-yet-computed day is now trimmed instead of
+  treated as a fatal gap. Both are covered in
+  [ADR-006](adr/ADR-006-deploy.md) (this project's ongoing deploy-finding
+  log) with the exact live evidence.
+- **A third, unrelated pre-existing gap found the same session**: the
+  deployed runtime's `TELEGRAM_BOT_TOKEN` had never been set (visible in
+  its logs as every Telegram call failing against
+  `.../botNone/sendMessage`) — meaning no scheduled run had ever
+  actually delivered a message since this was first deployed. Fixed by
+  adding it to the runtime's environment variables.
+- **Beat 4 and Beat 5 now have clearly different jobs.** Beat 4
+  (`trigger_scenario.py`, local) is the only beat that reliably produces
+  an escalation — confirmed live that the real 8-plot cluster's actual
+  capacity doesn't naturally tie today, matching what ADR-006 already
+  found for this same cluster. Beat 5 (deployed runtime) demonstrates
+  the real infrastructure and real message delivery instead of trying to
+  force the same outcome twice.
+- **The previous version of this runbook pointed at a specific captured
+  trace ID for Beat 5.** That trace was not reproducible via the AWS CLI
+  when this version was written (see Beat 5's tracing note) — rather
+  than leave a runbook step that might silently fail on camera, that
+  step was replaced with CloudWatch log-line evidence that was directly
+  verified this session, plus an optional, clearly-hedged trace check.
+- **Runtime version**: the deployed AgentCore Runtime went from version
+  6 (pre-ADR-008 code, the state this runbook previously assumed) to
+  version 10 across four updates in this session — one for the current
+  source tree, one each for the two bug fixes above, one for the missing
+  token. `list-agent-runtime-endpoints` confirms the `DEFAULT` endpoint's
+  `liveVersion` tracks the latest automatically; the EventBridge Schedule
+  and Lambda shim were never touched (`LastModificationDate`/
+  `LastModified` unchanged throughout) and don't need to be for any of
+  this.
