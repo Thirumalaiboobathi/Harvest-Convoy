@@ -21,7 +21,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from harvest_convoy.models import Cluster, Farmer, Plot
-from harvest_convoy.storage.interface import LedgerEntry, StorageResult
+from harvest_convoy.storage.interface import HarvestConfirmation, LedgerEntry, StorageResult
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +268,46 @@ class DynamoStorage:
     def get_harvested_plot_ids(self, cluster_id: str, season_id: str) -> set[str]:
         items = self._query_gsi1(cluster_id, f"HARVEST#{season_id}#")
         return {i["plot_id"] for i in items}
+
+    # --- Harvest confirmation loop -- ADR-009 Part 2 ---
+
+    def get_harvest_confirmation(
+        self, plot_id: str, season_id: str
+    ) -> HarvestConfirmation | None:
+        try:
+            resp = self._table.get_item(
+                Key={"PK": f"PLOT#{plot_id}", "SK": f"CONFIRM#{season_id}"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "get_harvest_confirmation(%s, %s) failed: %s", plot_id, season_id, exc
+            )
+            return None
+        item = resp.get("Item")
+        if item is None:
+            return None
+        return HarvestConfirmation(**_decode(_strip_keys(item, extra=("GSI1PK", "GSI1SK"))))
+
+    def put_harvest_confirmation(
+        self, confirmation: HarvestConfirmation
+    ) -> StorageResult:
+        item = {
+            "PK": f"PLOT#{confirmation.plot_id}",
+            "SK": f"CONFIRM#{confirmation.season_id}",
+            "GSI1PK": f"CLUSTER#{confirmation.cluster_id}",
+            "GSI1SK": f"CONFIRM#{confirmation.season_id}#{confirmation.plot_id}",
+            **_encode(asdict(confirmation)),
+        }
+        return self._put(item)
+
+    def get_confirmations_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[HarvestConfirmation]:
+        items = self._query_gsi1(cluster_id, f"CONFIRM#{season_id}#")
+        return [
+            HarvestConfirmation(**_decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK"))))
+            for i in items
+        ]
 
     # --- internals ---
 

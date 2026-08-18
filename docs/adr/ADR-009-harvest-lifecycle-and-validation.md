@@ -652,6 +652,65 @@ worth of ledger state, assert the second season's coordinator scoring
 reflects the first season's no-show. Plus: no-chat-id degrade test,
 late-reply-doesn't-reverse test, follow-through-rate arithmetic test.
 
+### Implemented — design revised from Decision 6's original draft, per your direct instruction
+
+**Decision 6 as originally drafted above was wrong, and you corrected it
+before implementation started — recorded here rather than silently
+edited out.** The draft said unconfirmed-after-the-window gets
+`record_bump(..., outcome="unconfirmed")` — silence credited the ledger
+the same as an explicit "no". Your actual instruction for Part 2 reversed
+that: **silence records as unknown, never as a no-show; the ledger is
+credited, and the reversal hook fires, only on an explicit "no" tap.**
+"An unanswered message is not evidence the machine failed to come" — a
+real, correct distinction the original draft missed by treating "no
+reply" and "no" as the same signal.
+
+Consequences of the correction, as actually built:
+
+- **No sweep exists.** The original design needed a scheduled sweep
+  (`run_evening_confirmations`'s *next* invocation checking for
+  window-expired records) to write the ledger credit. Since nothing is
+  ever written for silence, there's nothing to sweep — `confirmed`
+  simply stays `None` forever for a plot nobody answers about, which
+  *is* the correctly-recorded "unknown" state, not a placeholder for one.
+  `watcher.confirmation_status(confirmation, today)` computes
+  `"pending"` vs. `"unknown"` (using `UNCONFIRMED_HARVEST_WINDOW_DAYS`)
+  purely at read time, for reporting — it writes nothing.
+- **The late-reply edge case simplifies to "not a special case."** The
+  original draft worried about a late "yes" arriving after a ledger
+  write had already fired for the same key and needing to not reverse
+  it. Since nothing is written on silence anymore, a late reply —
+  whether "yes" or "no", whether one day or one month late — is
+  processed by `webhook.handle_confirmation_callback` exactly the same
+  way an on-time one is. No window-awareness in the handler at all.
+- **A self-contradicting double-tap** ("no" then "yes", changing their
+  mind) does update the stored `confirmed` value (truth on record,
+  last-write-wins), but does not re-run the irreversible side effects —
+  the plot is not re-marked harvested, the ledger credit is not
+  reversed. Same discipline as "we don't reverse ledger writes",
+  extended to this case explicitly, tested
+  (`test_no_then_yes_does_not_reverse_the_already_recorded_bump`).
+- **`operator_follow_through_rate`** (Decision 7) now excludes pending/
+  unknown records from *both* halves of the ratio, not just the
+  numerator — silence must not move the number in either direction,
+  matching the same asymmetry. Returns `None`, not `0.0`, when nobody
+  has answered anything yet.
+
+Built: `HarvestConfirmation` (storage/interface.py, both backends,
+`GSI1PK=CLUSTER#{cluster_id}` keyed like Part 1.5's harvest marker);
+created at dispatch time inside `watcher._send_notifications`;
+`watcher.run_evening_confirmations` (code-only, undeployed);
+`webhook.handle_confirmation_callback` +
+`webhook.parse_confirmation_callback_data`; confirmation prompt +
+Yes/No keyboard in `notify.py`; new strings in both message modules
+(drafts, sent for review below); `operator_follow_through_rate` in
+`storage/fairness.py`; a diagnostic line in
+`scripts/check_watcher_health.py`. 19 new tests (362 total), including
+both fairness-gate tests side by side
+(`test_a_reported_no_show_gains_fairness_weight_the_following_season`
+and `test_silence_does_not_gain_fairness_weight_the_following_season`)
+— the asymmetry you asked to have pinned down.
+
 ---
 
 ## Part 3: Projected maturity date at registration

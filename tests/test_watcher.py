@@ -6,6 +6,7 @@ weather integration (already covered elsewhere).
 
 from __future__ import annotations
 
+from dataclasses import replace as replace_fn
 from datetime import date
 
 import harvest_convoy.watcher as watcher_mod
@@ -293,6 +294,126 @@ def test_both_real_seeded_clusters_run_independently_through_the_watcher(
     assert all(r["status"] == "triggered" for r in results)
     assert storage.get_watcher_last_run("kamatchipuram") == TODAY.isoformat()
     assert storage.get_watcher_last_run("naducauvery") == TODAY.isoformat()
+
+
+def test_triggered_run_creates_a_harvest_confirmation_record_for_each_fits_plot(
+    tmp_path, monkeypatch
+) -> None:
+    """ADR-009 Part 2, Decision 4: the confirmation record is created at
+    dispatch time, unconditionally -- before any farmer reply exists."""
+    storage = FileStorage(tmp_path / "s.json")
+    plots = [_plot("p1", "f1", 110), _plot("p2", "f2", 5)]  # p1 fits, p2 too green
+    farmers = [_farmer("f1"), _farmer("f2")]
+    _seed(storage, plots, farmers)
+    _patch_weather(monkeypatch, [ForecastDay("d0", 0.0), ForecastDay("d1", 20.0)])
+
+    watcher_mod.run_daily_watch(
+        "c1", "2026-kuruvai", storage=storage, today=TODAY, telegram_client=_FakeClient(),
+        get_claim=_truthful_claim,
+    )
+
+    confirmation = storage.get_harvest_confirmation("p1", "2026-kuruvai")
+    assert confirmation is not None
+    assert confirmation.farmer_id == "f1"
+    assert confirmation.cluster_id == "c1"
+    assert confirmation.scheduled_date == TODAY.isoformat()
+    assert confirmation.asked_at is None
+    assert confirmation.confirmed is None
+    # p2 was too green -- never dispatched, no confirmation record at all.
+    assert storage.get_harvest_confirmation("p2", "2026-kuruvai") is None
+
+
+def test_run_evening_confirmations_sends_prompt_and_sets_asked_at(tmp_path) -> None:
+    from harvest_convoy.storage.interface import HarvestConfirmation
+
+    storage = FileStorage(tmp_path / "s.json")
+    _seed(storage, [_plot("p1", "f1", 110)], [_farmer("f1")])
+    storage.put_harvest_confirmation(HarvestConfirmation(
+        plot_id="p1", farmer_id="f1", cluster_id="c1", season_id="2026-kuruvai",
+        scheduled_date=TODAY.isoformat(),
+    ))
+
+    client = _FakeClient()
+    result = watcher_mod.run_evening_confirmations(
+        "c1", "2026-kuruvai", storage=storage, today=TODAY, telegram_client=client
+    )
+
+    assert result["asked"] == 1
+    assert result["skipped_no_chat_id"] == 0
+    chat_ids_sent = {c for c, _, _ in client.sent}
+    assert 101 in chat_ids_sent  # f1's chat_id
+    confirmation = storage.get_harvest_confirmation("p1", "2026-kuruvai")
+    assert confirmation.asked_at is not None
+
+
+def test_run_evening_confirmations_skips_farmer_with_no_chat_id(tmp_path) -> None:
+    from harvest_convoy.storage.interface import HarvestConfirmation
+
+    storage = FileStorage(tmp_path / "s.json")
+    farmer_no_chat = Farmer(farmer_id="f1", name="F1", cluster_id="c1")  # no chat_id
+    _seed(storage, [_plot("p1", "f1", 110)], [farmer_no_chat])
+    storage.put_harvest_confirmation(HarvestConfirmation(
+        plot_id="p1", farmer_id="f1", cluster_id="c1", season_id="2026-kuruvai",
+        scheduled_date=TODAY.isoformat(),
+    ))
+
+    client = _FakeClient()
+    result = watcher_mod.run_evening_confirmations(
+        "c1", "2026-kuruvai", storage=storage, today=TODAY, telegram_client=client
+    )
+
+    assert result["asked"] == 0
+    assert result["skipped_no_chat_id"] == 1
+    assert client.sent == []
+    confirmation = storage.get_harvest_confirmation("p1", "2026-kuruvai")
+    assert confirmation.asked_at is None  # never gets an asked_at at all
+
+
+def test_run_evening_confirmations_does_not_reask_already_asked(tmp_path) -> None:
+    from harvest_convoy.storage.interface import HarvestConfirmation
+
+    storage = FileStorage(tmp_path / "s.json")
+    _seed(storage, [_plot("p1", "f1", 110)], [_farmer("f1")])
+    storage.put_harvest_confirmation(HarvestConfirmation(
+        plot_id="p1", farmer_id="f1", cluster_id="c1", season_id="2026-kuruvai",
+        scheduled_date=TODAY.isoformat(), asked_at="2026-08-15T18:00:00+00:00",
+    ))
+
+    client = _FakeClient()
+    result = watcher_mod.run_evening_confirmations(
+        "c1", "2026-kuruvai", storage=storage, today=TODAY, telegram_client=client
+    )
+
+    assert result["asked"] == 0
+    assert result["already_asked"] == 1
+    assert client.sent == []
+
+
+def test_confirmation_status_transitions() -> None:
+    from harvest_convoy.storage.interface import HarvestConfirmation
+
+    base = HarvestConfirmation(
+        plot_id="p1", farmer_id="f1", cluster_id="c1", season_id="2026-kuruvai",
+        scheduled_date=TODAY.isoformat(),
+    )
+
+    never_asked = base
+    assert watcher_mod.confirmation_status(never_asked, TODAY) == "unknown"
+
+    just_asked = replace_fn(base, asked_at=TODAY.isoformat() + "T18:00:00+00:00")
+    assert watcher_mod.confirmation_status(just_asked, TODAY) == "pending"
+
+    from datetime import timedelta
+    stale = replace_fn(
+        base, asked_at=(TODAY - timedelta(days=3)).isoformat() + "T18:00:00+00:00"
+    )
+    assert watcher_mod.confirmation_status(stale, TODAY) == "unknown"
+
+    answered_yes = replace_fn(base, confirmed=True, confirmed_at="x")
+    assert watcher_mod.confirmation_status(answered_yes, TODAY) == "confirmed_yes"
+
+    answered_no = replace_fn(base, confirmed=False, confirmed_at="x")
+    assert watcher_mod.confirmation_status(answered_no, TODAY) == "confirmed_no"
 
 
 def test_partial_failure_mid_pipeline_does_not_mark_the_day_done(tmp_path, monkeypatch) -> None:

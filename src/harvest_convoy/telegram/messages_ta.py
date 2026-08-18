@@ -229,6 +229,16 @@ def not_ready(area_acres: float, area_unit: str) -> str:
     #  as the core not-ready statement itself.
 
 
+def harvest_confirmation_prompt(area_acres: float, area_unit: str) -> str:
+    area = format_area(area_acres, area_unit)
+    return (
+        f"இன்று இயந்திரம் உங்கள் {area} வயலுக்கு வந்ததா? கீழே "
+        "ஆம் அல்லது இல்லை என்பதைத் தட்டவும்."
+    )
+    # "Did the machine come to your {area} plot today? Tap Yes or No
+    #  below." -- DRAFT, pending native-speaker review (ADR-009 Part 2).
+
+
 def escalation_resolved_won(area_acres: float, area_unit: str) -> str:
     area = format_area(area_acres, area_unit)
     return f"புதுப்பிப்பு: உங்கள் {area} வயல் இன்றைய பாதைக்கு உறுதி செய்யப்பட்டுள்ளது."
@@ -394,6 +404,26 @@ def unrecognized_action() -> str:
     # operator needs (this line is generated, everything else in the
     # message is measured). Picked after seeing both rendered in the
     # full escalation context, round 3 review.
+
+
+# --- Harvest confirmation loop (ADR-009 Part 2) ---
+# DRAFT, pending native-speaker review, same process as every other
+# string in this file (scripts/print_tamil_strings.py dump-and-review).
+
+CONFIRMATION_YES_LABEL = "ஆம்"
+# "Yes"
+CONFIRMATION_NO_LABEL = "இல்லை"
+# "No"
+
+
+def confirmation_thanks() -> str:
+    return "நன்றி, பதிவு செய்யப்பட்டது."
+    # "Thanks, recorded."
+
+
+def confirmation_not_found() -> str:
+    return "அந்த உறுதிப்படுத்தல் கிடைக்கவில்லை -- இது பழைய செய்தியாக இருக்கலாம்."
+    # "That confirmation wasn't found -- this may be an old message."
 
 
 # --- Advocate argument, templated (not LLM-generated) for Tamil ---

@@ -21,12 +21,15 @@ already exists.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Callable
 
 from harvest_convoy.agents.contracts import EscalationPayload
 from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.storage import Storage
 from harvest_convoy.storage.fairness import record_bump
+from harvest_convoy.storage.interface import HarvestConfirmation
 from harvest_convoy.telegram import notify, registration
 from harvest_convoy.telegram.client import TelegramClient
 from harvest_convoy.telegram.registration import IncomingMessage
@@ -76,6 +79,105 @@ def parse_callback_data(data: str) -> tuple[str, str, str, str] | None:
     if chosen_plot_id not in (plot_a_id, plot_b_id):
         return None
     return cluster_id, plot_a_id, plot_b_id, chosen_plot_id
+
+
+def parse_confirmation_callback_data(data: str) -> tuple[str, str, bool] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "confirm":
+        return None
+    _, plot_id, season_id, answer = parts
+    if answer not in ("yes", "no"):
+        return None
+    return plot_id, season_id, answer == "yes"
+
+
+def handle_confirmation_callback(
+    client: TelegramClient,
+    callback_query: dict,
+    storage: Storage,
+) -> None:
+    """ADR-009 Part 2: the farmer's yes/no tap on the evening "did the
+    machine come?" prompt. One message, two taps, no follow-up -- this
+    function's only job is to record the answer and, on "no", run the
+    reversal (return the plot to the schedulable pool, credit the
+    fairness ledger). "Yes" corroborates the harvested state Part 1.5
+    already set -- nothing else happens.
+
+    Idempotent by construction, not by a special case: put_harvest_
+    confirmation is an overwrite (a duplicate tap just re-records the
+    same answer), clear_plot_harvest is a no-op on an already-cleared
+    plot, and record_bump's existing (farmer_id, season_id) uniqueness
+    (see storage/fairness.py) silently prevents a second ledger credit
+    -- the same guarantee ADR-005's escalation-resolution path already
+    relies on. A late reply (after the confirmation window has closed)
+    is processed exactly the same way as an on-time one: nothing was
+    written on silence, so there's nothing to reconcile against.
+    """
+    callback_query_id = callback_query.get("id", "")
+    data = callback_query.get("data", "")
+    parsed = parse_confirmation_callback_data(data)
+
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(),
+            show_alert=True,
+        )
+        return
+
+    plot_id, season_id, answer = parsed
+    confirmation = storage.get_harvest_confirmation(plot_id, season_id)
+    if confirmation is None:
+        # No record for this exact (plot_id, season_id) key -- a stale or
+        # forged callback. Defaults to Tamil: no farmer is resolvable yet.
+        logger.warning(
+            "confirmation callback for unknown plot=%s season=%s -- no "
+            "record, nothing to update",
+            plot_id, season_id,
+        )
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").confirmation_not_found(),
+            show_alert=True,
+        )
+        return
+
+    farmer = storage.get_farmer(confirmation.farmer_id)
+    language = farmer.language if farmer is not None else "ta"
+    mod = notify._lang_module(language)
+
+    updated = replace(
+        confirmation, confirmed=answer, confirmed_at=datetime.now(timezone.utc).isoformat()
+    )
+    storage.put_harvest_confirmation(updated)
+
+    if not answer:
+        # The reversal hook: return the plot to the schedulable pool AND
+        # credit the fairness ledger -- the farmer was effectively bumped
+        # regardless of what the system decided. Both calls are safe to
+        # repeat (see docstring above).
+        storage.clear_plot_harvest(
+            confirmation.plot_id, confirmation.cluster_id, confirmation.season_id
+        )
+        bump_result = record_bump(
+            confirmation.farmer_id, confirmation.season_id,
+            days_bumped=DEFAULT_DAYS_BUMPED, outcome="harvest_no_show",
+            cluster_id=confirmation.cluster_id, plot_id=confirmation.plot_id,
+            opponent_plot_id="",  # not a lost negotiation -- no opponent plot
+            storage=storage,
+        )
+        if not bump_result.success:
+            logger.info(
+                "confirmation %s/%s: ledger write already exists (%s) -- "
+                "duplicate 'no' tap, not double-crediting",
+                plot_id, season_id, bump_result.error,
+            )
+
+    client.answer_callback_query(callback_query_id, mod.confirmation_thanks())
+
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if chat_id is not None and message_id is not None:
+        client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
 
 
 def handle_callback_query(
@@ -240,16 +342,21 @@ def handle_update(
     uses them -- keeps the signature uniform rather than branching on
     which fields are needed for which update type.
 
-    Two distinct callback_query shapes (ADR-008 Decision 7): a
-    "lang:ta"/"lang:en" registration-language tap routes to
-    registration.handle_language_callback (a toast, no chat message,
-    doesn't touch the escalation-resolution path at all); anything else
-    goes through the existing handle_callback_query escalation flow.
+    Three distinct callback_query shapes: a "lang:ta"/"lang:en"
+    registration-language tap routes to
+    registration.handle_language_callback (ADR-008 Decision 7); a
+    "confirm:{plot_id}:{season_id}:{yes|no}" tap routes to
+    handle_confirmation_callback (ADR-009 Part 2); anything else goes
+    through the existing handle_callback_query escalation flow.
     """
     if "callback_query" in update:
         callback_query = update["callback_query"]
-        if callback_query.get("data", "").startswith("lang:"):
+        data = callback_query.get("data", "")
+        if data.startswith("lang:"):
             registration.handle_language_callback(client, callback_query)
+            return
+        if data.startswith("confirm:"):
+            handle_confirmation_callback(client, callback_query, storage)
             return
         handle_callback_query(
             client, callback_query, storage, season_id, lookup_farmer_for_plot

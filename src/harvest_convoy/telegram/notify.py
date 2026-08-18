@@ -206,6 +206,47 @@ def send_operator_route_summary(
     )
 
 
+def build_confirmation_keyboard(plot_id: str, season_id: str, *, language: str = "ta") -> dict:
+    """Two buttons, one tap either way -- the entire farmer-facing
+    interaction for ADR-009 Part 2's confirmation loop. callback_data
+    carries plot_id/season_id directly (not "today's" or "current"
+    anything), so a tap on a stale message always resolves against the
+    exact season it was sent for, even if the season has since rolled
+    over -- see webhook.handle_confirmation_callback."""
+    mod = _lang_module(language)
+
+    def callback_data(answer: str) -> str:
+        return f"confirm:{plot_id}:{season_id}:{answer}"
+
+    return {
+        "inline_keyboard": [
+            [
+                {"text": mod.CONFIRMATION_YES_LABEL, "callback_data": callback_data("yes")},
+                {"text": mod.CONFIRMATION_NO_LABEL, "callback_data": callback_data("no")},
+            ]
+        ]
+    }
+
+
+def build_harvest_confirmation_prompt_text(plot: Plot, *, language: str = "ta") -> str:
+    return _lang_module(language).harvest_confirmation_prompt(plot.area_acres, plot.area_unit)
+
+
+def send_harvest_confirmation_prompt(
+    client: TelegramClient, farmer: Farmer, plot: Plot, season_id: str
+) -> SendResult:
+    if farmer.telegram_chat_id is None:
+        logger.error("no chat_id for farmer %s, cannot ask for confirmation", farmer.farmer_id)
+        return SendResult(success=False, error="farmer has no telegram_chat_id")
+    return client.send_message(
+        farmer.telegram_chat_id,
+        build_harvest_confirmation_prompt_text(plot, language=farmer.language),
+        reply_markup=build_confirmation_keyboard(
+            plot.plot_id, season_id, language=farmer.language
+        ),
+    )
+
+
 def build_escalation_keyboard(
     cluster_id: str,
     plot_a_id: str, farmer_a: Farmer, plot_a: Plot,

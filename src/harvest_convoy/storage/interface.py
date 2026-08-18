@@ -36,6 +36,31 @@ class LedgerEntry:
     opponent_plot_id: str
 
 
+@dataclass(frozen=True)
+class HarvestConfirmation:
+    """Did the machine actually come? One record per (plot_id, season_id),
+    created the moment the watcher sends a harvest_scheduled notification
+    -- before any farmer reply exists. See ADR-009 Part 2.
+
+    `confirmed: bool | None` is the load-bearing type: None is a real,
+    distinct third state (never asked, or asked and no reply yet) --
+    never assumed True or False. Per your explicit instruction, silence
+    past the confirmation window is recorded as unknown, not as a no-show
+    -- there is no separate "timed out" flag; `confirmed is None` plus
+    `asked_at` being older than `watcher.UNCONFIRMED_HARVEST_WINDOW_DAYS`
+    is what "unknown" means, computed at read time, not written.
+    """
+
+    plot_id: str
+    farmer_id: str
+    cluster_id: str
+    season_id: str
+    scheduled_date: str        # ISO date -- the day the route said "today"
+    asked_at: str | None = None      # ISO timestamp the evening prompt was sent
+    confirmed: bool | None = None    # None = unknown/no reply -- never assumed
+    confirmed_at: str | None = None  # ISO timestamp of the farmer's reply, if any
+
+
 class Storage(Protocol):
     def get_cluster(self, cluster_id: str) -> Cluster | None: ...
     def put_cluster(self, cluster: Cluster) -> StorageResult: ...
@@ -97,4 +122,31 @@ class Storage(Protocol):
         set for a season with no records yet -- there is no separate
         Season entity in this codebase; season_id is an opaque string, and
         a new one has no prior harvest state by construction."""
+        ...
+
+    def get_harvest_confirmation(
+        self, plot_id: str, season_id: str
+    ) -> HarvestConfirmation | None:
+        """None if no confirmation record exists for this plot/season --
+        e.g. it was never scheduled, or a stale/forged callback references
+        a key that was never created. See ADR-009 Part 2."""
+        ...
+
+    def put_harvest_confirmation(
+        self, confirmation: HarvestConfirmation
+    ) -> StorageResult:
+        """Overwrite semantics, like every put_* here except
+        put_ledger_entry -- both the creation write (watcher.py, on
+        dispatch) and the farmer's reply write (webhook.py) go through
+        this same method."""
+        ...
+
+    def get_confirmations_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[HarvestConfirmation]:
+        """Every confirmation record for this cluster/season -- small by
+        construction (one per dispatched plot per season, matching this
+        project's demo-scale clusters), so callers filter in Python
+        (pending-to-ask, still-unknown, yes/no counts) rather than this
+        method taking a menu of server-side filter parameters."""
         ...

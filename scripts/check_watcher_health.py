@@ -54,6 +54,33 @@ def check_marker(cluster_id: str) -> bool:
     return False
 
 
+def check_confirmation_follow_through(cluster_id: str, season_id: str) -> None:
+    """Diagnostic only -- never affects the pass/fail exit code. Operator-
+    facing information about how many dispatched harvests have an actual
+    farmer answer, per ADR-009 Part 2, Decision 7."""
+    from harvest_convoy.storage.fairness import operator_follow_through_rate
+    from harvest_convoy.watcher import confirmation_status
+
+    storage = get_storage()
+    confirmations = storage.get_confirmations_for_cluster(cluster_id, season_id)
+    if not confirmations:
+        print(f"[INFO] harvest confirmations: none recorded yet for {cluster_id}/{season_id}")
+        return
+
+    counts: dict[str, int] = {}
+    for c in confirmations:
+        status = confirmation_status(c, date.today())
+        counts[status] = counts.get(status, 0) + 1
+    rate = operator_follow_through_rate(cluster_id, season_id, storage)
+    rate_str = f"{rate:.0%}" if rate is not None else "n/a (no replies yet)"
+    print(
+        f"[INFO] harvest confirmations for {cluster_id}/{season_id}: "
+        f"{counts.get('confirmed_yes', 0)} yes, {counts.get('confirmed_no', 0)} no, "
+        f"{counts.get('pending', 0)} pending, {counts.get('unknown', 0)} unknown "
+        f"-- follow-through rate: {rate_str}"
+    )
+
+
 def check_schedule_recent_activity() -> bool:
     logs = boto3.client("logs", region_name=REGION)
     since_ms = int((datetime.now(timezone.utc) - timedelta(hours=25)).timestamp() * 1000)
@@ -144,6 +171,8 @@ def main() -> int:
     ]
     if args.invoke:
         results.append(do_invoke(args.cluster_id, args.season_id))
+
+    check_confirmation_follow_through(args.cluster_id, args.season_id)
 
     print()
     if all(results):

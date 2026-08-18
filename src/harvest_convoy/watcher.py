@@ -17,13 +17,15 @@ rather than silently skipped for the rest of the day.
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 
 from harvest_convoy.agents.coordinator import run_cluster, run_cluster_with_claims
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.scheduling.capacity import usable_harvest_days
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome, solve
 from harvest_convoy.storage import Storage, get_storage
+from harvest_convoy.storage.interface import HarvestConfirmation
 from harvest_convoy.telegram import notify, webhook
 from harvest_convoy.telegram.client import TelegramClient
 from harvest_convoy.weather.openmeteo import (
@@ -38,6 +40,17 @@ logger = logging.getLogger(__name__)
 # the Phase 2/3/5 demo scenarios, not independently re-derived here.
 RAIN_THRESHOLD_MM = 5.0
 FORECAST_HORIZON_DAYS = 16  # Open-Meteo's confirmed max forecast horizon, ADR-001
+
+# How long to wait for a farmer's harvest-confirmation reply before this
+# project stops expecting one. This is an unsourced judgment call, not a
+# derived value -- there is no data behind "2," only the assumption that
+# a farmer plausibly doesn't open Telegram every single day. Per explicit
+# instruction (ADR-009 Part 2), silence past this window is recorded as
+# UNKNOWN, never as a no-show -- it gates only how a still-unanswered
+# HarvestConfirmation is *reported* (see confirmation_status() below),
+# never a fairness ledger write. Change freely; nothing depends on the
+# exact number.
+UNCONFIRMED_HARVEST_WINDOW_DAYS = 2
 
 
 def run_daily_watch(
@@ -190,7 +203,8 @@ def _run_daily_watch_one(
         plots_by_id = {p.plot_id: p for p in plots}
         decisions_by_id = {d.plot_id: d for d in decisions}
         _send_notifications(
-            client, cluster, decisions_by_id, result, farmers_by_id, plots_by_id
+            client, cluster, decisions_by_id, result, farmers_by_id, plots_by_id,
+            storage, season_id, today,
         )
 
         storage.set_watcher_last_run(cluster_id, today.isoformat())
@@ -217,6 +231,9 @@ def _send_notifications(
     result,
     farmers_by_id: dict[str, Farmer],
     plots_by_id: dict[str, Plot],
+    storage: Storage,
+    season_id: str,
+    today: date,
 ) -> None:
     fits_route: list[tuple[Farmer, Plot]] = []
 
@@ -236,6 +253,24 @@ def _send_notifications(
             decision = decisions_by_id[outcome.plot_id]
             notify.send_harvest_scheduled(client, farmer, plot, decision.route_position)
             fits_route.append((farmer, plot))
+            # The confirmation record is created here, at dispatch time,
+            # unconditionally -- even for a farmer with no chat_id (the
+            # fact "this plot was scheduled and nobody could be asked"
+            # stays on record either way). See ADR-009 Part 2, Decision 4.
+            confirm_result = storage.put_harvest_confirmation(
+                HarvestConfirmation(
+                    plot_id=plot.plot_id, farmer_id=farmer.farmer_id,
+                    cluster_id=cluster.cluster_id, season_id=season_id,
+                    scheduled_date=today.isoformat(),
+                )
+            )
+            if not confirm_result.success:
+                logger.error(
+                    "HARVEST CONFIRMATION WRITE FAILED: plot=%s cluster=%s "
+                    "season=%s -- the evening prompt will have nothing to "
+                    "ask about for this plot: %s",
+                    plot.plot_id, cluster.cluster_id, season_id, confirm_result.error,
+                )
         # CONTESTED plots that resolved without escalating (result.resolved_negotiations)
         # or remain contested get no dedicated message this phase -- there is no
         # "you're contested but not escalated" message type in notify.py's four
@@ -264,3 +299,99 @@ def _send_notifications(
             escalation.plot_b_id, farmer_b, plots_by_id[escalation.plot_b_id], escalation.claim_b,
             operator_language=cluster.operator_language,
         )
+
+
+def confirmation_status(
+    confirmation: HarvestConfirmation, today: date
+) -> str:
+    """One of "confirmed_yes", "confirmed_no", "pending" (asked, still
+    within the window, plausibly on its way), or "unknown" (never asked,
+    or asked and the window has closed with no reply). This is a purely
+    computed classification -- nothing about "unknown" is written to
+    storage; `HarvestConfirmation.confirmed` simply stays None forever
+    for a plot nobody ever answers about, exactly as it should for a
+    signal we genuinely don't have. See ADR-009 Part 2."""
+    if confirmation.confirmed is True:
+        return "confirmed_yes"
+    if confirmation.confirmed is False:
+        return "confirmed_no"
+    if confirmation.asked_at is None:
+        return "unknown"
+    asked_date = date.fromisoformat(confirmation.asked_at[:10])
+    if (today - asked_date).days >= UNCONFIRMED_HARVEST_WINDOW_DAYS:
+        return "unknown"
+    return "pending"
+
+
+def run_evening_confirmations(
+    cluster_id: str,
+    season_id: str,
+    *,
+    storage: Storage | None = None,
+    today: date | None = None,
+    telegram_client: TelegramClient | None = None,
+) -> dict:
+    """Code-only entrypoint -- not wired to any schedule yet. Sends the
+    evening "did the machine come?" prompt (one message, two taps) for
+    every HarvestConfirmation in this cluster/season that hasn't been
+    asked yet, regardless of how old (a missed evening run is caught up
+    on the next one, not silently skipped forever). Never a sweep that
+    credits the fairness ledger on silence -- see confirmation_status()
+    and webhook.handle_confirmation_callback for where an actual "no"
+    reply is handled. This needs a second EventBridge Schedule to run on
+    a real evening; deploying that is a separate, explicit decision --
+    see ADR-009 Part 2, Decision 5.
+    """
+    storage = storage or get_storage()
+    today = today or date.today()
+    client = telegram_client or TelegramClient()
+
+    confirmations = storage.get_confirmations_for_cluster(cluster_id, season_id)
+    to_ask = [c for c in confirmations if c.asked_at is None]
+
+    asked = 0
+    skipped_no_chat_id = 0
+    for confirmation in to_ask:
+        farmer = storage.get_farmer(confirmation.farmer_id)
+        plot = storage.get_plot(confirmation.plot_id)
+        if farmer is None or plot is None:
+            logger.error(
+                "run_evening_confirmations: no farmer/plot found for plot=%s, "
+                "cannot send confirmation prompt",
+                confirmation.plot_id,
+            )
+            continue
+        if farmer.telegram_chat_id is None:
+            # Never gets an asked_at -- the record stays "unknown" on
+            # record (nobody could be asked), not a special exemption
+            # from anything. See ADR-009 Part 2, Decision 6.
+            logger.info(
+                "run_evening_confirmations: farmer %s has no chat_id, "
+                "cannot ask about plot=%s",
+                farmer.farmer_id, confirmation.plot_id,
+            )
+            skipped_no_chat_id += 1
+            continue
+
+        send_result = notify.send_harvest_confirmation_prompt(client, farmer, plot, season_id)
+        if send_result.success:
+            updated = replace(
+                confirmation, asked_at=datetime.now(timezone.utc).isoformat()
+            )
+            storage.put_harvest_confirmation(updated)
+            asked += 1
+        else:
+            logger.error(
+                "run_evening_confirmations: send failed for plot=%s: %s -- "
+                "asked_at not set, will retry next invocation",
+                confirmation.plot_id, send_result.error,
+            )
+
+    return {
+        "cluster_id": cluster_id,
+        "season_id": season_id,
+        "date": today.isoformat(),
+        "asked": asked,
+        "skipped_no_chat_id": skipped_no_chat_id,
+        "already_asked": len(confirmations) - len(to_ask),
+    }

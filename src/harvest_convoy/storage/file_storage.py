@@ -19,7 +19,7 @@ from datetime import date
 from pathlib import Path
 
 from harvest_convoy.models import Cluster, Farmer, Plot
-from harvest_convoy.storage.interface import LedgerEntry, StorageResult
+from harvest_convoy.storage.interface import HarvestConfirmation, LedgerEntry, StorageResult
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ DEFAULT_FILE_PATH = Path(".data/harvest_convoy.json")
 _EMPTY: dict = {
     "clusters": {}, "farmers": {}, "plots": {}, "ledger": {}, "watcher": {},
     "harvest": {},  # harvest[cluster_id][season_id][plot_id] = dispatched_at
+    "confirmations": {},  # confirmations[plot_id][season_id] = HarvestConfirmation dict
 }
 
 
@@ -146,3 +147,27 @@ class FileStorage:
 
     def get_harvested_plot_ids(self, cluster_id: str, season_id: str) -> set[str]:
         return set(self._data["harvest"].get(cluster_id, {}).get(season_id, {}).keys())
+
+    # Harvest confirmation loop -- ADR-009 Part 2
+    def get_harvest_confirmation(
+        self, plot_id: str, season_id: str
+    ) -> HarvestConfirmation | None:
+        raw = self._data["confirmations"].get(plot_id, {}).get(season_id)
+        return HarvestConfirmation(**raw) if raw else None
+
+    def put_harvest_confirmation(
+        self, confirmation: HarvestConfirmation
+    ) -> StorageResult:
+        plot_confirmations = self._data["confirmations"].setdefault(confirmation.plot_id, {})
+        plot_confirmations[confirmation.season_id] = asdict(confirmation)
+        return self._save()
+
+    def get_confirmations_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[HarvestConfirmation]:
+        result = []
+        for by_season in self._data["confirmations"].values():
+            raw = by_season.get(season_id)
+            if raw and raw["cluster_id"] == cluster_id:
+                result.append(HarvestConfirmation(**raw))
+        return result

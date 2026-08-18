@@ -119,6 +119,13 @@ def not_ready(area_acres: float, area_unit: str) -> str:
     )
 
 
+def harvest_confirmation_prompt(area_acres: float, area_unit: str) -> str:
+    return (
+        f"Did the machine come to your {format_area(area_acres, area_unit)} "
+        f"plot today? Tap Yes or No below."
+    )
+
+
 def escalation_resolved_won(area_acres: float, area_unit: str) -> str:
     return (
         f"Update: your {format_area(area_acres, area_unit)} plot has "
@@ -232,3 +239,17 @@ def escalation_resolved_assigned(winner_name: str) -> str:
 
 def unrecognized_action() -> str:
     return "Unrecognized action."
+
+
+# --- Harvest confirmation loop (ADR-009 Part 2) ---
+
+CONFIRMATION_YES_LABEL = "Yes"
+CONFIRMATION_NO_LABEL = "No"
+
+
+def confirmation_thanks() -> str:
+    return "Thanks, recorded."
+
+
+def confirmation_not_found() -> str:
+    return "Couldn't find that confirmation -- it may be from an old message."

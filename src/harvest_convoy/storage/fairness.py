@@ -54,6 +54,29 @@ def was_bumped_last_season(farmer_id: str, storage: Storage) -> bool:
     return history[0].days_bumped > 0
 
 
+def operator_follow_through_rate(
+    cluster_id: str, season_id: str, storage: Storage
+) -> float | None:
+    """Confirmed-yes count over (confirmed-yes + confirmed-no) count for
+    this cluster/season -- a derived diagnostic, not stored anywhere. See
+    ADR-009 Part 2, Decision 7.
+
+    Deliberately excludes plots still "pending" or "unknown"
+    (watcher.confirmation_status) from both halves of the ratio: silence
+    carries no signal either way (per your explicit instruction), so it
+    must not move this number in either direction. Returns None, not
+    0.0 or 1.0, when nobody has answered anything yet for this
+    cluster/season -- there is no rate to report, not a 0% one.
+    """
+    confirmations = storage.get_confirmations_for_cluster(cluster_id, season_id)
+    yes_count = sum(1 for c in confirmations if c.confirmed is True)
+    no_count = sum(1 for c in confirmations if c.confirmed is False)
+    total = yes_count + no_count
+    if total == 0:
+        return None
+    return yes_count / total
+
+
 def record_bump(
     farmer_id: str,
     season_id: str,
