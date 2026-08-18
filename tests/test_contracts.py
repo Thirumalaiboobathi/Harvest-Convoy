@@ -47,6 +47,15 @@ def test_claim_from_facts_uses_ground_truth_not_model_input() -> None:
     assert claim.bumped_last_season is True
     assert claim.argument == "Ready now."
     assert claim.concedes is False
+    assert claim.degraded is False  # default -- a genuine claim unless told otherwise
+
+
+def test_claim_from_facts_can_be_marked_degraded() -> None:
+    facts = _facts()
+    claim = AdvocateClaim.from_facts(
+        facts, argument="Ready now.", concedes=False, degraded=True
+    )
+    assert claim.degraded is True
 
 
 def test_argument_over_25_words_is_truncated_not_rejected() -> None:

@@ -56,6 +56,9 @@ class PlotFacts:
     # Decision 4. bumped_last_season stays as the plain fact for
     # farmer-facing copy; this is what coordinator.py's scoring actually
     # uses.
+    language: str = "ta"  # this plot's farmer's registered language --
+    # advocate.py uses this to generate `argument` directly in that
+    # language (not translated), see ADR-008 Decision 12.
 
 
 class AdvocateClaim(BaseModel):
@@ -70,6 +73,13 @@ class AdvocateClaim(BaseModel):
     weighted_bump_days: float = Field(ge=0.0, default=0.0)
     argument: str = Field(description="One sentence, max 25 words.")
     concedes: bool
+    # True when this claim came from advocate.py's fallback path
+    # (_fallback_claim -- model error, throttling, failed structured-
+    # output validation) rather than genuine model judgment. Presentational
+    # signal only: notify.py's escalation rendering uses this to omit the
+    # "agent's case" line rather than showing generic fallback text as if
+    # it were real reasoning. See ADR-008 Decision 12.
+    degraded: bool = False
 
     @field_validator("argument")
     @classmethod
@@ -81,7 +91,7 @@ class AdvocateClaim(BaseModel):
 
     @classmethod
     def from_facts(
-        cls, facts: PlotFacts, *, argument: str, concedes: bool
+        cls, facts: PlotFacts, *, argument: str, concedes: bool, degraded: bool = False
     ) -> "AdvocateClaim":
         """Build a claim entirely from ground-truth facts plus the two
         fields an LLM (or a fallback path) is actually allowed to decide."""
@@ -95,6 +105,7 @@ class AdvocateClaim(BaseModel):
             weighted_bump_days=facts.weighted_bump_days,
             argument=argument,
             concedes=concedes,
+            degraded=degraded,
         )
 
 

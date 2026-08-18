@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from harvest_convoy.agents.contracts import AdvocateClaim, EscalationPayload
+from harvest_convoy.agents.contracts import EscalationPayload
 from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.storage import Storage
 from harvest_convoy.storage.fairness import record_bump
@@ -58,19 +58,6 @@ def register_escalation(escalation: EscalationPayload) -> None:
         escalation.cluster_id, escalation.plot_a_id, escalation.plot_b_id
     )
     _PENDING_ESCALATIONS[key] = escalation
-
-
-def _resolution_reason(winner_claim: AdvocateClaim, loser_claim: AdvocateClaim) -> str:
-    """A concrete, honest, human reason -- never mentions negotiation
-    rounds or internal scoring mechanics."""
-    if winner_claim.bumped_last_season and not loser_claim.bumped_last_season:
-        return "they were bumped last season and are due a fair turn"
-    if winner_claim.days_past_maturity > loser_claim.days_past_maturity:
-        return (
-            f"their grain has been standing {winner_claim.days_past_maturity} "
-            f"days past ready, longer than yours"
-        )
-    return "the operator judged their plot needed today's slot more"
 
 
 def _default_lookup(plot_id: str) -> tuple[Farmer, Plot] | None:
@@ -187,7 +174,8 @@ def handle_callback_query(
             winner_claim, loser_claim = escalation.claim_a, escalation.claim_b
         else:
             winner_claim, loser_claim = escalation.claim_b, escalation.claim_a
-        reason = _resolution_reason(winner_claim, loser_claim)
+        loser_language = loser_result[0].language if loser_result is not None else "ta"
+        reason = notify.resolution_reason_text(loser_language, winner_claim, loser_claim)
     else:
         logger.warning(
             "escalation %s resolved but no pending payload found (process "
@@ -241,10 +229,20 @@ def handle_update(
     `season_id` are required even though only the escalation-callback path
     uses them -- keeps the signature uniform rather than branching on
     which fields are needed for which update type.
+
+    Two distinct callback_query shapes (ADR-008 Decision 7): a
+    "lang:ta"/"lang:en" registration-language tap routes to
+    registration.handle_language_callback (a toast, no chat message,
+    doesn't touch the escalation-resolution path at all); anything else
+    goes through the existing handle_callback_query escalation flow.
     """
     if "callback_query" in update:
+        callback_query = update["callback_query"]
+        if callback_query.get("data", "").startswith("lang:"):
+            registration.handle_language_callback(client, callback_query)
+            return
         handle_callback_query(
-            client, update["callback_query"], storage, season_id, lookup_farmer_for_plot
+            client, callback_query, storage, season_id, lookup_farmer_for_plot
         )
         return
 
@@ -259,5 +257,5 @@ def handle_update(
         return
 
     incoming = parse_incoming_message(message)
-    reply_text = registration.handle_incoming(chat_id, incoming)
-    client.send_message(chat_id, reply_text)
+    outbound = registration.handle_incoming(chat_id, incoming)
+    client.send_message(chat_id, outbound.text, reply_markup=outbound.reply_markup)

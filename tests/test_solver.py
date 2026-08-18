@@ -9,7 +9,7 @@ number of days needed is computed from the live constant, not hardcoded.
 The Kamatchipuram gate test uses the real seed_cluster.py fixture (real
 plots, real transplant dates, real cluster config) but a synthetic,
 constant-rate weather series derived from our own computed climatology
-(crop_params.KURUVAI_MEAN_GDD_PER_DAY_THENI_ESTIMATED), fixed to a specific
+(crop_params.KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED), fixed to a specific
 reference date. This keeps the gate's "identically on every run" requirement
 true forever, independent of live network state or the actual calendar
 date -- a solver that read real weather for "today" would give a different,
@@ -196,6 +196,52 @@ def test_contested_when_ready_acreage_exceeds_budget() -> None:
     assert by_id["urgent"].outcome == PlotOutcome.FITS
     assert by_id["less_urgent"].outcome == PlotOutcome.CONTESTED
     assert by_id["less_urgent"].route_position is None
+
+
+def test_cluster_maturity_gdd_override_is_used_instead_of_global_constant() -> None:
+    """A cluster with its own calibrated threshold uses it -- not the
+    global Theni-derived fallback. See ADR-008 Decision 2."""
+    today = date(2026, 8, 16)
+    # 5 days of constant 20.0 GDD/day = 100 accumulated GDD -- well below
+    # the real MATURITY_GDD_ESTIMATED (~1729), but above a deliberately
+    # low override, so FITS here proves the override -- not the global
+    # constant -- is what solve() actually compared against.
+    transplant = today - timedelta(days=4)
+    plot = _plot("p_override", transplant, area_acres=1.0)
+    days = _make_days(transplant, 5)
+
+    cluster = Cluster(
+        "c", "c", 3.5, 10.0, 77.5, maturity_gdd_override=90.0,
+    )
+    forecast = [ForecastDay("2026-08-16", 0.0)] * 5
+
+    result = solve([plot], {plot.plot_id: days}, cluster, forecast, rain_threshold_mm=5.0, today=today)
+
+    assert result[0].outcome == PlotOutcome.FITS
+
+
+def test_uncalibrated_cluster_falls_back_to_global_constant_and_logs_loudly(caplog) -> None:
+    """No maturity_gdd_override -> the global fallback applies (existing
+    behavior, unchanged) and a loud warning is logged so this is never a
+    silent assumption. See ADR-008 Decision 2."""
+    import logging
+
+    days_needed = _days_to_maturity()
+    today = date(2026, 8, 16)
+    transplant = today - timedelta(days=days_needed - 1)
+    plot = _plot("p_fallback", transplant)
+    days = _make_days(transplant, days_needed)
+
+    cluster = Cluster("c", "c", 3.5, 10.0, 77.5)  # maturity_gdd_override defaults to None
+    forecast = [ForecastDay("2026-08-16", 0.0)] * 5
+
+    with caplog.at_level(logging.WARNING):
+        result = solve([plot], {plot.plot_id: days}, cluster, forecast, rain_threshold_mm=5.0, today=today)
+
+    assert result[0].outcome == PlotOutcome.FITS  # global constant behavior, unchanged
+    assert any(
+        "MATURITY THRESHOLD FALLBACK" in record.message for record in caplog.records
+    )
 
 
 def test_solve_is_deterministic_across_runs() -> None:

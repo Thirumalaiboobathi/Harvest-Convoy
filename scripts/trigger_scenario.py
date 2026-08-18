@@ -79,7 +79,7 @@ DEADLOCK_TRANSPLANT_B = date(2026, 5, 2)  # -> 16 days past maturity, urgency 0.
 
 
 def _synthetic_days(transplant_date: date, today: date) -> list[DailyTemperature]:
-    rate = crop_params.KURUVAI_MEAN_GDD_PER_DAY_THENI_ESTIMATED
+    rate = crop_params.KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED
     mean_temp = crop_params.T_BASE_C + rate
     n = (today - transplant_date).days + 1
     return [
@@ -280,6 +280,7 @@ def main() -> None:
         escalation.cluster_id,
         escalation.plot_a_id, farmer_of("p03"), plots_by_id["p03"], escalation.claim_a,
         escalation.plot_b_id, farmer_of("p04"), plots_by_id["p04"], escalation.claim_b,
+        operator_language=cluster.operator_language,
     )
     print(f"    success={result.success} error={result.error}")
 

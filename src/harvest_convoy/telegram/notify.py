@@ -17,9 +17,22 @@ import math
 from harvest_convoy.agents.contracts import AdvocateClaim
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.scheduling.route import haversine_km
+from harvest_convoy.telegram import messages_en, messages_ta
 from harvest_convoy.telegram.client import SendResult, TelegramClient
 
 logger = logging.getLogger(__name__)
+
+_LANGUAGE_MODULES = {"ta": messages_ta, "en": messages_en}
+
+
+def _lang_module(language: str):
+    """Unknown/legacy language codes default to Tamil -- see
+    Farmer.language's dataclass default (ADR-008 Decision 6). Used for
+    both the farmer-facing message shapes (keyed by Farmer.language) and
+    the operator-facing ones (keyed by Cluster.operator_language) -- see
+    ADR-008 Decision 8's revision note: operator-facing text was
+    English-only by disclosed decision, reversed on request."""
+    return _LANGUAGE_MODULES.get(language, messages_ta)
 
 _COMPASS_POINTS = [
     "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
@@ -38,7 +51,10 @@ def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 def location_hint(cluster: Cluster, plot: Plot) -> str:
     """Distance and compass direction from the village center -- lets an
     operator who knows the village confirm which physical plot this is,
-    without exposing an internal plot_id."""
+    without exposing an internal plot_id. Compass abbreviations (N, NE,
+    ...) and the km figure are kept as-is regardless of operator_language
+    -- standard operational-tooling convention, not flagged for
+    localization."""
     distance_km = haversine_km(
         cluster.machine_start_lat, cluster.machine_start_lon, plot.lat, plot.lon
     )
@@ -49,75 +65,77 @@ def location_hint(cluster: Cluster, plot: Plot) -> str:
     return f"{distance_km:.1f}km {direction} of village center"
 
 
-def short_label(farmer: Farmer, plot: Plot) -> str:
-    """e.g. "Muthu Pandian, 2.5ac" -- for buttons and inline mentions."""
-    return f"{farmer.name}, {plot.area_acres}ac"
+def short_label(farmer: Farmer, plot: Plot, *, language: str = "ta") -> str:
+    """e.g. "Muthu Pandian, 2.5 acres" -- for buttons and inline
+    mentions. `language` is whoever is READING the label (the operator
+    for route-summary/escalation uses, matching Cluster.operator_language)
+    -- the farmer's name itself is never translated."""
+    area = _lang_module(language).format_area(plot.area_acres, plot.area_unit)
+    return f"{farmer.name}, {area}"
 
 
-def full_label(farmer: Farmer, plot: Plot, cluster: Cluster) -> str:
-    """e.g. "Muthu Pandian, 2.5ac, 0.8km NE of village center" -- for the
-    route summary, where the operator needs enough to actually find it."""
-    return f"{short_label(farmer, plot)}, {location_hint(cluster, plot)}"
+def full_label(farmer: Farmer, plot: Plot, cluster: Cluster, *, language: str = "ta") -> str:
+    """e.g. "Muthu Pandian, 2.5 acres, 0.8km NE of village center" -- for
+    the route summary, where the operator needs enough to actually find
+    it."""
+    return f"{short_label(farmer, plot, language=language)}, {location_hint(cluster, plot)}"
 
 
-def _overripe_phrase(days_past_maturity: int) -> str:
-    if days_past_maturity <= 0:
-        return "just reached ready today"
-    unit = "day" if days_past_maturity == 1 else "days"
-    return f"{days_past_maturity} {unit} overripe"
+def build_harvest_scheduled_text(plot: Plot, route_position: int, *, language: str = "ta") -> str:
+    return _lang_module(language).harvest_scheduled(plot.area_acres, plot.area_unit, route_position)
 
 
-def build_harvest_scheduled_text(plot: Plot, route_position: int) -> str:
-    return (
-        f"Good news: the machine is coming to your {plot.area_acres} acre "
-        f"plot today. You're stop #{route_position + 1} on the route."
-    )
-
-
-def build_not_ready_text(plot: Plot) -> str:
-    return (
-        f"Your {plot.area_acres} acre plot isn't ready to harvest yet -- "
-        f"the grain is still filling, and it's safer standing than cut "
-        f"early. No action needed, and no need to check in either: we're "
-        f"tracking it every day on our side. You'll only hear from us "
-        f"again when it's time to harvest or something changes."
-    )
+def build_not_ready_text(plot: Plot, *, language: str = "ta") -> str:
+    return _lang_module(language).not_ready(plot.area_acres, plot.area_unit)
 
 
 def build_escalation_resolved_text(
     plot: Plot,
     won: bool,
     *,
+    language: str = "ta",
     other_farmer_name: str | None = None,
     reason: str | None = None,
 ) -> str:
+    mod = _lang_module(language)
     if won:
-        return (
-            f"Update: your {plot.area_acres} acre plot has been confirmed "
-            f"for today's route."
-        )
-    who = other_farmer_name or "another farmer's plot"
-    why = f" -- {reason}" if reason else ""
-    return (
-        f"Update: today's machine is going to {who}'s plot instead{why}. "
-        f"Your {plot.area_acres} acre plot is not on today's route -- the "
-        f"operator will send the machine as soon as it's free next. Every "
-        f"extra day standing does raise the risk of grain loss to "
-        f"shattering and moisture, so let us know if conditions on your "
-        f"plot change."
+        return mod.escalation_resolved_won(plot.area_acres, plot.area_unit)
+    return mod.escalation_resolved_lost(
+        plot.area_acres, plot.area_unit,
+        other_farmer_name=other_farmer_name, reason=reason,
+    )
+
+
+def resolution_reason_text(
+    loser_language: str, winner_claim: AdvocateClaim, loser_claim: AdvocateClaim
+) -> str:
+    """A concrete, honest, human reason for the losing side, rendered in
+    *their* language -- never mentions negotiation rounds or internal
+    scoring mechanics. Moved here from webhook.py's old (English-only,
+    hand-authored) _resolution_reason -- found while wiring up Tamil
+    support that it had no language awareness at all, which would have
+    produced a mixed-language sentence for a Tamil-registered farmer. See
+    ADR-008 Part 2."""
+    mod = _lang_module(loser_language)
+    return mod.resolution_reason(
+        bumped_winner=winner_claim.bumped_last_season,
+        bumped_loser=loser_claim.bumped_last_season,
+        winner_days_past_maturity=winner_claim.days_past_maturity,
+        loser_days_past_maturity=loser_claim.days_past_maturity,
     )
 
 
 def build_operator_route_summary_text(
-    cluster: Cluster, route: list[tuple[Farmer, Plot]]
+    cluster: Cluster, route: list[tuple[Farmer, Plot]], *, language: str = "ta"
 ) -> str:
+    mod = _lang_module(language)
     if not route:
-        return f"{cluster.name}: no plots on today's route."
+        return mod.route_summary_empty(cluster.name)
     stops = "\n".join(
-        f"{i + 1}. {full_label(farmer, plot, cluster)}"
+        mod.route_stop_line(i + 1, full_label(farmer, plot, cluster, language=language))
         for i, (farmer, plot) in enumerate(route)
     )
-    return f"{cluster.name} route for today:\n{stops}"
+    return f"{mod.route_summary_header(cluster.name)}\n{stops}"
 
 
 def send_harvest_scheduled(
@@ -127,7 +145,8 @@ def send_harvest_scheduled(
         logger.error("no chat_id for farmer %s, cannot notify", farmer.farmer_id)
         return SendResult(success=False, error="farmer has no telegram_chat_id")
     return client.send_message(
-        farmer.telegram_chat_id, build_harvest_scheduled_text(plot, route_position)
+        farmer.telegram_chat_id,
+        build_harvest_scheduled_text(plot, route_position, language=farmer.language),
     )
 
 
@@ -135,7 +154,9 @@ def send_not_ready(client: TelegramClient, farmer: Farmer, plot: Plot) -> SendRe
     if farmer.telegram_chat_id is None:
         logger.error("no chat_id for farmer %s, cannot notify", farmer.farmer_id)
         return SendResult(success=False, error="farmer has no telegram_chat_id")
-    return client.send_message(farmer.telegram_chat_id, build_not_ready_text(plot))
+    return client.send_message(
+        farmer.telegram_chat_id, build_not_ready_text(plot, language=farmer.language)
+    )
 
 
 def send_escalation_resolved(
@@ -153,7 +174,8 @@ def send_escalation_resolved(
     return client.send_message(
         farmer.telegram_chat_id,
         build_escalation_resolved_text(
-            plot, won, other_farmer_name=other_farmer_name, reason=reason
+            plot, won, language=farmer.language,
+            other_farmer_name=other_farmer_name, reason=reason,
         ),
     )
 
@@ -171,7 +193,8 @@ def send_operator_route_summary(
         )
         return SendResult(success=False, error="no operator configured for cluster")
     return client.send_message(
-        operator_chat_id, build_operator_route_summary_text(cluster, route)
+        operator_chat_id,
+        build_operator_route_summary_text(cluster, route, language=cluster.operator_language),
     )
 
 
@@ -179,6 +202,8 @@ def build_escalation_keyboard(
     cluster_id: str,
     plot_a_id: str, farmer_a: Farmer, plot_a: Plot,
     plot_b_id: str, farmer_b: Farmer, plot_b: Plot,
+    *,
+    language: str = "ta",
 ) -> dict:
     def callback_data(chosen_plot_id: str) -> str:
         return f"resolve:{cluster_id}:{plot_a_id}:{plot_b_id}:{chosen_plot_id}"
@@ -187,11 +212,11 @@ def build_escalation_keyboard(
         "inline_keyboard": [
             [
                 {
-                    "text": short_label(farmer_a, plot_a),
+                    "text": short_label(farmer_a, plot_a, language=language),
                     "callback_data": callback_data(plot_a_id),
                 },
                 {
-                    "text": short_label(farmer_b, plot_b),
+                    "text": short_label(farmer_b, plot_b, language=language),
                     "callback_data": callback_data(plot_b_id),
                 },
             ]
@@ -199,20 +224,52 @@ def build_escalation_keyboard(
     }
 
 
+def _argument_line(claim: AdvocateClaim, *, language: str) -> str | None:
+    """The advocate's generated reasoning, labeled as such, one line below
+    the plot's facts -- never blocks the escalation from rendering. See
+    ADR-008 Decision 12: presentational only, so a claim from the
+    fallback path (claim.degraded) or an empty/whitespace argument omits
+    this line entirely rather than showing generic placeholder text as if
+    it were real judgment. `language` selects the LABEL's language (the
+    operator's, i.e. Cluster.operator_language) -- claim.argument itself
+    stays in whatever language it was generated in (the owning farmer's),
+    so this message is deliberately mixed-language when farmers differ."""
+    if claim.degraded:
+        return None
+    text = claim.argument.strip()
+    if not text:
+        return None
+    label = _lang_module(language).escalation_argument_label()
+    return f'    {label} "{text}"'
+
+
 def build_escalation_text(
     farmer_a: Farmer, plot_a: Plot, claim_a: AdvocateClaim,
     farmer_b: Farmer, plot_b: Plot, claim_b: AdvocateClaim,
+    *,
+    language: str = "ta",
 ) -> str:
-    bumped_a = " (bumped last season)" if claim_a.bumped_last_season else ""
-    bumped_b = " (bumped last season)" if claim_b.bumped_last_season else ""
-    return (
-        f"Only one plot can get today's machine.\n"
-        f"- {short_label(farmer_a, plot_a)}: "
-        f"{_overripe_phrase(claim_a.days_past_maturity)}{bumped_a}\n"
-        f"- {short_label(farmer_b, plot_b)}: "
-        f"{_overripe_phrase(claim_b.days_past_maturity)}{bumped_b}\n"
-        f"Who should get it?"
+    mod = _lang_module(language)
+    bumped_a = mod.bumped_suffix() if claim_a.bumped_last_season else ""
+    bumped_b = mod.bumped_suffix() if claim_b.bumped_last_season else ""
+
+    lines = [mod.escalation_intro()]
+    lines.append(
+        f"- {short_label(farmer_a, plot_a, language=language)}: "
+        f"{mod.overripe_phrase(claim_a.days_past_maturity)}{bumped_a}"
     )
+    arg_a = _argument_line(claim_a, language=language)
+    if arg_a:
+        lines.append(arg_a)
+    lines.append(
+        f"- {short_label(farmer_b, plot_b, language=language)}: "
+        f"{mod.overripe_phrase(claim_b.days_past_maturity)}{bumped_b}"
+    )
+    arg_b = _argument_line(claim_b, language=language)
+    if arg_b:
+        lines.append(arg_b)
+    lines.append(mod.escalation_question())
+    return "\n".join(lines)
 
 
 def send_escalation(
@@ -221,6 +278,8 @@ def send_escalation(
     cluster_id: str,
     plot_a_id: str, farmer_a: Farmer, plot_a: Plot, claim_a: AdvocateClaim,
     plot_b_id: str, farmer_b: Farmer, plot_b: Plot, claim_b: AdvocateClaim,
+    *,
+    operator_language: str = "ta",
 ) -> SendResult:
     if operator_chat_id is None:
         logger.error(
@@ -231,8 +290,12 @@ def send_escalation(
         return SendResult(success=False, error="no operator configured for cluster")
     return client.send_message(
         operator_chat_id,
-        build_escalation_text(farmer_a, plot_a, claim_a, farmer_b, plot_b, claim_b),
+        build_escalation_text(
+            farmer_a, plot_a, claim_a, farmer_b, plot_b, claim_b,
+            language=operator_language,
+        ),
         reply_markup=build_escalation_keyboard(
-            cluster_id, plot_a_id, farmer_a, plot_a, plot_b_id, farmer_b, plot_b
+            cluster_id, plot_a_id, farmer_a, plot_a, plot_b_id, farmer_b, plot_b,
+            language=operator_language,
         ),
     )

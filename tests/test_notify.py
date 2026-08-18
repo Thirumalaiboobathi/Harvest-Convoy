@@ -34,33 +34,58 @@ def _farmer(name: str = "Muthu Pandian") -> Farmer:
     return Farmer(farmer_id="f01", name=name, cluster_id="c")
 
 
-def _claim(plot_id="p01", days_past_maturity=6, acres=3.0, bumped=False) -> AdvocateClaim:
+def _claim(
+    plot_id="p01", days_past_maturity=6, acres=3.0, bumped=False,
+    argument="x", degraded=False,
+) -> AdvocateClaim:
     return AdvocateClaim(
         plot_id=plot_id, urgency_score=0.3, days_past_maturity=days_past_maturity,
         rain_vulnerability="low", acres=acres, bumped_last_season=bumped,
-        argument="x", concedes=False,
+        argument=argument, concedes=False, degraded=degraded,
     )
 
 
 def test_not_ready_message_gives_no_action_and_promises_silence() -> None:
-    text = notify.build_not_ready_text(_plot())
+    # Trimmed to load-bearing content in native-speaker review round 2 --
+    # see messages_en.py's not_ready() comment. Assertions updated to
+    # match, same load-bearing claims (not ready / no action / tracking
+    # it / you'll hear from us), not the old, longer wording.
+    text = notify.build_not_ready_text(_plot(), language="en")
     assert "not ready" in text.lower() or "isn't ready" in text.lower()
-    assert "No action needed" in text
+    assert "no action needed" in text.lower()
     assert "no need to check in" in text.lower()
-    assert "you'll only hear from us again" in text.lower()
+    assert "you'll hear from us" in text.lower()
     # must not imply the farmer will be pinged on a cadence
     assert "we'll check again" not in text.lower()
 
 
+def test_not_ready_message_in_tamil_is_distinct_from_english() -> None:
+    """A Tamil-registered farmer gets genuinely different (Tamil) text,
+    not the English string with a language flag ignored. See ADR-008
+    Decision 6/8."""
+    ta_text = notify.build_not_ready_text(_plot(), language="ta")
+    en_text = notify.build_not_ready_text(_plot(), language="en")
+    assert ta_text != en_text
+    assert "முற்றவில்லை" in ta_text  # "hasn't ripened yet"
+
+
 def test_harvest_scheduled_message_gives_stop_number() -> None:
-    text = notify.build_harvest_scheduled_text(_plot(), route_position=2)
+    text = notify.build_harvest_scheduled_text(_plot(), route_position=2, language="en")
     assert "#3" in text
 
 
+def test_harvest_scheduled_message_gives_ordinal_in_tamil() -> None:
+    """Tamil uses "வரிசையில் Nவது" (Nth in the line), not "#N" -- a
+    native-speaker review round-1 wording fix, not a translation of "#3"."""
+    text = notify.build_harvest_scheduled_text(_plot(), route_position=2, language="ta")
+    assert "3வது" in text
+    assert "#3" not in text
+
+
 def test_escalation_resolved_winner_vs_loser_wording_differs() -> None:
-    winner_text = notify.build_escalation_resolved_text(_plot(), won=True)
+    winner_text = notify.build_escalation_resolved_text(_plot(), won=True, language="en")
     loser_text = notify.build_escalation_resolved_text(
-        _plot(), won=False, other_farmer_name="Kannan Raja",
+        _plot(), won=False, language="en", other_farmer_name="Kannan Raja",
         reason="their grain has been standing 6 days past ready, longer than yours",
     )
     assert winner_text != loser_text
@@ -69,7 +94,7 @@ def test_escalation_resolved_winner_vs_loser_wording_differs() -> None:
 
 def test_loser_message_names_who_and_why_not_vague() -> None:
     text = notify.build_escalation_resolved_text(
-        _plot(), won=False, other_farmer_name="Kannan Raja",
+        _plot(), won=False, language="en", other_farmer_name="Kannan Raja",
         reason="their grain has been standing 6 days past ready, longer than yours",
     )
     assert "Kannan Raja" in text
@@ -101,11 +126,11 @@ def test_escalation_keyboard_button_text_has_no_plot_id() -> None:
     farmer_a, farmer_b = _farmer("Kannan Raja"), _farmer("Meena Subramani")
     plot_a, plot_b = _plot(area_acres=3.0), _plot(area_acres=1.25)
     keyboard = notify.build_escalation_keyboard(
-        "kamatchipuram", "p03", farmer_a, plot_a, "p04", farmer_b, plot_b
+        "kamatchipuram", "p03", farmer_a, plot_a, "p04", farmer_b, plot_b, language="en",
     )
     buttons = keyboard["inline_keyboard"][0]
-    assert buttons[0]["text"] == "Kannan Raja, 3.0ac"
-    assert buttons[1]["text"] == "Meena Subramani, 1.25ac"
+    assert buttons[0]["text"] == "Kannan Raja, 3 acres"
+    assert buttons[1]["text"] == "Meena Subramani, 1.25 acres"
     # plot_id is allowed (expected) inside callback_data -- machine field, not human-read
     assert buttons[0]["callback_data"] == "resolve:kamatchipuram:p03:p04:p03"
     assert buttons[1]["callback_data"] == "resolve:kamatchipuram:p03:p04:p04"
@@ -116,12 +141,115 @@ def test_escalation_text_has_no_negotiation_mechanics() -> None:
     plot_a, plot_b = _plot(area_acres=3.0), _plot(area_acres=1.25)
     claim_a = _claim(days_past_maturity=6)
     claim_b = _claim(days_past_maturity=0, bumped=True)
-    text = notify.build_escalation_text(farmer_a, plot_a, claim_a, farmer_b, plot_b, claim_b)
+    text = notify.build_escalation_text(
+        farmer_a, plot_a, claim_a, farmer_b, plot_b, claim_b, language="en",
+    )
     assert "round" not in text.lower()
     assert "negotiat" not in text.lower()
     assert "Kannan Raja" in text and "Meena Subramani" in text
     assert "6 days overripe" in text
     assert "bumped last season" in text
+
+
+def test_escalation_text_in_tamil_has_no_negotiation_mechanics() -> None:
+    """Operator-facing text is now per-language too (Cluster.operator_language)
+    -- previously English-only by disclosed decision, reversed on
+    request. See ADR-008 Decision 8's revision note."""
+    farmer_a, farmer_b = _farmer("Kannan Raja"), _farmer("Meena Subramani")
+    plot_a, plot_b = _plot(area_acres=3.0), _plot(area_acres=1.25)
+    claim_a = _claim(days_past_maturity=6)
+    claim_b = _claim(days_past_maturity=0, bumped=True)
+    text = notify.build_escalation_text(
+        farmer_a, plot_a, claim_a, farmer_b, plot_b, claim_b, language="ta",
+    )
+    assert "round" not in text.lower()
+    assert "negotiat" not in text.lower()
+    assert "Kannan Raja" in text and "Meena Subramani" in text
+    assert "6" in text and "பழுத்தது" in text  # "overripe"
+    assert "தள்ளிவைக்கப்பட்டது" in text  # "bumped"
+
+
+def test_escalation_text_includes_labeled_argument_line_below_facts() -> None:
+    """ADR-008 Decision 12: facts first, unchanged; the advocate's
+    argument is one added, clearly-labeled line below them."""
+    farmer_a, farmer_b = _farmer("Kannan Raja"), _farmer("Meena Subramani")
+    plot_a, plot_b = _plot(area_acres=3.0), _plot(area_acres=1.25)
+    claim_a = _claim(days_past_maturity=6, argument="This plot has waited longest.")
+    claim_b = _claim(days_past_maturity=0, bumped=True, argument="I was bumped last season.")
+
+    text = notify.build_escalation_text(
+        farmer_a, plot_a, claim_a, farmer_b, plot_b, claim_b, language="en",
+    )
+
+    assert '"This plot has waited longest."' in text
+    assert '"I was bumped last season."' in text
+    # labeled as reasoning, not fact
+    assert "agent's case" in text.lower()
+    # facts lines still come first, unchanged
+    fact_line_index = text.index("6 days overripe")
+    argument_line_index = text.index("This plot has waited longest.")
+    assert fact_line_index < argument_line_index
+
+
+def test_escalation_text_argument_label_is_tamil_when_operator_language_is_tamil() -> None:
+    farmer_a, farmer_b = _farmer("Kannan Raja"), _farmer("Meena Subramani")
+    plot_a, plot_b = _plot(area_acres=3.0), _plot(area_acres=1.25)
+    claim_a = _claim(days_past_maturity=6, argument="This plot has waited longest.")
+    claim_b = _claim(days_past_maturity=0, bumped=True, argument="I was bumped last season.")
+
+    text = notify.build_escalation_text(
+        farmer_a, plot_a, claim_a, farmer_b, plot_b, claim_b, language="ta",
+    )
+
+    # The argument TEXT stays whatever language it was generated in
+    # (English here, since these are hand-built claims) -- only the
+    # LABEL wrapping it follows the operator's language.
+    assert '"This plot has waited longest."' in text
+    assert "ஏஜென்ட்டின் பரிந்துரை" in text  # "agent's recommendation", in Tamil
+
+
+def test_escalation_text_omits_argument_line_for_a_degraded_fallback_claim() -> None:
+    """A model string must never block the escalation -- a fallback-path
+    claim (claim.degraded=True) still renders complete, valid text from
+    facts alone, with no argument line at all rather than showing generic
+    placeholder text as if it were real reasoning."""
+    farmer_a, farmer_b = _farmer("Kannan Raja"), _farmer("Meena Subramani")
+    plot_a, plot_b = _plot(area_acres=3.0), _plot(area_acres=1.25)
+    claim_a = _claim(
+        days_past_maturity=6,
+        argument="Not ready to harvest; standing safely.",  # advocate.py's real fallback text
+        degraded=True,
+    )
+    claim_b = _claim(days_past_maturity=0, bumped=True, argument="A real live argument.")
+
+    text = notify.build_escalation_text(
+        farmer_a, plot_a, claim_a, farmer_b, plot_b, claim_b, language="en",
+    )
+
+    assert "Not ready to harvest; standing safely." not in text
+    assert "A real live argument." in text  # the non-degraded side is unaffected
+    assert "Only one plot can get today's machine." in text
+    assert "Who should get it?" in text
+    assert "Kannan Raja" in text and "Meena Subramani" in text
+    assert "6 days overripe" in text
+
+
+def test_escalation_text_omits_argument_line_for_blank_argument() -> None:
+    """Empty/whitespace-only argument (malformed model output, or a
+    hand-built claim in a test) degrades the same way as claim.degraded --
+    no crash, no blank line, facts still render."""
+    farmer_a, farmer_b = _farmer("Kannan Raja"), _farmer("Meena Subramani")
+    plot_a, plot_b = _plot(area_acres=3.0), _plot(area_acres=1.25)
+    claim_a = _claim(days_past_maturity=6, argument="   ")
+    claim_b = _claim(days_past_maturity=0, bumped=True, argument="")
+
+    text = notify.build_escalation_text(
+        farmer_a, plot_a, claim_a, farmer_b, plot_b, claim_b, language="en",
+    )
+
+    assert "agent's case" not in text.lower()
+    assert "Who should get it?" in text
+    assert "6 days overripe" in text
 
 
 def test_send_harvest_scheduled_uses_farmer_chat_id() -> None:

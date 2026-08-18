@@ -54,7 +54,18 @@ ADT45_FIELD_DURATION_DAYS_ESTIMATED: int = (
 # (20.72 GDD/day for 2026), which is what triggered this re-derivation --
 # the original 17.5 was a brief-asserted, never-independently-verified
 # figure and undershot the real climatology.
-KURUVAI_MEAN_GDD_PER_DAY_THENI_ESTIMATED: float = 19.2133
+#
+# RENAMED (was KURUVAI_MEAN_GDD_PER_DAY_THENI_ESTIMATED) per ADR-008
+# Decision 2: this is documented as the FALLBACK reference rate used only
+# when a cluster has no derived maturity_gdd_override of its own (see
+# agronomy/calibration.py). Re-running this exact methodology against a
+# second real TN district (Naducauvery, Thanjavur delta -- 10.861,
+# 79.046) measured 21.2509 GDD/day, ~10.6% higher -- applying Theni's
+# rate as if it were TN-wide would misproject maturity by ~9 days in a
+# district that climatologically hot. Per-cluster calibration
+# (Cluster.maturity_gdd_override, scheduling/solver.py) is what actually
+# fixes this; the rename alone would only have disclosed it.
+KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED: float = 19.2133
 
 # DERIVED, NOT TNAU/ICAR-sourced: no published thermal-time (GDD) requirement
 # for ADT 45 was found despite targeted searches (see ADR-001 Decision 3).
@@ -62,8 +73,20 @@ KURUVAI_MEAN_GDD_PER_DAY_THENI_ESTIMATED: float = 19.2133
 # anchored at transplant_date. This is a single module-level constant,
 # deliberately not a literal buried in scheduling logic, so it can be
 # corrected in one place if a measured value is found later.
+#
+# Per ADR-008 Decision 2: this is now documented as the FALLBACK
+# threshold, used by scheduling/solver.py only when a cluster's
+# Cluster.maturity_gdd_override is None (i.e. that cluster's own
+# climatology has not been calibrated via agronomy/calibration.py). It
+# remains DERIVED, not sourced, regardless of whether a cluster is
+# calibrated -- calibration corrects *which climate* the 90-field-day
+# duration is priced in GDD terms for; it does not resolve the deeper,
+# still-open question of whether 90 days is the right duration for ADT 45
+# at all. Every cluster that goes uncalibrated silently falls back to
+# this Theni-shaped number -- scheduling/solver.py logs loudly when that
+# happens so it's never a silent assumption.
 MATURITY_GDD_ESTIMATED: float = (
-    ADT45_FIELD_DURATION_DAYS_ESTIMATED * KURUVAI_MEAN_GDD_PER_DAY_THENI_ESTIMATED
+    ADT45_FIELD_DURATION_DAYS_ESTIMATED * KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED
 )
 
 # DERIVED, NOT sourced: no citable day-past-physiological-maturity loss

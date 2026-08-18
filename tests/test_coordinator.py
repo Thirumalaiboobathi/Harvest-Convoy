@@ -8,14 +8,17 @@ and deterministically.
 
 from __future__ import annotations
 
+from datetime import date
+
 from harvest_convoy.agents.contracts import AdvocateClaim, PlotFacts
 from harvest_convoy.agents.coordinator import (
     CLEAR_MARGIN,
     MAX_FAIRNESS_BONUS,
+    build_plot_facts,
     negotiate_pair,
     run_cluster_with_claims,
 )
-from harvest_convoy.models import Plot
+from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome
 from harvest_convoy.storage.file_storage import FileStorage
 
@@ -48,6 +51,48 @@ def _claim(facts: PlotFacts, *, argument: str, concedes: bool, **overrides) -> A
     )
     data.update(overrides)
     return AdvocateClaim(**data)
+
+
+def _language_test_plot(plot_id: str, farmer_id: str) -> Plot:
+    return Plot(
+        plot_id=plot_id, farmer_id=farmer_id, cluster_id="c",
+        lat=9.865, lon=77.454, crop="paddy", variety="ADT45",
+        transplant_date=date(2026, 5, 1), area_acres=2.0,
+    )
+
+
+def _language_test_decision(plot_id: str) -> PlotDecision:
+    return PlotDecision(
+        plot_id=plot_id, outcome=PlotOutcome.FITS, accumulated_gdd=2000.0,
+        days_past_maturity=5, urgency=0.25, route_position=None,
+    )
+
+
+def test_build_plot_facts_pulls_the_farmers_registered_language(tmp_path) -> None:
+    """ADR-008 Decision 12: PlotFacts.language comes from the plot's own
+    farmer's stored registration, so advocate.py can generate `argument`
+    natively in that language."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_farmer(Farmer(farmer_id="f-en", name="X", cluster_id="c", language="en"))
+    storage.put_farmer(Farmer(farmer_id="f-ta", name="Y", cluster_id="c", language="ta"))
+
+    facts_en = build_plot_facts(
+        _language_test_plot("p-en", "f-en"), _language_test_decision("p-en"), storage
+    )
+    facts_ta = build_plot_facts(
+        _language_test_plot("p-ta", "f-ta"), _language_test_decision("p-ta"), storage
+    )
+
+    assert facts_en.language == "en"
+    assert facts_ta.language == "ta"
+
+
+def test_build_plot_facts_defaults_to_tamil_when_farmer_not_found(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")  # farmer never seeded
+    facts = build_plot_facts(
+        _language_test_plot("p1", "no-such-farmer"), _language_test_decision("p1"), storage
+    )
+    assert facts.language == "ta"
 
 
 def test_negotiate_pair_resolves_immediately_when_one_side_concedes() -> None:

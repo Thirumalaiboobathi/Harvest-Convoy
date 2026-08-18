@@ -41,7 +41,7 @@ FORECAST_HORIZON_DAYS = 16  # Open-Meteo's confirmed max forecast horizon, ADR-0
 
 
 def run_daily_watch(
-    cluster_id: str,
+    cluster_id: str | list[str],
     season_id: str,
     *,
     storage: Storage | None = None,
@@ -49,12 +49,22 @@ def run_daily_watch(
     telegram_client: TelegramClient | None = None,
     get_claim=None,
     force: bool = False,
-) -> dict:
+) -> dict | list[dict]:
     """Entry point for one scheduled invocation. Returns a plain dict
     summary (never raises) -- this is what app.py's AgentCore handler and
     scripts/check_watcher_health.py both consume, and what any fallback
     entrypoint (Lambda) would call identically. No AgentCore-specific
     code in here -- see ADR-006 Decision 1's fallback note.
+
+    cluster_id: a single cluster_id (str) reproduces the exact existing
+    behavior -- one summary dict, the same shape this has always
+    returned. This is what the deployed EventBridge schedule / Lambda
+    shim / app.py handler send today and continue to send unchanged --
+    see ADR-008 Decision 4. Pass a list[str] to check multiple clusters
+    in one call: each cluster runs independently through
+    _run_daily_watch_one() below (including its own top-level
+    try/except), so one cluster's failure never blocks another's, and a
+    list of summary dicts is returned in the same order.
 
     get_claim: optional injectable claim provider (see
     agents/coordinator.py:ClaimProvider). None (the default, and what
@@ -74,6 +84,35 @@ def run_daily_watch(
     storage = storage or get_storage()
     today = today or date.today()
     client = telegram_client or TelegramClient()
+
+    if isinstance(cluster_id, list):
+        return [
+            _run_daily_watch_one(
+                cid, season_id, storage=storage, today=today,
+                telegram_client=client, get_claim=get_claim, force=force,
+            )
+            for cid in cluster_id
+        ]
+    return _run_daily_watch_one(
+        cluster_id, season_id, storage=storage, today=today,
+        telegram_client=client, get_claim=get_claim, force=force,
+    )
+
+
+def _run_daily_watch_one(
+    cluster_id: str,
+    season_id: str,
+    *,
+    storage: Storage,
+    today: date,
+    telegram_client: TelegramClient,
+    get_claim=None,
+    force: bool = False,
+) -> dict:
+    """One cluster's check -- the exact body run_daily_watch() had before
+    ADR-008 Decision 4 added multi-cluster iteration. storage/today/client
+    are already resolved by the caller, not re-resolved here."""
+    client = telegram_client
 
     last_run = storage.get_watcher_last_run(cluster_id)
     if last_run == today.isoformat():
@@ -211,4 +250,5 @@ def _send_notifications(
             escalation.cluster_id,
             escalation.plot_a_id, farmer_a, plots_by_id[escalation.plot_a_id], escalation.claim_a,
             escalation.plot_b_id, farmer_b, plots_by_id[escalation.plot_b_id], escalation.claim_b,
+            operator_language=cluster.operator_language,
         )

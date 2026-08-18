@@ -46,7 +46,7 @@ REFERENCE_TODAY = date(2026, 8, 16)
 
 
 def _synthetic_days(transplant_date: date, today: date) -> list[DailyTemperature]:
-    rate = crop_params.KURUVAI_MEAN_GDD_PER_DAY_THENI_ESTIMATED
+    rate = crop_params.KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED
     mean_temp = crop_params.T_BASE_C + rate
     n = (today - transplant_date).days + 1
     return [

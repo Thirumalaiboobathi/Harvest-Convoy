@@ -4,7 +4,7 @@ excluded as too green -- identically on every run.
 
 Uses the real seed_cluster.py fixture (real plots, transplant dates, areas,
 cluster config) with a synthetic, constant-rate weather series derived from
-our own computed climatology (crop_params.KURUVAI_MEAN_GDD_PER_DAY_THENI_ESTIMATED)
+our own computed climatology (crop_params.KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED)
 rather than live Open-Meteo data, fixed to the 2026-08-16 reference date the
 seed script's transplant dates were chosen against. This is what makes the
 gate's "identically on every run" requirement actually true forever: a
@@ -26,7 +26,7 @@ REFERENCE_TODAY = date(2026, 8, 16)
 
 
 def _synthetic_days(transplant_date: date, today: date) -> list[DailyTemperature]:
-    rate = crop_params.KURUVAI_MEAN_GDD_PER_DAY_THENI_ESTIMATED
+    rate = crop_params.KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED
     mean_temp = crop_params.T_BASE_C + rate
     n = (today - transplant_date).days + 1
     return [

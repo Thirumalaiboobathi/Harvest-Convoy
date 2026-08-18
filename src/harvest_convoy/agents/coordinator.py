@@ -69,6 +69,8 @@ ClaimProvider = Callable[[PlotFacts, int, str | None], AdvocateClaim]
 
 def build_plot_facts(plot: Plot, decision: PlotDecision, storage: Storage) -> PlotFacts:
     is_ready = decision.outcome != PlotOutcome.TOO_GREEN
+    farmer = storage.get_farmer(plot.farmer_id)
+    language = farmer.language if farmer is not None else "ta"
     return PlotFacts(
         plot_id=plot.plot_id,
         farmer_id=plot.farmer_id,
@@ -79,6 +81,7 @@ def build_plot_facts(plot: Plot, decision: PlotDecision, storage: Storage) -> Pl
         acres=plot.area_acres,
         bumped_last_season=was_bumped_last_season(plot.farmer_id, storage),
         weighted_bump_days=weighted_bump_days(plot.farmer_id, storage),
+        language=language,
     )
 
 

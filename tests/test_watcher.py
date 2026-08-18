@@ -16,6 +16,7 @@ from harvest_convoy.scheduling.capacity import ForecastDay
 from harvest_convoy.storage.file_storage import FileStorage
 from harvest_convoy.telegram.client import SendResult
 from harvest_convoy.weather.openmeteo import WeatherError
+from scripts import seed_cluster, seed_cluster_naducauvery
 
 TODAY = date(2026, 8, 16)
 
@@ -209,6 +210,89 @@ def test_watcher_fired_twice_same_day_does_not_double_notify(tmp_path, monkeypat
 
     assert result2["status"] == "already_ran"
     assert len(client.sent) == first_send_count  # no new notifications on the duplicate fire
+
+
+def test_cluster_id_list_returns_one_summary_per_cluster_in_order(tmp_path, monkeypatch) -> None:
+    """ADR-008 Decision 4: passing a list iterates independently -- proven
+    here with two clusters in genuinely different states (one already ran
+    today, one has no plots), each getting its own correct summary."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(Cluster(
+        cluster_id="c1", name="Cluster One", machine_capacity_acres_per_day=3.5,
+        machine_start_lat=9.865, machine_start_lon=77.454, operator_chat_id=999,
+    ))
+    storage.set_watcher_last_run("c1", TODAY.isoformat())
+    storage.put_cluster(Cluster(
+        cluster_id="c2", name="Cluster Two", machine_capacity_acres_per_day=3.5,
+        machine_start_lat=10.861, machine_start_lon=79.046, operator_chat_id=998,
+    ))
+
+    client = _FakeClient()
+    results = watcher_mod.run_daily_watch(
+        ["c1", "c2"], "season-1", storage=storage, today=TODAY, telegram_client=client,
+    )
+
+    assert isinstance(results, list)
+    assert len(results) == 2
+    assert results[0]["cluster_id"] == "c1"
+    assert results[0]["status"] == "already_ran"
+    assert results[1]["cluster_id"] == "c2"
+    assert results[1]["status"] == "no_plots"  # c2 has no plots seeded
+    # c2's check still completed and marked its own day done, independent of c1.
+    assert storage.get_watcher_last_run("c2") == TODAY.isoformat()
+
+
+def test_cluster_id_list_one_clusters_error_does_not_block_the_next(tmp_path, monkeypatch) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    # "missing" is never seeded -> cluster_not_found for the first entry.
+    storage.put_cluster(Cluster(
+        cluster_id="c2", name="Cluster Two", machine_capacity_acres_per_day=3.5,
+        machine_start_lat=10.861, machine_start_lon=79.046, operator_chat_id=998,
+    ))
+    storage.put_farmer(Farmer(farmer_id="f1", name="F1", cluster_id="c2", telegram_chat_id=101))
+    storage.put_plot(Plot(
+        plot_id="p1", farmer_id="f1", cluster_id="c2",
+        lat=10.861, lon=79.046, crop="paddy", variety="ADT45",
+        transplant_date=TODAY, area_acres=1.0,
+    ))
+    _patch_weather(monkeypatch, [ForecastDay(f"d{i}", 0.0) for i in range(16)])
+
+    results = watcher_mod.run_daily_watch(
+        ["missing", "c2"], "season-1", storage=storage, today=TODAY,
+        telegram_client=_FakeClient(),
+    )
+
+    assert results[0]["status"] == "error"
+    assert results[0]["reason"] == "cluster_not_found"
+    # c2 still ran and completed cleanly despite "missing" erroring first.
+    assert results[1]["status"] == "no_trigger"
+    assert storage.get_watcher_last_run("c2") == TODAY.isoformat()
+
+
+def test_both_real_seeded_clusters_run_independently_through_the_watcher(
+    tmp_path, monkeypatch
+) -> None:
+    """ADR-008's actual multi-district claim, end to end: both real
+    fixture clusters (Kamatchipuram/Theni, Naducauvery/Thanjavur) seeded
+    into one storage backend and checked in a single run_daily_watch()
+    call, each producing its own independent, correct outcome."""
+    storage = FileStorage(tmp_path / "s.json")
+    seed_cluster.seed_into_storage(storage)
+    seed_cluster_naducauvery.seed_into_storage(storage)
+    _patch_weather(
+        monkeypatch,
+        [ForecastDay("d0", 0.0), ForecastDay("d1", 20.0)],  # rain on day 1 -> trigger
+    )
+
+    results = watcher_mod.run_daily_watch(
+        ["kamatchipuram", "naducauvery"], "season-1", storage=storage, today=TODAY,
+        telegram_client=_FakeClient(), get_claim=_truthful_claim,
+    )
+
+    assert [r["cluster_id"] for r in results] == ["kamatchipuram", "naducauvery"]
+    assert all(r["status"] == "triggered" for r in results)
+    assert storage.get_watcher_last_run("kamatchipuram") == TODAY.isoformat()
+    assert storage.get_watcher_last_run("naducauvery") == TODAY.isoformat()
 
 
 def test_partial_failure_mid_pipeline_does_not_mark_the_day_done(tmp_path, monkeypatch) -> None:

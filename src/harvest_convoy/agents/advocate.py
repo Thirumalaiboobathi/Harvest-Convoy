@@ -18,6 +18,7 @@ from harvest_convoy.agents.contracts import AdvocateClaim, PlotFacts
 from harvest_convoy.observability.otel import get_tracer
 from harvest_convoy.storage import Storage, get_storage
 from harvest_convoy.storage.fairness import get_ledger_history
+from harvest_convoy.telegram import messages_ta
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer(__name__)
@@ -50,6 +51,23 @@ support it -- do not simply repeat your previous argument.
 Return your answer as the structured claim schema. `argument` must be one \
 sentence, at most 25 words.
 """
+
+# ADR-008 Decision 14: a Tamil-instructed system-prompt variant existed
+# here briefly (SYSTEM_PROMPT_TA / CACHED_SYSTEM_PROMPT_TA), asking the
+# model to write `argument` directly in Tamil script. Verified live
+# before shipping it, per instruction, and it failed: Nova Pro produced
+# text using only valid Tamil Unicode code points but grammatically
+# impossible letter sequences -- not stilted Tamil, not-Tamil. Every
+# OTHER structured field (concedes, urgency_score, days_past_maturity,
+# rain_vulnerability, acres, bumped_last_season) was separately confirmed
+# correct on the same calls -- the damage was isolated to this one
+# free-text field. Removed; single system prompt again, same as before
+# Tamil support existed. `argument` for a Tamil-registered farmer's plot
+# is now templated deterministically from ground-truth facts (see
+# messages_ta.advocate_argument, called below) rather than requested from
+# the model in any language. Full writeup, including a Tanglish
+# (romanized Tamil) variant that came back mostly clean and is recorded
+# as a live, tested, not-yet-used option: ADR-008 Decision 14.
 
 # Prompt caching: verified live against apac.amazon.nova-pro-v1:0 in
 # ap-south-1 before building this. Three findings, not one:
@@ -150,6 +168,7 @@ def _fallback_claim(facts: PlotFacts, reason: str) -> AdvocateClaim:
             else "Ready and awaiting the machine; no special claim."
         ),
         concedes=not facts.is_ready,
+        degraded=True,
     )
 
 
@@ -196,7 +215,24 @@ def get_advocate_claim(
             return _fallback_claim(facts, f"{type(exc).__name__}: {exc}")
 
         # Ground-truth override: whatever the model echoed for factual
-        # fields is discarded. Only argument/concedes are the model's own.
+        # fields is discarded. `concedes` is a genuine model judgment,
+        # kept regardless of language. `argument`'s language: the model's
+        # own English text for an English-registered farmer; a
+        # deterministic Tamil template, driven by these same facts plus
+        # the model's concedes decision, for a Tamil-registered one --
+        # see the comment above SYSTEM_PROMPT and ADR-008 Decision 14 for
+        # why asking the model for Tamil prose isn't done anymore.
+        if facts.language == "ta":
+            argument = messages_ta.advocate_argument(
+                is_ready=facts.is_ready,
+                days_past_maturity=facts.days_past_maturity,
+                urgency=facts.urgency,
+                rain_vulnerability=facts.rain_vulnerability,
+                bumped_last_season=facts.bumped_last_season,
+                concedes=claim.concedes,
+            )
+        else:
+            argument = claim.argument
         return AdvocateClaim.from_facts(
-            facts, argument=claim.argument, concedes=claim.concedes
+            facts, argument=argument, concedes=claim.concedes
         )

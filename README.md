@@ -1,6 +1,6 @@
 # Harvest Convoy
 
-A village cluster in Tamil Nadu shares one combine harvester across eight
+A village cluster in Tamil Nadu shares one combine harvester across its
 paddy plots. Harvest Convoy tracks each plot's crop maturity and the
 incoming weather, and reschedules the shared machine's route automatically
 — surfacing to a human only when two plots genuinely conflict for the same
@@ -8,6 +8,39 @@ slot, instead of burying farmers in decisions a machine can make for them.
 
 Built for the AWS "Agents for Humans" hackathon, track **Good Neighbor
 Agents**.
+
+**Works anywhere in Tamil Nadu, not just one village.** Growing Degree
+Days are computed from each plot's own coordinates and weather, not a
+hardcoded location — nothing in the deterministic core assumes a
+particular district. Two real, differently-climated demo clusters prove
+this instead of asserting it: **Kamatchipuram** (Theni district, semi-arid
+interior, 8 plots) and **Naducauvery** (Thanjavur district, Cauvery delta,
+8 plots) — see `scripts/seed_cluster.py` and
+`scripts/seed_cluster_naducauvery.py`. The one place climate *does* need
+calibrating — the crop's maturity threshold — is covered in the Honesty
+section below, including the real ~10.6% GDD-rate gap measured between
+the two districts and how per-cluster calibration closes it.
+
+**Farmer-facing messages are Tamil by default, English on request.**
+`Farmer.language` (default `"ta"`) drives every scheduling-critical
+message — harvest-scheduled, not-ready, and escalation-resolved — via
+hand-authored templates in
+[`telegram/messages_ta.py`](src/harvest_convoy/telegram/messages_ta.py)
+and
+[`telegram/messages_en.py`](src/harvest_convoy/telegram/messages_en.py),
+not machine translation. Registration accepts Tamil script and
+transliterated ("Tanglish") input, and both ஏக்கர் (acre) and சென்ட்
+(cent) as area units, displayed back in whichever the farmer used. The
+one generative string in the whole system — the advocate's argument,
+shown to the operator in an escalation — is **templated from ground-truth
+facts for Tamil, not model-generated**: live testing found Nova Pro
+cannot reliably produce valid Tamil script (see "What we learned building
+Tamil support" below for the actual samples). English farmers still get
+the model's own generated argument text. See
+[docs/adr/ADR-008-tn-generalization-and-tamil.md](docs/adr/ADR-008-tn-generalization-and-tamil.md)
+Part 2 for the full design and its disclosed first-pass status: every
+Tamil string is a native speaker's correction away from final, not a
+finished translation.
 
 **The core rule the whole system is built around: the LLM never computes a
 number.** Crop maturity (Growing Degree Days), rain-day capacity, route
@@ -27,11 +60,14 @@ uv sync --all-groups
 uv run pytest
 ```
 
-133 tests pass with genuinely nothing else set up — no `.env`, no
-network access, no credentials of any kind (a handful are marked
-`network`/`bedrock` and skip unless you opt in — see `pyproject.toml`).
-This is the fastest way to confirm the deterministic core (GDD, capacity,
-route, fairness) actually works.
+286 of 288 tests pass with genuinely nothing else set up — no `.env`, no
+credentials of any kind. A handful are marked `network` (real Open-Meteo
+calls, free tier, no key needed) or `bedrock` (real Bedrock calls, needs
+AWS credentials) — see `pyproject.toml`; run `uv run pytest -m "not
+bedrock"` to skip the two Bedrock-only ones if you don't have AWS
+credentials configured. This is the fastest way to confirm the
+deterministic core (GDD, calibration, capacity, route, fairness) actually
+works.
 
 To see the full scheduling pass end to end — including a plot-vs-plot
 negotiation — `scripts/trigger_scenario.py` actually sends real Telegram
@@ -186,13 +222,34 @@ uses instead (`src/harvest_convoy/agronomy/crop_params.py`):
   ADT45 specifically, a chosen point in a cited range.
 - `ADT45_FIELD_DURATION_DAYS_ESTIMATED = 110 - 20 = 90` days from
   transplant to maturity.
-- `KURUVAI_MEAN_GDD_PER_DAY_THENI_ESTIMATED = 19.2133` — computed directly
-  from Open-Meteo Archive history at Theni's coordinates, the 90-day
-  window (May 15–Aug 12) across the five most recent complete years
-  (2021–2025): 450 days of real temperature data, mean 19.2133 GDD/day.
-  This replaced an earlier, unverified 17.5 figure caught during review.
+- `KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED = 19.2133` — computed
+  directly from Open-Meteo Archive history at Theni's coordinates, the
+  90-day window (May 15–Aug 12) across the five most recent complete
+  years (2021–2025): 450 days of real temperature data, mean 19.2133
+  GDD/day. This replaced an earlier, unverified 17.5 figure caught
+  during review.
 - **`MATURITY_GDD_ESTIMATED = 90 × 19.2133 ≈ 1729.2`** — field-duration
   days times assumed mean daily GDD accrual. Estimated, not measured.
+  **This number is now the documented fallback, not a TN-wide constant.**
+
+**The maturity threshold is now derived per cluster, not applied
+uniformly from Theni's climate.** Re-running the exact methodology above
+against a second real district — Naducauvery, Thanjavur delta (Cauvery
+delta, Tamil Nadu's principal rice belt) — measured **21.2509 GDD/day**,
+~10.6% hotter than Theni. Applying Theni's number unmodified would have
+misprojected maturity dates in Thanjavur by roughly 9 days. Each seeded
+cluster's `Cluster.maturity_gdd_override` can now be calibrated against
+its own coordinates (`agronomy/calibration.py`, `seed_cluster*.py
+--write --calibrate` — live Open-Meteo calls, opt-in, not run by
+`pytest`), and `scheduling/solver.py` uses that override when present.
+**Calibration only fixes which climate the threshold is priced in — the
+underlying `MATURITY_GDD_ESTIMATED = 1729.2` figure itself remains
+DERIVED, not sourced,** for the reasons above (no published ADT45
+thermal-time requirement exists at all); an uncalibrated cluster falls
+back to it and logs a loud `MATURITY THRESHOLD FALLBACK` warning rather
+than silently assuming Theni's climate applies. See
+[docs/adr/ADR-008-tn-generalization-and-tamil.md](docs/adr/ADR-008-tn-generalization-and-tamil.md)
+Decision 2 for the full measured comparison.
 
 **The fairness decay curve is the same story.** No citable day-past-
 physiological-maturity yield/quality loss curve for paddy was found.
@@ -242,16 +299,103 @@ not documented anywhere obvious beforehand:
 Full writeup with the exact CloudWatch metrics and error text that
 confirmed each root cause: ADR-006, Decisions 7 and 8.
 
+## What we learned building Tamil support
+
+We tested whether Nova Pro could generate the advocate's `argument`
+field directly in Tamil script, via a system-prompt instruction, before
+shipping it — the same "verify live, don't assume" standard applied
+everywhere else in this project. **It failed, and it failed in a more
+specific way than "sounds like translated English."**
+
+Five real `argument` values, generated live via a
+`CACHED_SYSTEM_PROMPT_TA` variant that has since been removed, verbatim:
+
+```
+இந்ன்து புனக்கது தக்க தா஡ைல்தது.
+திஂன்துத்தயாடுத்து
+ஊமகட்த் மறந்தம் மறமிக்கம் மறஂடகடும்.
+ஊண்ட கம்பத்டுககம்
+ஆகிகணிகிச் மடுத்டல் உனிப்படு மட்தமட்டு மடுக்கப்படு.
+```
+
+Every character checks out as a valid Tamil Unicode code point (U+0B80–
+U+0BFF) — this isn't an encoding bug or a font problem. But the
+consonant/vowel-sign clusters are grammatically impossible (e.g. two
+virama-joined nasals in a row, `ந்ன்`) and rare signs like anusvara
+(`ஂ`, U+0B82) appear in positions no real Tamil word would use. This
+isn't stilted or awkward Tamil — it isn't Tamil.
+
+**The corruption never reached a scheduling decision.** The same facts,
+sent through both an English-instructed and a Tamil-instructed call,
+came back with identical, correct values for every *other* structured
+field — `concedes`, `urgency_score`, `days_past_maturity`,
+`rain_vulnerability`, `acres`, `bumped_last_season` all matched ground
+truth exactly, in both languages. The failure was confined to the
+free-text `argument` field; the model's actual judgment (whether to
+concede the slot) was never degraded. This matters because it's the
+difference between "one string was wrong" and "the agent layer can't be
+trusted" — it's the former, verified, not assumed.
+
+**The failure is script-level, not language-level.** A Tanglish
+(romanized Tamil, Latin letters) variant of the same instruction
+produced largely coherent output. Three real samples, verbatim:
+
+```
+Enga plot ready aayidichu, udambai vechu
+Ithu ready aayila, action aanathe vendaam.
+Enakku ready aayidichu, thungadi thunnai venum.
+```
+
+The second is a fully correct sentence ("This isn't ready yet, no
+action needed."). The third shows the actual failure mode: a clean
+opening ("Enakku ready aayidichu" — "I've become ready") that degrades
+into a garbled tail ("thungadi thunnai venum" isn't a real phrase).
+Nova Pro can produce valid Tamil *sounds* reliably; it's the Tamil
+*script* specifically — the tokenization into Unicode code points —
+where it breaks down. A native Tamil-instructed system prompt was not
+attempted as a fix, on the reasoning that a model unable to reliably
+emit Tamil script likely can't reliably read Tamil-script instructions
+either.
+
+**We templated the Tamil path instead of working around the model.**
+`argument` for a Tamil-registered farmer's plot is now rendered
+deterministically from the same ground-truth facts plus the model's own
+`concedes` decision (`telegram/messages_ta.py:advocate_argument`) — not
+requested from the model in any language. This string surfaces to an
+operator making a real scheduling call between two farmers; text that
+can't be verified for correctness doesn't belong on that path, no
+matter how it reads. `concedes` itself is still a genuine live model
+judgment for every plot regardless of language — only the prose
+generation was removed from the model's job. English-registered farmers
+are unaffected; the model's own generated argument text is used as
+before.
+
+Full writeup, including the other-field-corruption comparison table:
+ADR-008, Decision 14 (the finding) and Decision 15 (the fix).
+
 ## Cost
 
 Measured, not estimated, on the real 8-plot Kamatchipuram scenario
-against live Bedrock:
+against live Bedrock, with a realistic 50/50 Tamil/English farmer mix
+(not an all-one-language cluster) since that's what a single shared
+system prompt now actually serves. Run three times, not once — live
+model output varies call to call, and a single four-decimal figure from
+one observation would overstate the precision we actually have:
 
 | | |
 |---|---|
-| Per full scheduling run (Nova Pro, prompt-cached) | **$0.0081** |
-| Same run, without prompt caching | $0.0227 (64% more) |
+| Per full scheduling run (Nova Pro, prompt-cached) | **≈$0.011** (measured $0.0106–$0.0118 across 3 live runs) |
+| Same run, without prompt caching | $0.0227 (measured on an earlier, English-only run — still the right order of magnitude) |
 | Standing AWS infrastructure | ~$2/month worst case |
+
+An earlier measurement on an all-English 8-plot run reported $0.0081;
+this range supersedes it — same single cached system prompt, ordinary
+call-to-call token variance on live, non-deterministic model output
+(each call's internal reasoning length varies a little), not a
+regression. (A separate mixed-prompt configuration — a Tamil-specific
+system-prompt variant alongside the English one — was tried and measured
+around $0.0119 before being removed for the correctness reason above;
+not carried forward.)
 
 The prompt-caching win comes from an explicit `cachePoint` block on the
 advocate's system prompt — see `agents/advocate.py` and ADR-006 Decision

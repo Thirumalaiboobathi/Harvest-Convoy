@@ -20,6 +20,7 @@ today.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
@@ -39,6 +40,8 @@ from harvest_convoy.scheduling.capacity import (
 )
 from harvest_convoy.scheduling.route import RoutePoint, order_route
 
+logger = logging.getLogger(__name__)
+
 
 class PlotOutcome(str, Enum):
     TOO_GREEN = "too_green"  # below maturity GDD -- excluded from contention entirely
@@ -57,7 +60,11 @@ class PlotDecision:
 
 
 def assess_plot(
-    plot: Plot, days: list[DailyTemperature], today: date
+    plot: Plot,
+    days: list[DailyTemperature],
+    today: date,
+    *,
+    maturity_gdd: float = crop_params.MATURITY_GDD_ESTIMATED,
 ) -> PlotDecision:
     """Classify a single plot as TOO_GREEN or ready (returned as FITS here
     provisionally -- capacity allocation in solve() may downgrade a ready
@@ -67,10 +74,15 @@ def assess_plot(
     threshold is excluded from contention outright, before any capacity or
     ranking math runs -- it can never be pulled back in just because
     capacity happens to be available.
+
+    `maturity_gdd` defaults to the global, Theni-derived reference
+    constant for direct callers (demo scripts, tests) that don't have a
+    Cluster in hand. solve() below always passes the cluster's own
+    resolved threshold explicitly -- see ADR-008 Decision 2.
     """
     total_gdd = accumulate_gdd(days, crop_params.T_BASE_C)
 
-    if total_gdd < crop_params.MATURITY_GDD_ESTIMATED:
+    if total_gdd < maturity_gdd:
         return PlotDecision(
             plot_id=plot.plot_id,
             outcome=PlotOutcome.TOO_GREEN,
@@ -80,9 +92,7 @@ def assess_plot(
             route_position=None,
         )
 
-    maturity_date_str = project_maturity_date(
-        days, crop_params.T_BASE_C, crop_params.MATURITY_GDD_ESTIMATED
-    )
+    maturity_date_str = project_maturity_date(days, crop_params.T_BASE_C, maturity_gdd)
     assert maturity_date_str is not None  # total_gdd already crossed the threshold
     maturity_date = date.fromisoformat(maturity_date_str)
     days_past_maturity = max(0, (today - maturity_date).days)
@@ -118,11 +128,31 @@ def solve(
 
     Returns one PlotDecision per input plot, sorted by plot_id so the
     result shape doesn't depend on dict/set iteration order.
+
+    Maturity threshold resolution (ADR-008 Decision 2): uses
+    `cluster.maturity_gdd_override` if this cluster has been calibrated
+    against its own climatology (agronomy/calibration.py); otherwise
+    falls back to the global, Theni-derived
+    `crop_params.MATURITY_GDD_ESTIMATED` and logs a loud warning so an
+    uncalibrated cluster is never a silent assumption.
     """
     plots_by_id = {p.plot_id: p for p in plots}
 
+    maturity_gdd = cluster.maturity_gdd_override
+    if maturity_gdd is None:
+        maturity_gdd = crop_params.MATURITY_GDD_ESTIMATED
+        logger.warning(
+            "MATURITY THRESHOLD FALLBACK: cluster=%s has no derived "
+            "maturity_gdd_override -- using the global Theni-reference "
+            "constant (%.1f GDD, see crop_params.MATURITY_GDD_ESTIMATED) "
+            "instead of this cluster's own climatology. Run the seed "
+            "script with --calibrate to derive one for this cluster.",
+            cluster.cluster_id, maturity_gdd,
+        )
+
     assessed = [
-        assess_plot(p, plot_days[p.plot_id], today) for p in plots
+        assess_plot(p, plot_days[p.plot_id], today, maturity_gdd=maturity_gdd)
+        for p in plots
     ]
 
     ready = [d for d in assessed if d.outcome == PlotOutcome.FITS]

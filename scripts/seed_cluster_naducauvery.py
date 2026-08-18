@@ -1,24 +1,40 @@
-"""The 8-plot Kamatchipuram demo cluster.
+"""The second seeded demo cluster: Naducauvery, Thanjavur district --
+proves the multi-district claim in ADR-008 rather than asserting it.
 
-Plain fixture data only -- no DynamoDB (that's Phase 5). Real village,
-real coordinates; the plots, farmers, and transplant dates are synthetic,
-designed to exercise the three-way TOO_GREEN / FITS / CONTESTED split the
-Phase 2 gate requires. This must be disclosed as simulated in the README
-(per the project's honesty rules) -- we did not onboard 8 live farmers.
+Same shape as seed_cluster.py (CLUSTER/FARMERS/PLOTS/seed_into_storage/
+main), deliberately a separate module rather than a change to
+seed_cluster.py -- ADR-005 Decision 3 promises that module's fixtures
+stay exactly as-is for every test that imports them directly, and this
+file makes the same promise for itself going forward.
 
-Village: Kamatchipuram, Chinnamanur block, Uthamapalayam taluk, Theni
-district, Tamil Nadu. Center coordinates 9.86500N 77.45389E, verified
-directly against https://en.wikipedia.org/wiki/Kamatchipuram (fetched, not
-just search-surfaced). Per-plot coordinates are small illustrative offsets
-around that center (a few hundred meters to ~1.5km) -- they do not
-correspond to real property boundaries.
+Village: Naducauvery, Thiruvaiyaru taluk, Thanjavur district, Tamil
+Nadu. Center coordinates 10.861N 79.046E, verified directly against
+https://en.wikipedia.org/wiki/Naducauvery (fetched, not just
+search-surfaced). Thiruvaiyaru taluk sits in the Cauvery delta, Tamil
+Nadu's principal rice-growing belt -- a genuinely different growing
+environment from Theni's semi-arid interior climate: re-running ADR-002's
+climatology methodology at these coordinates measured 21.2509 GDD/day
+against Theni's 19.2133 (~10.6% hotter), the real number behind ADR-008
+Decision 2's per-cluster maturity calibration. Per-plot coordinates below
+are small illustrative offsets around that center (a few hundred meters
+to ~1.5km), like Kamatchipuram's -- they do not correspond to real
+property boundaries. Farmer names are synthetic, not real people --
+same honesty disclosure as seed_cluster.py's Kamatchipuram fixture.
 
-Transplant dates are fixed ISO calendar dates rather than relative to
-"today", so re-running this script on a later date will show the same
-plots progressively further past maturity (or, eventually, all of them
-badly overripe) -- that's real GDD accumulation behaving correctly, not a
-bug. The dates below were chosen against 2026-08-16 to produce a mix of
-too-green, comfortably-ready, and contested plots as of that date.
+farmer_id/plot_id are prefixed "nc-" specifically so seeding both this
+cluster and Kamatchipuram into the same Storage backend never collides
+on FARMER#{id}/PLOT#{id} keys -- Kamatchipuram already owns the bare
+f01..f08/p01..p08 ids.
+
+machine_capacity_acres_per_day is kept identical to Kamatchipuram's
+(3.5) on purpose: the whole point of this second cluster is to isolate
+the climate/GDD effect (ADR-008 Decision 2), not confound it with also
+varying machine capacity.
+
+Transplant dates are fixed ISO calendar dates, same caveat as
+Kamatchipuram's fixture: re-running this against live weather on a later
+date will show a different too-green/fits/contested mix as real GDD
+accumulates -- that's the model working correctly, not a bug.
 """
 
 from __future__ import annotations
@@ -31,148 +47,140 @@ from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.storage import Storage, get_storage
 from harvest_convoy.weather.openmeteo import WeatherError
 
-VILLAGE_LAT = 9.86500
-VILLAGE_LON = 77.45389
+VILLAGE_LAT = 10.861
+VILLAGE_LON = 79.046
 
 CLUSTER = Cluster(
-    cluster_id="kamatchipuram",
-    name="Kamatchipuram",
+    cluster_id="naducauvery",
+    name="Naducauvery",
     machine_capacity_acres_per_day=3.5,
     machine_start_lat=VILLAGE_LAT,
     machine_start_lon=VILLAGE_LON,
-    operator_chat_id=None,  # wired in Phase 4
+    operator_chat_id=None,
 )
 
 FARMERS: list[Farmer] = [
-    Farmer(farmer_id="f01", name="Muthu Pandian", cluster_id=CLUSTER.cluster_id),
-    Farmer(farmer_id="f02", name="Selvi Karuppiah", cluster_id=CLUSTER.cluster_id),
-    Farmer(farmer_id="f03", name="Kannan Raja", cluster_id=CLUSTER.cluster_id),
-    Farmer(farmer_id="f04", name="Meena Subramani", cluster_id=CLUSTER.cluster_id),
-    Farmer(farmer_id="f05", name="Raja Gounder", cluster_id=CLUSTER.cluster_id),
-    Farmer(farmer_id="f06", name="Lakshmi Nadar", cluster_id=CLUSTER.cluster_id),
-    Farmer(farmer_id="f07", name="Karthik Murugan", cluster_id=CLUSTER.cluster_id),
-    Farmer(farmer_id="f08", name="Valli Chinnasamy", cluster_id=CLUSTER.cluster_id),
+    Farmer(farmer_id="nc-f01", name="Marimuthu Iyer", cluster_id=CLUSTER.cluster_id),
+    Farmer(farmer_id="nc-f02", name="Kamala Pillai", cluster_id=CLUSTER.cluster_id),
+    Farmer(farmer_id="nc-f03", name="Rajendran Mudaliar", cluster_id=CLUSTER.cluster_id),
+    Farmer(farmer_id="nc-f04", name="Meenakshi Iyengar", cluster_id=CLUSTER.cluster_id),
+    Farmer(farmer_id="nc-f05", name="Sundaram Chettiar", cluster_id=CLUSTER.cluster_id),
+    Farmer(farmer_id="nc-f06", name="Pappathi Naidu", cluster_id=CLUSTER.cluster_id),
+    Farmer(farmer_id="nc-f07", name="Ganesan Pillai", cluster_id=CLUSTER.cluster_id),
+    Farmer(farmer_id="nc-f08", name="Valliammai Naidu", cluster_id=CLUSTER.cluster_id),
 ]
 
-# (dlat, dlon) offsets from the village center -- small illustrative spread,
-# not real field boundaries.
+# (dlat, dlon) offsets from the village center -- small illustrative
+# spread, not real field boundaries. A distinct set from Kamatchipuram's,
+# same purpose.
 _OFFSETS = [
-    (0.0060, -0.0040),
-    (0.0035, 0.0080),
-    (-0.0050, 0.0055),
-    (0.0090, 0.0015),
-    (-0.0075, -0.0060),
-    (0.0020, -0.0110),
-    (0.0110, 0.0070),
-    (-0.0095, 0.0025),
+    (0.0055, -0.0035),
+    (0.0030, 0.0075),
+    (-0.0045, 0.0050),
+    (0.0085, 0.0010),
+    (-0.0070, -0.0055),
+    (0.0018, -0.0100),
+    (0.0100, 0.0065),
+    (-0.0090, 0.0020),
 ]
 
 PLOTS: list[Plot] = [
     Plot(
-        plot_id="p01",
-        farmer_id="f01",
+        plot_id="nc-p01",
+        farmer_id="nc-f01",
         cluster_id=CLUSTER.cluster_id,
         lat=VILLAGE_LAT + _OFFSETS[0][0],
         lon=VILLAGE_LON + _OFFSETS[0][1],
         crop="paddy",
         variety="ADT45",
-        transplant_date=date(2026, 5, 1),  # well past maturity by 2026-08-16
-        area_acres=2.5,
+        transplant_date=date(2026, 5, 10),  # well past maturity
+        area_acres=2.0,
     ),
     Plot(
-        plot_id="p02",
-        farmer_id="f02",
+        plot_id="nc-p02",
+        farmer_id="nc-f02",
         cluster_id=CLUSTER.cluster_id,
         lat=VILLAGE_LAT + _OFFSETS[1][0],
         lon=VILLAGE_LON + _OFFSETS[1][1],
         crop="paddy",
         variety="ADT45",
-        transplant_date=date(2026, 5, 5),
-        area_acres=0.75,  # smallholder
+        transplant_date=date(2026, 5, 16),
+        area_acres=1.0,  # smallholder
     ),
     Plot(
-        plot_id="p03",
-        farmer_id="f03",
+        plot_id="nc-p03",
+        farmer_id="nc-f03",
         cluster_id=CLUSTER.cluster_id,
         lat=VILLAGE_LAT + _OFFSETS[2][0],
         lon=VILLAGE_LON + _OFFSETS[2][1],
         crop="paddy",
         variety="ADT45",
-        transplant_date=date(2026, 5, 12),
-        area_acres=3.0,
+        transplant_date=date(2026, 5, 22),
+        area_acres=2.5,
     ),
     Plot(
-        plot_id="p04",
-        farmer_id="f04",
+        plot_id="nc-p04",
+        farmer_id="nc-f04",
         cluster_id=CLUSTER.cluster_id,
         lat=VILLAGE_LAT + _OFFSETS[3][0],
         lon=VILLAGE_LON + _OFFSETS[3][1],
         crop="paddy",
         variety="ADT45",
-        transplant_date=date(2026, 5, 18),
-        area_acres=1.25,
+        transplant_date=date(2026, 5, 30),
+        area_acres=1.5,
     ),
     Plot(
-        plot_id="p05",
-        farmer_id="f05",
+        plot_id="nc-p05",
+        farmer_id="nc-f05",
         cluster_id=CLUSTER.cluster_id,
         lat=VILLAGE_LAT + _OFFSETS[4][0],
         lon=VILLAGE_LON + _OFFSETS[4][1],
         crop="paddy",
         variety="ADT45",
-        transplant_date=date(2026, 5, 24),
-        area_acres=2.0,
+        transplant_date=date(2026, 6, 8),
+        area_acres=3.0,
     ),
     Plot(
-        plot_id="p06",
-        farmer_id="f06",
+        plot_id="nc-p06",
+        farmer_id="nc-f06",
         cluster_id=CLUSTER.cluster_id,
         lat=VILLAGE_LAT + _OFFSETS[5][0],
         lon=VILLAGE_LON + _OFFSETS[5][1],
         crop="paddy",
         variety="ADT45",
-        transplant_date=date(2026, 5, 30),
-        area_acres=0.5,  # smallholder
+        transplant_date=date(2026, 6, 20),
+        area_acres=0.75,  # smallholder
     ),
     Plot(
-        plot_id="p07",
-        farmer_id="f07",
+        plot_id="nc-p07",
+        farmer_id="nc-f07",
         cluster_id=CLUSTER.cluster_id,
         lat=VILLAGE_LAT + _OFFSETS[6][0],
         lon=VILLAGE_LON + _OFFSETS[6][1],
         crop="paddy",
         variety="ADT45",
-        transplant_date=date(2026, 7, 20),  # too green as of 2026-08-16
-        area_acres=1.5,
+        transplant_date=date(2026, 7, 25),  # too green as of mid-Aug 2026
+        area_acres=1.25,
     ),
     Plot(
-        plot_id="p08",
-        farmer_id="f08",
+        plot_id="nc-p08",
+        farmer_id="nc-f08",
         cluster_id=CLUSTER.cluster_id,
         lat=VILLAGE_LAT + _OFFSETS[7][0],
         lon=VILLAGE_LON + _OFFSETS[7][1],
         crop="paddy",
         variety="ADT45",
-        transplant_date=date(2026, 7, 28),  # too green as of 2026-08-16
+        transplant_date=date(2026, 8, 2),  # too green as of mid-Aug 2026
         area_acres=1.0,
     ),
 ]
 
 
 def seed_into_storage(storage: Storage, *, calibrate: bool = False) -> None:
-    """Write the fixture data above into a real Storage backend. The
-    PLOTS/FARMERS/CLUSTER module-level fixtures stay exactly as they are
-    for every test that imports them directly -- this just persists a
-    copy, it doesn't replace them. See ADR-005 Decision 3.
-
-    calibrate: if True, derives this cluster's own maturity GDD threshold
-    from its real climatology (agronomy/calibration.py -- makes live
-    Open-Meteo Archive calls, five years of history) and persists it as
-    Cluster.maturity_gdd_override. Off by default so `--write` alone
-    (and therefore the test suite, which never calls this with
-    calibrate=True) stays hermetic -- see ADR-008 Decision 2. The
-    in-memory CLUSTER constant above is never mutated either way.
-    """
+    """Write the fixture data above into a real Storage backend. See
+    seed_cluster.py:seed_into_storage's docstring -- same contract,
+    same --calibrate opt-in (network-gated, off by default, never called
+    by the hermetic test suite)."""
     cluster = CLUSTER
     if calibrate:
         from harvest_convoy.agronomy.calibration import derive_cluster_maturity_gdd

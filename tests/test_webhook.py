@@ -38,10 +38,14 @@ def _plot(plot_id: str) -> Plot:
     )
 
 
-def _farmer(plot_id: str, chat_id: int, name: str | None = None) -> Farmer:
+def _farmer(plot_id: str, chat_id: int, name: str | None = None, language: str = "en") -> Farmer:
+    # language="en" here (not Farmer's own "ta" default) so the existing
+    # English-wording assertions below keep testing what they always
+    # tested -- see test_registered_escalation_gives_loser_a_tamil_reason
+    # below for the Tamil dispatch path, proven explicitly instead.
     return Farmer(
         farmer_id=f"farmer-{plot_id}", name=name or f"Farmer {plot_id}",
-        cluster_id="c", telegram_chat_id=chat_id,
+        cluster_id="c", telegram_chat_id=chat_id, language=language,
     )
 
 
@@ -178,6 +182,43 @@ def test_registered_escalation_gives_loser_a_specific_reason(tmp_path) -> None:
     assert "6 days" in loser_text
     assert "round" not in loser_text.lower()
     assert "negotiat" not in loser_text.lower()
+
+
+def test_registered_escalation_gives_a_tamil_registered_loser_a_tamil_reason(tmp_path) -> None:
+    """The resolution reason is rendered in the LOSING farmer's own
+    language -- found while wiring up Tamil support that the old
+    _resolution_reason was hand-authored English with no language
+    awareness at all. See ADR-008 Part 2."""
+    storage = FileStorage(tmp_path / "storage.json")
+    client = _FakeClient()
+    farmer_a = _farmer("p03", 111, name="Kannan Raja", language="en")
+    farmer_b = _farmer("p04", 222, name="Meena Subramani", language="ta")
+    plots = {"p03": (farmer_a, _plot("p03")), "p04": (farmer_b, _plot("p04"))}
+
+    escalation = EscalationPayload(
+        cluster_id="reason-test-ta", plot_a_id="p03", plot_b_id="p04",
+        claim_a=_claim("p03", days_past_maturity=6),
+        claim_b=_claim("p04", days_past_maturity=0, bumped=True),
+        rounds_run=3, reason="tied",
+    )
+    webhook.register_escalation(escalation)
+
+    update = {
+        "callback_query": {
+            "id": "cbq-reason-ta",
+            "data": "resolve:reason-test-ta:p03:p04:p03",
+            "message": {"chat": {"id": 999}, "message_id": 1},
+        }
+    }
+    webhook.handle_update(
+        client, update, storage, SEASON, lookup_farmer_for_plot=lambda pid: plots.get(pid)
+    )
+
+    loser_messages = [m for m in client.sent_messages if m[0] == 222]
+    assert len(loser_messages) == 1
+    loser_text = loser_messages[0][1]
+    assert "6" in loser_text  # the days-past-maturity number carries through
+    assert "நாட்களாக" in loser_text  # Tamil reason text, not English
 
 
 def test_double_tap_on_resolved_escalation_does_not_renotify(tmp_path) -> None:

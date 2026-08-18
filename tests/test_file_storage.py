@@ -123,3 +123,81 @@ def test_corrupt_storage_file_degrades_to_empty_rather_than_crashing(tmp_path) -
     storage = FileStorage(path)
     assert storage.get_plot("anything") is None
     assert storage.get_ledger_entries("anyone") == []
+
+
+def test_legacy_farmer_record_without_language_key_defaults_to_tamil(tmp_path) -> None:
+    """A pre-ADR-008 stored record (written before Farmer.language
+    existed) has no "language" key in its dict at all -- Farmer(**raw)
+    must fall through to the dataclass default ("ta"), not KeyError.
+    Hand-built directly (bypassing put_farmer, which would always write
+    the current shape) so this actually proves the legacy-record claim
+    rather than trusting it."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage._data["farmers"]["legacy1"] = {
+        "farmer_id": "legacy1", "name": "Old Record", "cluster_id": "c1",
+        "telegram_chat_id": 555,
+        # no "language" key -- simulates a record from before this field existed
+    }
+    storage._save()
+
+    reloaded = FileStorage(tmp_path / "s.json")
+    farmer = reloaded.get_farmer("legacy1")
+    assert farmer is not None
+    assert farmer.language == "ta"
+
+
+def test_legacy_plot_record_without_area_unit_key_defaults_to_acre(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage._data["plots"]["legacyp1"] = {
+        "plot_id": "legacyp1", "farmer_id": "f1", "cluster_id": "c1",
+        "lat": 9.87, "lon": 77.46, "crop": "paddy", "variety": "ADT45",
+        "transplant_date": "2026-05-18", "area_acres": 2.0,
+        # no "area_unit" key
+    }
+    storage._save()
+
+    reloaded = FileStorage(tmp_path / "s.json")
+    plot = reloaded.get_plot("legacyp1")
+    assert plot is not None
+    assert plot.area_unit == "acre"
+
+
+def test_legacy_cluster_record_without_maturity_gdd_override_key_defaults_to_none(tmp_path) -> None:
+    """Same free-default story as language/area_unit, for ADR-008's
+    per-cluster maturity threshold (Decision 2) -- a cluster seeded
+    before that field existed reads back as None, which is exactly what
+    scheduling/solver.py checks for to trigger its fallback-and-log path."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage._data["clusters"]["legacyc1"] = {
+        "cluster_id": "legacyc1", "name": "Old Cluster",
+        "machine_capacity_acres_per_day": 3.5,
+        "machine_start_lat": 9.865, "machine_start_lon": 77.454,
+        "operator_chat_id": None,
+        # no "maturity_gdd_override" key
+    }
+    storage._save()
+
+    reloaded = FileStorage(tmp_path / "s.json")
+    cluster = reloaded.get_cluster("legacyc1")
+    assert cluster is not None
+    assert cluster.maturity_gdd_override is None
+
+
+def test_legacy_cluster_record_without_operator_language_key_defaults_to_tamil(tmp_path) -> None:
+    """Same free-default story, for Cluster.operator_language (added in
+    the same review round that reversed ADR-008 Decision 8's original
+    English-only scope boundary for operator-facing text)."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage._data["clusters"]["legacyc2"] = {
+        "cluster_id": "legacyc2", "name": "Old Cluster 2",
+        "machine_capacity_acres_per_day": 3.5,
+        "machine_start_lat": 9.865, "machine_start_lon": 77.454,
+        "operator_chat_id": None, "maturity_gdd_override": None,
+        # no "operator_language" key
+    }
+    storage._save()
+
+    reloaded = FileStorage(tmp_path / "s.json")
+    cluster = reloaded.get_cluster("legacyc2")
+    assert cluster is not None
+    assert cluster.operator_language == "ta"
