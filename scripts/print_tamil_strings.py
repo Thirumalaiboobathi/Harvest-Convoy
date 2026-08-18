@@ -1,8 +1,8 @@
 """Prints every Tamil string in messages_ta.py, plus the Tamil-relevant
 word lists/tables in registration.py (yes/no matcher, month names), in
-one block for native-speaker review. See ADR-008 Part 2 -- none of this
-wording is a deliverable on its own; it's a first draft awaiting
-correction.
+one block for native-speaker review. See ADR-008 Part 2 and Decisions
+14-16 for the four review rounds this wording went through before it
+shipped.
 
 Usage:
     uv run python -m scripts.print_tamil_strings
@@ -169,7 +169,7 @@ def main() -> None:
 
     print()
     print("=" * 70)
-    print("End of Tamil string dump. First draft -- not a deliverable.")
+    print("End of Tamil string dump. See ADR-008 Decisions 14-16 for review history.")
     print("=" * 70)
 
 

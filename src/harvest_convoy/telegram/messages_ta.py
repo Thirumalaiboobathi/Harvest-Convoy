@@ -2,24 +2,27 @@
 Part 2. Shape mirrors messages_en.py exactly (same function names, same
 PROMPTS keys).
 
-FIRST DRAFT, NOT A DELIVERABLE. I am not a native Tamil speaker. Every
-string here is printed in one block by scripts/print_tamil_strings.py for
-native-speaker review and correction -- do not treat any wording below as
-final. Western digits used throughout (0-9, not ௦-௯) -- a stated
-choice (ADR-008 Decision 10): contemporary Tamil newspapers/government
-notices/SMS overwhelmingly use Western digits even in full Tamil-script
-text, and Tamil numeral glyphs are largely unfamiliar in everyday reading
--- correct me if that's wrong for the farmers in mind here.
+I am not a native Tamil speaker, so every string here went through four
+rounds of native-speaker review (scripts/print_tamil_strings.py dumps
+them all in one block for that purpose) before shipping -- see ADR-008
+Decisions 14-16 for the full record of what changed and why. Western
+digits used throughout (0-9, not ௦-௯) -- a stated choice (ADR-008
+Decision 10): contemporary Tamil newspapers/government notices/SMS
+overwhelmingly use Western digits even in full Tamil-script text, and
+Tamil numeral glyphs are largely unfamiliar in everyday reading.
 
-Revision log (native-speaker review round 1, 2026-08-17): date format was
-month-first (wrong -- Indian convention is day-first, fixed); product
-name was transliterated into Tamil script (wrong -- proper nouns stay in
-Latin script, fixed); "operator" kept as ஆபரேட்டர் on your explicit
+Revision log (native-speaker review, 2026-08-17 to 2026-08-18): date
+format was month-first (wrong -- Indian convention is day-first, fixed);
+product name was transliterated into Tamil script (wrong -- proper nouns
+stay in Latin script, fixed); "operator" kept as ஆபரேட்டர் on explicit
 confirmation, not changed; not_ready and escalation_resolved_lost
-trimmed to load-bearing content only, per your instruction; operator-
-facing strings (route summary, escalation dispatch) are now here too --
-previously English-only by disclosed decision (ADR-008 Decision 8), you
-asked for that reversed.
+trimmed to load-bearing content only; operator-facing strings (route
+summary, escalation dispatch) are now here too -- previously
+English-only by disclosed decision (ADR-008 Decision 8), reversed on
+request; day-count pluralization bug fixed everywhere it occurred
+(நாள்/நாட்கள்); escalation_argument_label went through three wordings
+before landing on "ஏஜென்ட்டின் பரிந்துரை:", picked after being rendered
+in a full escalation message rather than in isolation.
 """
 
 from __future__ import annotations

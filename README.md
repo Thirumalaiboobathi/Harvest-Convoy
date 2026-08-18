@@ -21,6 +21,13 @@ calibrating — the crop's maturity threshold — is covered in the Honesty
 section below, including the real ~10.6% GDD-rate gap measured between
 the two districts and how per-cluster calibration closes it.
 
+**Crop scope stays paddy ADT 45 only — deliberately, not by oversight.**
+Maize is the defensible second crop for a future season: combine-
+harvested, moisture-critical at harvest, and backed by real published
+GDD literature, unlike the derived paddy threshold above. Not attempted
+here — widening the crop list now would compound the sourcing gap
+rather than fix it.
+
 **Farmer-facing messages are Tamil by default, English on request.**
 `Farmer.language` (default `"ta"`) drives every scheduling-critical
 message — harvest-scheduled, not-ready, and escalation-resolved — via
@@ -38,9 +45,8 @@ cannot reliably produce valid Tamil script (see "What we learned building
 Tamil support" below for the actual samples). English farmers still get
 the model's own generated argument text. See
 [docs/adr/ADR-008-tn-generalization-and-tamil.md](docs/adr/ADR-008-tn-generalization-and-tamil.md)
-Part 2 for the full design and its disclosed first-pass status: every
-Tamil string is a native speaker's correction away from final, not a
-finished translation.
+Part 2 for the full design. Every Tamil string went through four rounds
+of native-speaker review (Decisions 14–16) before this wording shipped.
 
 **The core rule the whole system is built around: the LLM never computes a
 number.** Crop maturity (Growing Degree Days), rain-day capacity, route
