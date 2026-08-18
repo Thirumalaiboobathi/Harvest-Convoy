@@ -243,6 +243,69 @@ def get_daily_temperatures(
     return ordered
 
 
+def get_historical_daily(
+    lat: float,
+    lon: float,
+    start_date: date,
+    end_date: date,
+    *,
+    cache_dir: Path | None = DEFAULT_CACHE_DIR,
+) -> tuple[list[DailyTemperature], list[ForecastDay]]:
+    """Temperature AND precipitation for a fully historical date range, in
+    one Archive API call. Confirmed live that Open-Meteo's Archive API
+    returns both `temperature_2m_max`/`temperature_2m_min` and
+    `precipitation_sum` together for a past date range -- see
+    docs/adr/ADR-009-harvest-lifecycle-and-validation.md Decision 2. Built
+    for scripts/backtest_2025_kuruvai.py, which needs both series for the
+    same real past dates and has no reason to pay for two separate calls
+    where one already carries both fields.
+
+    Archive-only, no forecast bridging: callers must ensure `end_date` is
+    safely in the past. The backtest always is, by construction -- it
+    replays a prior season, so every date it asks for has long settled.
+    Raises WeatherError on any null day (a genuine gap, not a lagging tail
+    -- there is no "not computed yet" case for data this old).
+    """
+    if end_date < start_date:
+        raise ValueError("end_date must be >= start_date")
+
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "daily": f"{DAILY_FIELDS},{PRECIPITATION_FIELD}",
+        "timezone": TIMEZONE,
+    }
+    key = _cache_key(
+        "archive_full", lat, lon, start_date.isoformat(), end_date.isoformat()
+    )
+    data = _fetch(ARCHIVE_URL, params, cache_dir, key)
+    daily = data["daily"]
+    rows = list(
+        zip(
+            daily["time"],
+            daily["temperature_2m_max"],
+            daily["temperature_2m_min"],
+            daily[PRECIPITATION_FIELD],
+        )
+    )
+
+    temperatures: list[DailyTemperature] = []
+    precipitation: list[ForecastDay] = []
+    for d, t_max, t_min, precip in rows:
+        if t_max is None or t_min is None or precip is None:
+            raise WeatherError(
+                f"Archive API returned null data for {d} in "
+                f"{start_date}..{end_date} (temp_max={t_max}, "
+                f"temp_min={t_min}, precipitation={precip})"
+            )
+        temperatures.append(DailyTemperature(date=d, t_max_c=t_max, t_min_c=t_min))
+        precipitation.append(ForecastDay(date=d, precipitation_mm=precip))
+
+    return temperatures, precipitation
+
+
 def _assert_no_gaps(
     ordered: list[DailyTemperature], start_date: date, end_date: date
 ) -> None:

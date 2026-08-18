@@ -147,3 +147,56 @@ def test_precipitation_forecast_raises_if_every_day_is_null(monkeypatch) -> None
         om.get_precipitation_forecast(
             10.0, 77.5, date(2026, 8, 18), date(2026, 8, 19), cache_dir=None
         )
+
+
+def test_get_historical_daily_returns_temperature_and_precipitation_together(monkeypatch) -> None:
+    def fake_fetch(url: str, params: dict, cache_dir, key: str) -> dict:
+        assert url == om.ARCHIVE_URL
+        assert params["daily"] == f"{om.DAILY_FIELDS},{om.PRECIPITATION_FIELD}"
+        return {
+            "daily": {
+                "time": ["2025-06-01", "2025-06-02"],
+                "temperature_2m_max": [34.2, 33.8],
+                "temperature_2m_min": [25.4, 25.1],
+                "precipitation_sum": [0.0, 4.2],
+            }
+        }
+
+    monkeypatch.setattr(om, "_fetch", fake_fetch)
+
+    temps, precip = om.get_historical_daily(
+        9.865, 77.454, date(2025, 6, 1), date(2025, 6, 2), cache_dir=None
+    )
+
+    assert [d.date for d in temps] == ["2025-06-01", "2025-06-02"]
+    assert temps[1].t_max_c == 33.8
+    assert temps[1].t_min_c == 25.1
+    assert [d.date for d in precip] == ["2025-06-01", "2025-06-02"]
+    assert precip[0].precipitation_mm == 0.0
+    assert precip[1].precipitation_mm == 4.2
+
+
+def test_get_historical_daily_raises_on_a_null_day(monkeypatch) -> None:
+    def fake_fetch(url: str, params: dict, cache_dir, key: str) -> dict:
+        return {
+            "daily": {
+                "time": ["2025-06-01"],
+                "temperature_2m_max": [34.2],
+                "temperature_2m_min": [25.4],
+                "precipitation_sum": [None],
+            }
+        }
+
+    monkeypatch.setattr(om, "_fetch", fake_fetch)
+
+    with pytest.raises(om.WeatherError):
+        om.get_historical_daily(
+            9.865, 77.454, date(2025, 6, 1), date(2025, 6, 1), cache_dir=None
+        )
+
+
+def test_get_historical_daily_rejects_inverted_range() -> None:
+    with pytest.raises(ValueError):
+        om.get_historical_daily(
+            9.865, 77.454, date(2025, 6, 2), date(2025, 6, 1), cache_dir=None
+        )

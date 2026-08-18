@@ -241,6 +241,46 @@ one-line summary of the narrative output from a real run (not
 hypothetical numbers — the actual run's results, once it's been run for
 real).
 
+### Implemented — real run results, and one finding surfaced by it
+
+Built as `scripts/backtest_2025_kuruvai.py` and `get_historical_daily()`
+(new function, `weather/openmeteo.py`), both with unit tests (7 new
+tests for the script's pure helpers, 4 new tests for the weather
+function — 329 total, all passing, all hermetic). One refinement beyond
+what Decision 3 specified: `agronomy.calibration.derive_cluster_maturity_gdd`
+is called with `today=2025-01-01`, not the real current date — its 5-year
+lookback then covers 2020–2024, deliberately excluding 2025 itself, so
+the threshold that scores the 2025 season was never trained on the 2025
+season. Real run, both clusters:
+
+- **Kamatchipuram**: calibrated threshold 1637.0 GDD (2020–2024
+  climatology). 172 trigger days across the simulated window
+  (2025-05-01 to 2025-12-05); 59 of those days had at least one
+  CONTESTED plot.
+- **Naducauvery**: calibrated threshold 1931.4 GDD — ~10.6% above
+  Kamatchipuram's, consistent with ADR-008's original comparison and now
+  confirmed on a second, non-overlapping 5-year window. 172 trigger days
+  (2025-05-10 to 2025-12-07); 65 contested days.
+
+**A real finding, not something this ADR anticipated**: 5 of 8 plots at
+Kamatchipuram and 6 of 8 at Naducauvery were first classified FITS, then
+end the simulated season CONTESTED instead. Root cause:
+`scheduling/solver.py:solve()` recomputes from scratch on every trigger
+day, reading every plot currently in storage — there is no mechanism
+anywhere in the system today that marks a plot "already harvested" and
+removes it from future scheduling, so a plot that fit early keeps
+re-competing for capacity against every later-maturing plot for the rest
+of the season. This is a real property of the deployed system, not a
+backtest artifact (the real watcher calls `solve()` fresh every trigger
+day too) — it was only surfaced now because this is the first time the
+solver has been run across ~170 sequential trigger days instead of a
+single-run demo. It's related to, but not fixed by, Part 2's
+confirmation loop below: that loop records whether a harvest happened,
+but as scoped does not remove a confirmed plot from future watcher runs.
+Not fixing this now — out of scope for a validation script — but
+disclosed here, and in the README, rather than left for a judge to find
+first. Full tables and narrative in the README's new section.
+
 ---
 
 ## Part 2: Harvest confirmation loop
