@@ -71,9 +71,10 @@ def main() -> None:
         [messages_ta.MISSING_DATE_LABEL, messages_ta.MISSING_AREA_LABEL]
     ))
 
-    _section("harvest_scheduled (acre, then cent)")
-    print(messages_ta.harvest_scheduled(2.5, "acre", route_position=2))
-    print(messages_ta.harvest_scheduled(0.5, "cent", route_position=0))
+    _section("harvest_scheduled (acre, then cent) -- route_position 0, 1, 2 (1st/2nd/3rd)")
+    print(messages_ta.harvest_scheduled(2.5, "acre", route_position=0))
+    print(messages_ta.harvest_scheduled(3.0, "acre", route_position=1))
+    print(messages_ta.harvest_scheduled(0.5, "cent", route_position=2))
 
     _section("not_ready (acre, then cent)")
     print(messages_ta.not_ready(0.75, "acre"))
@@ -126,11 +127,28 @@ def main() -> None:
     print("bumped_suffix():", messages_ta.bumped_suffix())
     print("route_summary_empty('Kamatchipuram'):", messages_ta.route_summary_empty("Kamatchipuram"))
     print("route_summary_header('Kamatchipuram'):", messages_ta.route_summary_header("Kamatchipuram"))
-    print("route_stop_line(1, 'Muthu Pandian, 2.5 ஏக்கர்'):",
-          messages_ta.route_stop_line(1, "Muthu Pandian, 2.5 ஏக்கர்"))
     print("escalation_intro():", messages_ta.escalation_intro())
     print("escalation_question():", messages_ta.escalation_question())
     print("escalation_argument_label():", messages_ta.escalation_argument_label())
+
+    _section("Compass directions (format_direction) -- all 16 points")
+    for direction in ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                       "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]:
+        print(f"{direction} -> {messages_ta.format_direction(direction)}")
+
+    _section("location_hint -- full route-stop line, as actually rendered")
+    hint = messages_ta.location_hint(0.8, messages_ta.format_direction("NNW"))
+    print("location_hint(0.8, NNW):", hint)
+    print("route_stop_line(1, 'Muthu Pandian, 2.5 ஏக்கர், ' + hint):",
+          messages_ta.route_stop_line(1, f"Muthu Pandian, 2.5 ஏக்கர், {hint}"))
+
+    _section("Operator-facing callback-query toasts (escalation button taps)")
+    print("escalation_already_resolved():", messages_ta.escalation_already_resolved())
+    print("escalation_resolved_assigned('Kannan Raja'):",
+          messages_ta.escalation_resolved_assigned("Kannan Raja"))
+    print("escalation_resolved_assigned(DEFAULT_WINNER_LABEL):",
+          messages_ta.escalation_resolved_assigned(messages_ta.DEFAULT_WINNER_LABEL))
+    print("unrecognized_action():", messages_ta.unrecognized_action())
 
     _section("advocate_argument -- templated (not model-generated) Tamil, all branches")
     branches = [

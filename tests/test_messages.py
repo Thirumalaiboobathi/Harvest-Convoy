@@ -36,6 +36,56 @@ def test_harvest_scheduled_renders_without_keyerror(mod, area_unit) -> None:
     assert isinstance(text, str) and text.strip()
 
 
+def test_harvest_scheduled_uses_natural_first_not_1vathu_in_tamil() -> None:
+    """"1வது" isn't a word a Tamil speaker uses -- "first" is irregular
+    (முதலாவது), the same way English "first" isn't "oneth". 2nd/3rd/4th
+    keep the digit+ஆவது/வது pattern -- only position 1 is wrong. Caught
+    on the deployed path, round 4 review."""
+    text = messages_ta.harvest_scheduled(2.5, "acre", route_position=0)
+    assert "1வது" not in text
+    assert "முதலாவது" in text
+
+
+@pytest.mark.parametrize("route_position,expected", [(1, "2வது"), (2, "3வது"), (3, "4வது")])
+def test_harvest_scheduled_keeps_digit_ordinal_for_second_and_later_in_tamil(
+    route_position, expected
+) -> None:
+    text = messages_ta.harvest_scheduled(2.5, "acre", route_position=route_position)
+    assert expected in text
+
+
+@pytest.mark.parametrize(
+    "direction", ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                  "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"],
+)
+def test_format_direction_covers_all_16_compass_points_in_both_languages(direction) -> None:
+    assert messages_en.format_direction(direction) == direction
+    ta = messages_ta.format_direction(direction)
+    assert isinstance(ta, str) and ta.strip()
+    assert ta != direction  # actually translated, not passed through
+
+
+@pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
+def test_location_hint_renders_without_keyerror(mod) -> None:
+    direction = mod.format_direction("NNW")
+    text = mod.location_hint(0.8, direction)
+    assert isinstance(text, str) and text.strip()
+    assert "0.8" in text
+    assert direction in text
+
+
+def test_location_hint_is_not_half_translated_in_tamil() -> None:
+    """Regression: location_hint used to be one hardcoded English string
+    regardless of language -- a Tamil-registered farmer's route summary
+    read "...NNW of village center" verbatim, mid-Tamil-sentence."""
+    direction = messages_ta.format_direction("NNW")
+    text = messages_ta.location_hint(0.8, direction)
+    assert "of village center" not in text
+    assert "village center" not in text
+    assert "கிராம மையத்திலிருந்து" in text
+    assert direction in text  # the resolved Tamil compound, not the English key
+
+
 @pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
 @pytest.mark.parametrize("area_unit", ["acre", "cent"])
 def test_not_ready_renders_without_keyerror(mod, area_unit) -> None:

@@ -78,6 +78,38 @@ def format_area(area_acres: float, area_unit: str) -> str:
     return f"{value:g} {unit}"
 
 
+# 16-point compass, in Tamil. The 4 cardinals have single established
+# words; the 12 finer points are hyphenated compounds of two cardinals,
+# the same additive pattern English uses to build "north-northwest" from
+# "north" + "northwest" -- a legitimate construction, not an invented
+# abbreviation scheme. Picked over keeping the English abbreviations
+# (N/NNW/...) after rendering both in the actual route-summary sentence
+# and comparing directly -- round 4 native-speaker review.
+_TAMIL_COMPASS = {
+    "N": "வடக்கு", "NNE": "வடக்கு-வடகிழக்கு", "NE": "வடகிழக்கு",
+    "ENE": "கிழக்கு-வடகிழக்கு", "E": "கிழக்கு", "ESE": "கிழக்கு-தென்கிழக்கு",
+    "SE": "தென்கிழக்கு", "SSE": "தெற்கு-தென்கிழக்கு", "S": "தெற்கு",
+    "SSW": "தெற்கு-தென்மேற்கு", "SW": "தென்மேற்கு", "WSW": "மேற்கு-தென்மேற்கு",
+    "W": "மேற்கு", "WNW": "மேற்கு-வடமேற்கு", "NW": "வடமேற்கு",
+    "NNW": "வடக்கு-வடமேற்கு",
+}
+
+
+def format_direction(direction: str) -> str:
+    return _TAMIL_COMPASS[direction]
+
+
+def location_hint(distance_km: float, direction: str) -> str:
+    """e.g. "0.8km வடக்கு-வடமேற்கு திசையில் கிராம மையத்திலிருந்து"
+    ("0.8km in the NNW direction, from the village center"). `direction`
+    is already resolved via format_direction(). Was a single hardcoded
+    English string in notify.py regardless of language until caught live
+    on the deployed path -- a Tamil-registered farmer's route summary
+    read "...NNW of village center" verbatim, mid-Tamil-sentence."""
+    return f"{distance_km:.1f}km {direction} திசையில் கிராம மையத்திலிருந்து"
+    # "{distance_km}km in the {direction} direction, from the village center"
+
+
 # Product name stays in Latin script -- proper nouns aren't transliterated.
 GREETING_INTRO = "Harvest Convoy-க்கு வரவேற்கிறோம்!"
 # "Welcome to Harvest Convoy!"
@@ -154,11 +186,24 @@ CROP_CONFIRM_DECLINED_MESSAGE = (
 #  at all -- see ADR-008 Decision 11's revision note).
 
 
+def _ordinal_word(n: int) -> str:
+    """"முதலாவது" (first) for position 1, "Nவது" for everything else.
+    "1வது" isn't a word a Tamil speaker uses -- "first" is a suppletive
+    irregular form in Tamil the same way it is in English ("first," not
+    "oneth"). "முதலாவது" matches the existing digit+"ஆவது"/"வது" ordinal
+    pattern used for 2nd/3rd/4th (இரண்டாவது, மூன்றாவது, ...), so it
+    slots into the same sentence position without changing the grammar
+    around it. Caught on the deployed path, round 4 native-speaker
+    review -- see harvest_scheduled()."""
+    return "முதலாவது" if n == 1 else f"{n}வது"
+
+
 def harvest_scheduled(area_acres: float, area_unit: str, route_position: int) -> str:
     area = format_area(area_acres, area_unit)
+    position = _ordinal_word(route_position + 1)
     return (
         f"நல்ல செய்தி: இயந்திரம் இன்று உங்கள் {area} வயலுக்கு "
-        f"வருகிறது. நீங்கள் பாதையில் வரிசையில் {route_position + 1}வது."
+        f"வருகிறது. நீங்கள் பாதையில் வரிசையில் {position}."
     )
     # "Good news: the machine is coming to your {area} plot today.
     #  You're {n}th in the route order." -- was "stop #{n} on the
@@ -299,6 +344,49 @@ def escalation_question() -> str:
 
 def escalation_argument_label() -> str:
     return "ஏஜென்ட்டின் பரிந்துரை:"
+    # "agent's recommendation:" -- went through two prior wordings: first
+    # "ஏஜென்ட்டின் வாதம் (உண்மை அல்ல)" ("agent's argument (not true)"),
+    # which read as a truth-value disclaimer; then "ஏஜென்ட்டின் கருத்து:"
+    # (agent's opinion), which lost the fact/reasoning distinction the
+    # operator needs (this line is generated, everything else in the
+    # message is measured). Picked after seeing both rendered in the
+    # full escalation context, round 3 review.
+
+
+# --- Operator-facing callback-query answers (the small toast shown when
+# the operator taps an escalation button) -- previously hardcoded
+# directly in webhook.py in English only, regardless of
+# Cluster.operator_language -- the same half-translation pattern as the
+# original location_hint bug, just in a different message shape. Caught
+# in the same audit pass. See ADR-008 follow-up.
+
+def escalation_already_resolved() -> str:
+    return "இந்த முரண்பாடு ஏற்கனவே தீர்க்கப்பட்டது."
+    # "This conflict was already resolved."
+
+
+DEFAULT_WINNER_LABEL = "தேர்ந்தெடுக்கப்பட்ட வயல்"
+# "the selected plot" -- fallback when no farmer record was found for
+# the winning plot; same defensive-fallback pattern as
+# DEFAULT_OTHER_FARMER_LABEL above.
+
+
+def escalation_resolved_assigned(winner_name: str) -> str:
+    return f"இயந்திரம் {winner_name} க்கு ஒதுக்கப்பட்டது."
+    # "Machine assigned to {winner_name}." -- winner_name is a farmer's
+    # name, a proper noun, not translated -- same rule as everywhere else.
+    # Callers pass DEFAULT_WINNER_LABEL, not an English fallback, when no
+    # farmer record was found -- otherwise this would be the exact same
+    # half-translation bug in a fallback path instead of the main one.
+
+
+def unrecognized_action() -> str:
+    return "அடையாளம் தெரியாத செயல்."
+    # "Unrecognized action." -- fires when the callback data itself
+    # doesn't parse, before any cluster_id is known, so this one can't be
+    # dispatched by Cluster.operator_language -- defaults to Tamil, same
+    # as the product-wide default everywhere else a language isn't yet
+    # resolvable.
     # "agent's recommendation:" -- went through two prior wordings: first
     # "ஏஜென்ட்டின் வாதம் (உண்மை அல்ல)" ("agent's argument (not true)"),
     # which read as a truth-value disclaimer; then "ஏஜென்ட்டின் கருத்து:"

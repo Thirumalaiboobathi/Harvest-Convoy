@@ -271,11 +271,24 @@ assuming the redeploy made everything work:
   than leave a runbook step that might silently fail on camera, that
   step was replaced with CloudWatch log-line evidence that was directly
   verified this session, plus an optional, clearly-hedged trace check.
+- **A second round, after live Telegram verification**: once messages
+  were actually landing on a real phone, two more real bugs surfaced
+  that no amount of reading rendered strings in isolation had caught —
+  the operator route summary's distance/direction hint was half-Tamil,
+  half-English ("...NNW of village center" tail), and the route-position
+  ordinal used "1வது," not a real Tamil word. Both fixed (see ADR-008
+  Decision 17), along with two more half-translation instances found by
+  auditing every farmer/operator-facing string the same way — both were
+  in Telegram callback-query "toast" answers, a message shape the string
+  dump never covered because they'd never been extracted into
+  `messages_ta.py`/`messages_en.py` in the first place. Redeployed again
+  and re-verified live the same way as the first round.
 - **Runtime version**: the deployed AgentCore Runtime went from version
   6 (pre-ADR-008 code, the state this runbook previously assumed) to
-  version 10 across four updates in this session — one for the current
-  source tree, one each for the two bug fixes above, one for the missing
-  token. `list-agent-runtime-endpoints` confirms the `DEFAULT` endpoint's
+  version 11 across five updates across both rounds — one for the
+  current source tree, one each for the two Decision-9 bug fixes, one
+  for the missing token, one for the Decision-17 translation fixes.
+  `list-agent-runtime-endpoints` confirms the `DEFAULT` endpoint's
   `liveVersion` tracks the latest automatically; the EventBridge Schedule
   and Lambda shim were never touched (`LastModificationDate`/
   `LastModified` unchanged throughout) and don't need to be for any of

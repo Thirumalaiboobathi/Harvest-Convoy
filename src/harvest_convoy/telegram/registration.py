@@ -354,7 +354,14 @@ def handle_language_callback(client: TelegramClient, callback_query: dict) -> No
 
     _, _, code = data.partition(":")
     if chat_id is None or code not in _LANGUAGE_MODULES:
-        client.answer_callback_query(callback_query_id, "Unrecognized action.", show_alert=True)
+        # An unrecognized code means no language was ever established for
+        # this tap -- defaults to Tamil, same as the product-wide default
+        # everywhere else a language isn't yet resolvable. Was hardcoded
+        # English regardless, same bug class as webhook.py's identically-
+        # named toast; caught in the same audit pass. See ADR-008 follow-up.
+        client.answer_callback_query(
+            callback_query_id, _lang_module("ta").unrecognized_action(), show_alert=True
+        )
         return
 
     state = get_or_create_state(chat_id)

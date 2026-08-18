@@ -2,16 +2,16 @@
 
 - Status: Implemented — all resources below are live in `ap-south-1`.
   Runtime redeployed 2026-08-18 with ADR-008's code (Tamil support,
-  per-cluster GDD, multi-cluster-capable watcher), version 6 → 10 across
-  that round — see Decision 9 for why it took four updates, not one, and
-  what each found. Deviations from the original proposal, all found live
-  and fixed the same session they were found: Decision 7 (Scheduler
-  can't call `InvokeAgentRuntime` directly), Decision 8 (ADOT needs one
-  more env var than Decision 5 assumed), Decision 9 (a DynamoDB int/float
-  bug, an unhandled Open-Meteo forecast gap, and a never-set
-  `TELEGRAM_BOT_TOKEN` — the last one meaning no scheduled run had ever
-  actually delivered a message before this was caught).
-- Date: 2026-08-17; redeploy round 2026-08-18
+  per-cluster GDD, multi-cluster-capable watcher), version 6 → 11 across
+  two rounds that day — see Decision 9 (versions 7–10: the redeploy
+  itself, a DynamoDB int/float bug, an unhandled Open-Meteo forecast gap,
+  a never-set `TELEGRAM_BOT_TOKEN`) and Decision 10 (version 11: two
+  Tamil half-translation bugs found by live Telegram verification, not
+  string review — see ADR-008 Decision 17). Deviations from the original
+  proposal, all found live and fixed the same session they were found:
+  Decision 7 (Scheduler can't call `InvokeAgentRuntime` directly),
+  Decision 8 (ADOT needs one more env var than Decision 5 assumed).
+- Date: 2026-08-17; redeploy rounds 2026-08-18
 
 ## Provisioning summary — read this first
 
@@ -535,6 +535,38 @@ found in the time available — not pursued further live, to avoid
 destabilizing a working deployment chasing an observability nice-to-have
 minutes before a filming deadline. `docs/DEMO.md` was written to not
 depend on this being resolved.
+
+## Decision 10: redeploying again after live Telegram verification found two Tamil half-translation bugs (2026-08-18)
+
+You checked your own phone against the version-10 deploy from Decision 9
+and found real problems live delivery alone could surface: the operator
+route summary's location hint was half-translated (Tamil acreage,
+English "...NNW of village center" tail), and the route-position ordinal
+used "1வது," not a real Tamil word. Full account, including the
+in-context compass-bearing comparison you picked between, and two more
+half-translation instances found by auditing every farmer/operator-facing
+string for the same pattern: ADR-008 Decision 17.
+
+Redeployed the same way as Decision 9 (rebuild from current
+`src/harvest_convoy/`, upload to a new S3 key, `update-agent-runtime`) —
+version 10 → 11. Reset the watcher marker
+(`Storage.set_watcher_last_run`) and re-invoked through the real Lambda
+shim: `{"status": "triggered", "usable_days": 15, "escalations": 0}`,
+same honest result as Decision 9's verification (today's real
+weather/capacity still doesn't produce a tie — unrelated to this fix),
+zero Telegram send failures in the runtime logs, the same four expected
+`no chat_id for farmer ...` skips. The fix is live on the path being
+filmed against, not just in the source tree.
+
+**One incidental exposure, disclosed rather than hidden**: while
+preparing this round's `update-agent-runtime` payload, a `grep` over the
+JSON input file printed the full file — including the `TELEGRAM_BOT_TOKEN`
+value — to this session's own output. The token was never logged by
+application code and this isn't a public leak, but it is now present in
+this session's transcript. Recommended the token be rotated via
+@BotFather as a precaution; that decision was left to you rather than
+rotated unilaterally, since doing so would invalidate the token
+everywhere it's already configured.
 
 ## Consequences
 

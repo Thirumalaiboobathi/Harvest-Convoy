@@ -1,24 +1,30 @@
 # ADR-008: Tamil Nadu Generalization and Tamil-Language Farmer Interface
 
-- Status: **Implemented, Tamil closed (2026-08-18).** Approved with four
-  adjustments — see the inline "APPROVED, adjusted" notes in Decisions
-  2, 4, 7, and 12 for exactly what changed from the original proposal —
-  then built in order (a)-(e), followed by four rounds of native-speaker
-  review (Decisions 14–16). One real bug caught mid-implementation and
-  fixed inline (a bare-number area fallback that misread the date's own
-  digits — see Decision 9's correction note); one pre-existing bug fixed
-  alongside the Tamil work but confirmed independent of it (the
-  crop-confirmation step accepted any non-empty reply, no real yes/no
-  check — Decision 11); one pre-existing gap found and closed
-  (webhook.py's escalation resolution reason was hand-authored English
-  with no language awareness — now dispatches through
-  messages_ta.py/messages_en.py); a live-verified Nova Pro Tamil-script
-  generation failure that reversed the original architecture from
-  native-prompted to templated (Decisions 14–15). Full suite: 286
-  passed, 2 deselected (`bedrock`-marked live tests, collection-verified
-  not to be broken, not executed to avoid unnecessary cost). Nothing
-  here touched the deployed AgentCore artifact. Every Tamil string
-  dumped via `uv run python -m scripts.print_tamil_strings` for
+- Status: **Implemented, Tamil closed and live-verified (2026-08-18).**
+  Approved with four adjustments — see the inline "APPROVED, adjusted"
+  notes in Decisions 2, 4, 7, and 12 for exactly what changed from the
+  original proposal — then built in order (a)-(e), followed by four
+  rounds of native-speaker review (Decisions 14–17), the last of which
+  was against real Telegram receipt on a real phone, not string review
+  in isolation, and caught two real half-translation bugs no amount of
+  reading `print_tamil_strings.py` output would have found (Decision
+  17). One real bug caught mid-implementation and fixed inline (a
+  bare-number area fallback that misread the date's own digits — see
+  Decision 9's correction note); one pre-existing bug fixed alongside
+  the Tamil work but confirmed independent of it (the crop-confirmation
+  step accepted any non-empty reply, no real yes/no check — Decision
+  11); one pre-existing gap found and closed (webhook.py's escalation
+  resolution reason was hand-authored English with no language
+  awareness — now dispatches through messages_ta.py/messages_en.py); a
+  live-verified Nova Pro Tamil-script generation failure that reversed
+  the original architecture from native-prompted to templated (Decisions
+  14–15). Full suite: 317 passed, 2 deselected (`bedrock`-marked live
+  tests, collection-verified not to be broken, not executed to avoid
+  unnecessary cost). The deployed AgentCore artifact was untouched
+  through Decision 16 as instructed; Decision 17's fixes were redeployed
+  and re-verified live (ADR-006 Decision 9) since they're exactly what a
+  real farmer's phone would otherwise show. Every Tamil string dumped
+  via `uv run python -m scripts.print_tamil_strings` for
   native-speaker review across four rounds — round 4 is the final
   wording.
 - Date: 2026-08-17 (Decisions 1–13), updated 2026-08-18 (Decisions
@@ -1038,6 +1044,123 @@ change. Full suite re-run clean after all four items.
 
 **Tamil support is closed as of this round** — no further changes
 planned before the demo recording.
+
+---
+
+## Decision 17: round 4 — live Telegram verification finds real half-translation bugs (2026-08-18)
+
+Decision 16 declared Tamil closed after three rounds of reading rendered
+strings in isolation. This round is different in kind: you verified live
+Telegram receipt on your own phone against the redeployed runtime
+(ADR-006 Decision 9) and found two real bugs that no amount of reading
+`print_tamil_strings.py` output would have caught, because neither
+string is fully determined until it's built from live data at send time.
+
+**1. The operator route summary was half-translated.** `location_hint()`
+(`notify.py`) was a single hardcoded English sentence —
+`"{distance}km {direction} of village center"` — appended unconditionally
+regardless of `Cluster.operator_language`. A Tamil-registered route
+summary line read `"1. Muthu Pandian, 2.5 ஏக்கர், 0.8km NNW of village
+center"` — correct Tamil acreage, then an English tail. This never
+showed up in the string dump because the dump printed function outputs
+in isolation; `location_hint` wasn't itself a `messages_ta.py` function
+at all yet, it lived in `notify.py` untranslated by design (a decision
+disclosed in Decision 8, not an oversight — but the disclosure didn't
+survive contact with a real Tamil farmer's phone).
+
+**Compass bearings, resolved by rendering both options in context, not
+guessing**: rendered the actual route-summary sentence with (a) Tamil
+compound words for all 16 points — the 4 cardinals have single
+established words (வடக்கு/கிழக்கு/தெற்கு/மேற்கு); the 12 finer points
+are hyphenated compounds of two cardinals, the same additive
+construction English uses to build "north-northwest" from "north" +
+"northwest" (a legitimate construction method, not an invented
+abbreviation scheme) — versus (b) keeping the English abbreviations
+(N/NNW/...) with only the surrounding sentence localized. **You picked
+(a), the Tamil compound words**, after seeing both in the full sentence,
+not the tokens alone.
+
+**Fix**: `location_hint` moved into the per-language dispatch pattern
+every other message shape already uses — `format_direction()` and
+`location_hint()` added to both `messages_ta.py` (Tamil compounds) and
+`messages_en.py` (identity passthrough, English abbreviations unchanged
+for that language), `notify.py`'s `location_hint()` now resolves the
+bearing (language-agnostic geometry) then calls through
+`_lang_module(language)` for the sentence, same as every other function
+in that file.
+
+**2. "1வது" isn't a word.** `harvest_scheduled`'s route-position ordinal
+used a uniform digit+"வது" suffix for every position, including 1 —
+"1வது". You flagged it directly: Tamil "first" is a suppletive irregular
+form (முதலாவது), the same way English "first" isn't "oneth" — no Tamil
+speaker says "1வது". 2nd/3rd/4th are fine as digit+"வது"
+(இரண்டாவது/மூன்றாவது's informal digit form). Fix: new `_ordinal_word(n)`
+helper — `"முதலாவது"` for `n == 1`, `f"{n}வது"` otherwise — slots into
+the same sentence position as the pattern it replaces, no other grammar
+change needed.
+
+**3. Audited every farmer- and operator-facing string for the same
+pattern, not just the two flagged instances** — a template interpolating
+an unlocalized fragment into an otherwise-Tamil sentence. Found two more,
+both in `webhook.py`/`registration.py`'s callback-query "toast" answers
+(the small popup Telegram shows when someone taps an inline button),
+never covered by the string dump because they'd never been extracted
+into `messages_ta.py`/`messages_en.py` at all — hardcoded directly at
+the call site in English:
+- `webhook.py`: `"This conflict was already resolved."` (two call
+  sites — the in-memory-cache hit and the durable-ledger-write-exists
+  path), `f"Machine assigned to {winner_name}."`, and
+  `"Unrecognized action."` for malformed callback data.
+- `registration.py`: an identically-worded `"Unrecognized action."` in
+  the language-picker button handler.
+
+Fixed by adding `escalation_already_resolved()`,
+`escalation_resolved_assigned(winner_name)`, `unrecognized_action()`,
+and a `DEFAULT_WINNER_LABEL` fallback constant to both language modules,
+then dispatching in `webhook.py` via `cluster.operator_language`
+(fetched once `cluster_id` is known from the parsed callback data) and
+in `registration.py` via the existing `_lang_module`. The
+`DEFAULT_WINNER_LABEL` fallback matters on its own: the original code's
+`winner_name = winner_result[0].name if winner_result else "the
+selected plot"` would have reproduced the exact same half-translation
+bug in a rarely-exercised fallback path — an English phrase spliced into
+an otherwise-Tamil `escalation_resolved_assigned` sentence — if left as
+a bare string instead of resolved per-language too.
+
+Two callback-answer sites (`registration.py`'s and `webhook.py`'s
+parse-failure path) fire before any `cluster_id`/`operator_language` is
+resolvable at all — both default to Tamil, matching the product-wide
+default used everywhere else a language isn't yet known (`Farmer.language`
+and `Cluster.operator_language` both default to `"ta"`), not to English.
+
+**Verification**: `print_tamil_strings.py` extended to cover the four
+new operator-toast functions and `format_direction`/`location_hint`
+rendered in the actual route-stop-line sentence, not in isolation.
+Re-dumped after. New regression tests for all of the above, including
+one confirming `webhook.py`'s malformed-callback path answers in Tamil
+by default and one confirming a Cluster with `operator_language="en"`
+gets the English toast — proving the dispatch is real, not a hardcoded
+string that happens to look right. Full suite: 317 passed, 2 deselected.
+
+**Redeployed** (ADR-006 Decision 9 covers the mechanics) — version 11 —
+and re-verified live through the actual Lambda shim path: real trigger,
+`usable_days: 15`, `escalations: 0` (same honest result as before,
+unrelated to this fix), zero Telegram send failures in the runtime logs,
+same four expected `no chat_id` skips as the prior verification. The
+route-summary and ordinal fixes are live on the path you're filming
+against, not just in the source tree.
+
+**Consequence for "Tamil is closed"**: it wasn't, and the reason it
+wasn't is instructive — string-level review (reading
+`print_tamil_strings.py` output) can only catch strings that have
+already been extracted into the language modules. Both new bugs found
+this round lived outside that system entirely, in call sites that built
+English text directly and had never been flagged for localization
+because nobody had looked at them through a "does this reach a human in
+their language" lens rather than a "is `messages_ta.py` correct" lens.
+Live verification against a real phone is what actually closes that
+gap — a stronger claim than another round of reading rendered strings
+would have been.
 
 ---
 

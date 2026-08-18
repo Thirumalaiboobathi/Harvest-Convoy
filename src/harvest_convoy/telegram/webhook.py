@@ -90,17 +90,25 @@ def handle_callback_query(
     parsed = parse_callback_data(data)
 
     if parsed is None:
+        # No cluster_id parses out of malformed callback data, so this
+        # can't be dispatched by Cluster.operator_language -- defaults to
+        # Tamil, same as the product-wide default everywhere else a
+        # language isn't yet resolvable.
         client.answer_callback_query(
-            callback_query_id, "Unrecognized action.", show_alert=True
+            callback_query_id, notify._lang_module("ta").unrecognized_action(),
+            show_alert=True,
         )
         return
 
     cluster_id, plot_a_id, plot_b_id, chosen_plot_id = parsed
     key = _escalation_key(cluster_id, plot_a_id, plot_b_id)
+    cluster = storage.get_cluster(cluster_id)
+    operator_language = cluster.operator_language if cluster is not None else "ta"
+    mod = notify._lang_module(operator_language)
 
     if key in _RESOLVED_ESCALATIONS:
         client.answer_callback_query(
-            callback_query_id, "This conflict was already resolved.", show_alert=True
+            callback_query_id, mod.escalation_already_resolved(), show_alert=True
         )
         return
 
@@ -129,7 +137,7 @@ def handle_callback_query(
             )
             _RESOLVED_ESCALATIONS.add(key)
             client.answer_callback_query(
-                callback_query_id, "This conflict was already resolved.", show_alert=True
+                callback_query_id, mod.escalation_already_resolved(), show_alert=True
             )
             return
     else:
@@ -158,8 +166,10 @@ def handle_callback_query(
 
     _RESOLVED_ESCALATIONS.add(key)
 
-    winner_name = winner_result[0].name if winner_result else "the selected plot"
-    client.answer_callback_query(callback_query_id, f"Machine assigned to {winner_name}.")
+    winner_name = winner_result[0].name if winner_result else mod.DEFAULT_WINNER_LABEL
+    client.answer_callback_query(
+        callback_query_id, mod.escalation_resolved_assigned(winner_name)
+    )
 
     message = callback_query.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")

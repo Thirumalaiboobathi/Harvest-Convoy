@@ -38,6 +38,23 @@ def format_area(area_acres: float, area_unit: str) -> str:
     return f"{value:g} {unit}"
 
 
+def format_direction(direction: str) -> str:
+    """English keeps the compass abbreviation as-is (N, NNW, ...) -- the
+    16-point key notify.py computes from a bearing IS the English label
+    already, no translation step needed here."""
+    return direction
+
+
+def location_hint(distance_km: float, direction: str) -> str:
+    """e.g. "0.8km NNW of village center". `direction` is already
+    resolved via format_direction() -- this function only builds the
+    sentence around it. See ADR-008 follow-up: this used to be a single
+    hardcoded string in notify.py regardless of language; a Tamil farmer
+    was getting "...of village center" verbatim in an otherwise-Tamil
+    message."""
+    return f"{distance_km:.1f}km {direction} of village center"
+
+
 GREETING_INTRO = "Welcome to Harvest Convoy!"
 LANGUAGE_ACK = "English selected."
 LOCATION_RETRY_PREFIX = "That didn't look like a shared location. "
@@ -195,3 +212,23 @@ def escalation_question() -> str:
 
 def escalation_argument_label() -> str:
     return "agent's case (not fact):"
+
+
+# --- Operator-facing callback-query answers (the small toast shown when
+# the operator taps an escalation button) -- previously hardcoded
+# directly in webhook.py, unconditionally English regardless of
+# Cluster.operator_language. See ADR-008 follow-up.
+
+def escalation_already_resolved() -> str:
+    return "This conflict was already resolved."
+
+
+DEFAULT_WINNER_LABEL = "the selected plot"
+
+
+def escalation_resolved_assigned(winner_name: str) -> str:
+    return f"Machine assigned to {winner_name}."
+
+
+def unrecognized_action() -> str:
+    return "Unrecognized action."

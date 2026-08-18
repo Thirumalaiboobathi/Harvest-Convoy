@@ -48,21 +48,26 @@ def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return (math.degrees(math.atan2(x, y)) + 360) % 360
 
 
-def location_hint(cluster: Cluster, plot: Plot) -> str:
+def location_hint(cluster: Cluster, plot: Plot, *, language: str = "ta") -> str:
     """Distance and compass direction from the village center -- lets an
     operator who knows the village confirm which physical plot this is,
-    without exposing an internal plot_id. Compass abbreviations (N, NE,
-    ...) and the km figure are kept as-is regardless of operator_language
-    -- standard operational-tooling convention, not flagged for
-    localization."""
+    without exposing an internal plot_id. The bearing calculation itself
+    (which of 16 sectors) is language-agnostic geometry; only the
+    rendered direction word and the surrounding sentence are localized,
+    same dispatch pattern as every other message shape. Was a single
+    hardcoded English sentence regardless of language until caught live
+    on the deployed path -- a Tamil-registered farmer's route summary
+    read "...NNW of village center" verbatim, mid-Tamil-sentence. See
+    ADR-008 follow-up."""
     distance_km = haversine_km(
         cluster.machine_start_lat, cluster.machine_start_lon, plot.lat, plot.lon
     )
     bearing = _bearing_deg(
         cluster.machine_start_lat, cluster.machine_start_lon, plot.lat, plot.lon
     )
-    direction = _COMPASS_POINTS[round(bearing / 22.5) % 16]
-    return f"{distance_km:.1f}km {direction} of village center"
+    direction_key = _COMPASS_POINTS[round(bearing / 22.5) % 16]
+    mod = _lang_module(language)
+    return mod.location_hint(distance_km, mod.format_direction(direction_key))
 
 
 def short_label(farmer: Farmer, plot: Plot, *, language: str = "ta") -> str:
@@ -78,7 +83,10 @@ def full_label(farmer: Farmer, plot: Plot, cluster: Cluster, *, language: str = 
     """e.g. "Muthu Pandian, 2.5 acres, 0.8km NE of village center" -- for
     the route summary, where the operator needs enough to actually find
     it."""
-    return f"{short_label(farmer, plot, language=language)}, {location_hint(cluster, plot)}"
+    return (
+        f"{short_label(farmer, plot, language=language)}, "
+        f"{location_hint(cluster, plot, language=language)}"
+    )
 
 
 def build_harvest_scheduled_text(plot: Plot, route_position: int, *, language: str = "ta") -> str:

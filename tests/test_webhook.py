@@ -4,7 +4,7 @@ from harvest_convoy.agents.contracts import AdvocateClaim, EscalationPayload
 from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.storage.fairness import get_ledger_history
 from harvest_convoy.storage.file_storage import FileStorage
-from harvest_convoy.telegram import webhook
+from harvest_convoy.telegram import messages_ta, webhook
 from harvest_convoy.telegram.client import SendResult
 from harvest_convoy.telegram.registration import RegistrationState, save_state
 
@@ -61,6 +61,59 @@ def test_parse_callback_data_rejects_chosen_plot_not_in_pair() -> None:
 def test_parse_callback_data_rejects_malformed() -> None:
     assert webhook.parse_callback_data("garbage") is None
     assert webhook.parse_callback_data("resolve:c:p03:p04") is None
+
+
+def test_malformed_callback_answer_defaults_to_tamil_not_hardcoded_english(tmp_path) -> None:
+    """Regression: webhook.py's four callback-query "toast" answers
+    (unrecognized action, already-resolved x2, machine-assigned) were
+    hardcoded English strings sent regardless of Cluster.operator_language
+    -- the same half-translation pattern as the original location_hint
+    bug, caught in the same audit pass. No cluster_id parses out of
+    malformed data, so this one can't dispatch by operator_language --
+    defaults to Tamil, the product-wide default, not English."""
+    storage = FileStorage(tmp_path / "storage.json")
+    client = _FakeClient()
+    update = {"callback_query": {"id": "cbq-bad", "data": "garbage"}}
+
+    webhook.handle_update(client, update, storage, SEASON)
+
+    assert client.answered_callbacks == [
+        ("cbq-bad", messages_ta.unrecognized_action(), True)
+    ]
+
+
+def test_escalation_toast_text_follows_cluster_operator_language(tmp_path) -> None:
+    """A registered Cluster with operator_language="en" gets the English
+    "Machine assigned to ..." toast, not the Tamil default -- proves the
+    dispatch is real, not just a hardcoded fallback that happens to look
+    like the right thing."""
+    from harvest_convoy.models import Cluster
+    from harvest_convoy.telegram import messages_en
+
+    storage = FileStorage(tmp_path / "storage.json")
+    storage.put_cluster(Cluster(
+        cluster_id="en-op-test", name="Test", machine_capacity_acres_per_day=3.5,
+        machine_start_lat=10.0, machine_start_lon=77.5, operator_language="en",
+    ))
+    client = _FakeClient()
+    farmer_a = _farmer("e1", 111, name="Kannan Raja")
+    farmer_b = _farmer("e2", 222, name="Meena Subramani")
+    plots = {"e1": (farmer_a, _plot("e1")), "e2": (farmer_b, _plot("e2"))}
+    update = {
+        "callback_query": {
+            "id": "cbq-en",
+            "data": "resolve:en-op-test:e1:e2:e1",
+            "message": {"chat": {"id": 999}, "message_id": 1},
+        }
+    }
+
+    webhook.handle_update(
+        client, update, storage, SEASON, lookup_farmer_for_plot=lambda pid: plots.get(pid)
+    )
+
+    assert client.answered_callbacks[-1][1] == messages_en.escalation_resolved_assigned(
+        "Kannan Raja"
+    )
 
 
 def test_handle_update_dispatches_message_to_registration(tmp_path) -> None:
@@ -244,7 +297,10 @@ def test_double_tap_on_resolved_escalation_does_not_renotify(tmp_path) -> None:
     )
 
     assert len(client.sent_messages) == first_notify_count  # no new notifications
-    assert client.answered_callbacks[-1][1] == "This conflict was already resolved."
+    # No cluster record exists for "double-tap-test" -- defaults to
+    # Tamil, same as the product-wide default, not a leftover English
+    # string (see ADR-008 follow-up on webhook.py's callback-answer text).
+    assert client.answered_callbacks[-1][1] == messages_ta.escalation_already_resolved()
 
 
 def test_double_tap_survives_a_process_restart_via_the_ledger_write(tmp_path) -> None:
@@ -283,7 +339,7 @@ def test_double_tap_survives_a_process_restart_via_the_ledger_write(tmp_path) ->
     )
 
     assert client2.sent_messages == []  # no double notification after "restart"
-    assert "already resolved" in client2.answered_callbacks[-1][1].lower()
+    assert client2.answered_callbacks[-1][1] == messages_ta.escalation_already_resolved()
 
 
 def test_missing_farmer_lookup_degrades_without_crashing(tmp_path) -> None:

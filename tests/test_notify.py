@@ -292,7 +292,21 @@ def test_send_escalation_degrades_when_no_operator_configured() -> None:
 def test_location_hint_gives_direction_and_distance() -> None:
     cluster = _cluster()
     plot = _plot(lat=cluster.machine_start_lat + 0.01, lon=cluster.machine_start_lon)
-    hint = notify.location_hint(cluster, plot)
+    hint = notify.location_hint(cluster, plot, language="en")
     assert "km" in hint
     assert "of village center" in hint
     assert "N" in hint.split("km")[1]  # due north offset -> N-ish direction
+
+
+def test_location_hint_is_tamil_by_default_not_half_translated() -> None:
+    """Regression: location_hint used to be a single hardcoded English
+    sentence regardless of language -- a Tamil-registered farmer's route
+    summary read "...NNW of village center" verbatim, mid-Tamil-sentence.
+    Caught live on the deployed path."""
+    cluster = _cluster()
+    plot = _plot(lat=cluster.machine_start_lat + 0.01, lon=cluster.machine_start_lon)
+    hint = notify.location_hint(cluster, plot)  # default language="ta"
+    assert "km" in hint
+    assert "of village center" not in hint
+    assert "கிராம மையத்திலிருந்து" in hint
+    assert "வடக்கு" in hint  # due north offset -> தமிழ் "N"-ish direction
