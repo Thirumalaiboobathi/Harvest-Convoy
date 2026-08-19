@@ -2,7 +2,10 @@
 word lists/tables in registration.py (yes/no matcher, month names), in
 one block for native-speaker review. See ADR-008 Part 2 and Decisions
 14-16 for the four review rounds this wording went through before it
-shipped.
+shipped, and ADR-009 Parts 2-4 for the newer strings appended at the
+end of this dump (harvest confirmation prompt/toasts, the maturity
+projection sentence, the drying-window alert) -- all still first
+drafts, not yet reviewed.
 
 Usage:
     uv run python -m scripts.print_tamil_strings
@@ -13,6 +16,7 @@ from __future__ import annotations
 import sys
 from datetime import date
 
+from harvest_convoy.agronomy import market_params
 from harvest_convoy.telegram import messages_ta
 from harvest_convoy.telegram import registration
 
@@ -185,9 +189,47 @@ def main() -> None:
     _section("registration.py -- LANGUAGE_KEYBOARD button labels")
     print(registration.LANGUAGE_KEYBOARD)
 
+    _section("NEW (ADR-009 Part 2) -- harvest confirmation prompt, buttons, toasts -- DRAFT, unreviewed")
+    print("harvest_confirmation_prompt(2.5, 'acre'):")
+    print(messages_ta.harvest_confirmation_prompt(2.5, "acre"))
+    print()
+    print("harvest_confirmation_prompt(0.5, 'cent'):")
+    print(messages_ta.harvest_confirmation_prompt(0.5, "cent"))
+    print()
+    print("CONFIRMATION_YES_LABEL:", messages_ta.CONFIRMATION_YES_LABEL)
+    print("CONFIRMATION_NO_LABEL:", messages_ta.CONFIRMATION_NO_LABEL)
+    print("confirmation_thanks():", messages_ta.confirmation_thanks())
+    print("confirmation_not_found():", messages_ta.confirmation_not_found())
+
+    _section("NEW (ADR-009 Part 3) -- projected maturity date, one sentence appended to COMPLETE_MESSAGE -- DRAFT, unreviewed")
+    sample_date = messages_ta.format_date(date(2026, 8, 20))
+    print(f"projected_maturity_sentence('{sample_date}'):")
+    print(messages_ta.projected_maturity_sentence(sample_date))
+    print()
+    print("As it actually renders, appended to COMPLETE_MESSAGE:")
+    print(messages_ta.COMPLETE_MESSAGE + " " + messages_ta.projected_maturity_sentence(sample_date))
+
+    _section("NEW (ADR-009 Part 4) -- post-harvest drying-window alert -- DRAFT, unreviewed")
+    print("Both MSP and moisture set (moisture=14, msp=2300 -- illustrative numbers, not real config):")
+    print(messages_ta.drying_window_alert(moisture=14, msp=2300))
+    print()
+    print("Moisture set, MSP unset (moisture=14, msp=None):")
+    print(messages_ta.drying_window_alert(moisture=14, msp=None))
+    print()
+    print("MSP set, moisture unset (moisture=None, msp=2300):")
+    print(messages_ta.drying_window_alert(moisture=None, msp=2300))
+    print()
+    print("Neither set -- the real state today (market_params.py's actual current values):")
+    print(messages_ta.drying_window_alert(
+        moisture=market_params.DPC_MOISTURE_THRESHOLD_PERCENT,
+        msp=market_params.MSP_PADDY_COMMON_PER_QUINTAL,
+    ))
+
     print()
     print("=" * 70)
-    print("End of Tamil string dump. See ADR-008 Decisions 14-16 for review history.")
+    print("End of Tamil string dump. See ADR-008 Decisions 14-16 for the")
+    print("pre-existing strings' review history, and ADR-009 Parts 2-4 for")
+    print("the new strings above -- drafts, pending the same review process.")
     print("=" * 70)
 
 
