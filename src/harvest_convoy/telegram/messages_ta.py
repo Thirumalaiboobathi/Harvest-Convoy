@@ -243,6 +243,14 @@ def not_ready(area_acres: float, area_unit: str) -> str:
 
 def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
     # DRAFT, pending native-speaker review (ADR-009 Part 4).
+    #
+    # Grade fix: `msp` is specifically MSP_PADDY_COMMON_PER_QUINTAL --
+    # Grade A and Common carry different MSPs, and we don't know which
+    # grade a given farmer's paddy will be assessed at. The earlier
+    # draft said "இந்த தரத்திற்கான" ("for this grade"), which wrongly
+    # implied the figure applies to whatever grade the farmer's paddy
+    # turns out to be. Now names "காமன் தரம்" (Common grade) explicitly
+    # instead. A farmer expecting the wrong DPC rate is a real harm.
     if moisture is not None:
         core = (
             "அடுத்த சில நாட்களில் மழை வரக்கூடும். அறுவடை செய்த "
@@ -265,12 +273,39 @@ def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
         # Same, with the moisture-percent clause omitted entirely --
         # "...paddy needs to dry before a DPC will accept it..."
     if msp is not None:
-        core += f" இந்த தரத்திற்கான குறைந்தபட்ச ஆதரவு விலை குயின்டால் ஒன்றுக்கு ரூ.{msp}."
-        # " MSP for this grade is Rs {msp} per quintal." -- states the
-        # published figure ("இந்த தரத்திற்கான குறைந்தபட்ச ஆதரவு விலை" =
-        # "the minimum support price for this grade"), never a personal
-        # payment promise -- same wording discipline as the English draft.
+        core += f" காமன் தர நெல்லுக்கான குறைந்தபட்ச ஆதரவு விலை குயின்டால் ஒன்றுக்கு ரூ.{msp}."
+        # " Common-grade MSP is Rs {msp} per quintal." -- names the grade
+        # explicitly ("காமன் தர நெல்லுக்கான" = "for Common-grade paddy"),
+        # states the published figure, never a personal payment promise.
     return core
+
+
+def drying_window_alert_split(*, moisture: int | None, msp: int | None) -> str:
+    # Alternate candidate wording (not yet chosen) -- see
+    # messages_en.py's drying_window_alert_split for the design note.
+    # DRAFT, pending native-speaker review (ADR-009 Part 4).
+    line1 = (
+        "அடுத்த சில நாட்களில் மழை வரக்கூடும். அறுவடை செய்த "
+        "நெல்லை மூடி வையுங்கள் -- உலர்த்தும் போது மழை நிறம் "
+        "மாறுவதற்கும் முளைப்பதற்கும் காரணமாகலாம்."
+    )
+    # "Rain is expected over the next few days. Cover your harvested
+    #  grain -- rain during drying can cause discolouration and
+    #  sprouting."
+    if moisture is not None:
+        line2 = (
+            f"DPC முழு விலைக்கு ஏற்க நெல் ஈரப்பதம் சுமார் {moisture}% "
+            "அளவுக்குக் குறையவேண்டும்."
+        )
+        # "Paddy needs to dry to about {moisture}% moisture before a DPC
+        #  will accept it at full price."
+    else:
+        line2 = "DPC முழு விலைக்கு ஏற்க நெல் உலரவேண்டும்."
+        # "Paddy needs to dry before a DPC will accept it at full price."
+    if msp is not None:
+        line2 += f" காமன் தர நெல்லுக்கான குறைந்தபட்ச ஆதரவு விலை குயின்டால் ஒன்றுக்கு ரூ.{msp}."
+        # " Common-grade MSP is Rs {msp} per quintal."
+    return f"{line1}\n\n{line2}"
 
 
 def harvest_confirmation_prompt(area_acres: float, area_unit: str) -> str:

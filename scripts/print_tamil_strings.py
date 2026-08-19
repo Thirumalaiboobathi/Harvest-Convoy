@@ -209,18 +209,50 @@ def main() -> None:
     print("As it actually renders, appended to COMPLETE_MESSAGE:")
     print(messages_ta.COMPLETE_MESSAGE + " " + messages_ta.projected_maturity_sentence(sample_date))
 
-    _section("NEW (ADR-009 Part 4) -- post-harvest drying-window alert -- DRAFT, unreviewed")
-    print("Both MSP and moisture set (moisture=14, msp=2300 -- illustrative numbers, not real config):")
+    _section("NEW (ADR-009 Part 4) -- post-harvest drying-window alert -- DRAFT, unreviewed, TWO CANDIDATE WORDINGS")
+    print(
+        "*** moisture=14, msp=2300 below are FAKE, ILLUSTRATIVE NUMBERS "
+        "hardcoded in THIS SCRIPT to show what the message looks like "
+        "once real figures exist. They are NOT in agronomy/market_params.py "
+        "and NEVER reach the real message path -- see the real-state render "
+        "at the end of this section, which has no numbers at all. ***"
+    )
+    print()
+    print("--- Version A: single message (current implementation) ---")
+    print()
+    print("[illustrative] moisture=14, msp=2300:")
     print(messages_ta.drying_window_alert(moisture=14, msp=2300))
     print()
-    print("Moisture set, MSP unset (moisture=14, msp=None):")
+    print("[illustrative] moisture=14, msp=None:")
     print(messages_ta.drying_window_alert(moisture=14, msp=None))
     print()
-    print("MSP set, moisture unset (moisture=None, msp=2300):")
+    print("[illustrative] moisture=None, msp=2300:")
     print(messages_ta.drying_window_alert(moisture=None, msp=2300))
     print()
-    print("Neither set -- the real state today (market_params.py's actual current values):")
+    print("--- Version B: split into two lines (candidate, not yet chosen) ---")
+    print()
+    print("[illustrative] moisture=14, msp=2300:")
+    print(messages_ta.drying_window_alert_split(moisture=14, msp=2300))
+    print()
+    print("[illustrative] moisture=14, msp=None:")
+    print(messages_ta.drying_window_alert_split(moisture=14, msp=None))
+    print()
+    print("[illustrative] moisture=None, msp=2300:")
+    print(messages_ta.drying_window_alert_split(moisture=None, msp=2300))
+    print()
+    print(
+        "--- REAL current state (market_params.py's actual values right "
+        "now -- both None, no illustrative numbers) ---"
+    )
+    print()
+    print("Version A:")
     print(messages_ta.drying_window_alert(
+        moisture=market_params.DPC_MOISTURE_THRESHOLD_PERCENT,
+        msp=market_params.MSP_PADDY_COMMON_PER_QUINTAL,
+    ))
+    print()
+    print("Version B:")
+    print(messages_ta.drying_window_alert_split(
         moisture=market_params.DPC_MOISTURE_THRESHOLD_PERCENT,
         msp=market_params.MSP_PADDY_COMMON_PER_QUINTAL,
     ))

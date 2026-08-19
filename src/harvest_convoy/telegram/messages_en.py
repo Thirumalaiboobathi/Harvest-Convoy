@@ -135,7 +135,17 @@ def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
     the alert may fire on day 1 for rain arriving day 3, or after a dry
     gap, and must stay accurate either way. `moisture`/`msp` come from
     agronomy/market_params.py -- both manually set, source-cited,
-    independently omitted (never a guessed number) if either is None."""
+    independently omitted (never a guessed number) if either is None.
+
+    `msp` is specifically MSP_PADDY_COMMON_PER_QUINTAL -- Grade A and
+    Common carry different MSPs, and this system doesn't know which
+    grade a given farmer's paddy will be assessed at. The wording names
+    "Common grade" explicitly rather than saying "this grade" (which
+    would wrongly imply the figure applies to whatever grade the
+    farmer's paddy happens to be assessed at) -- caught on review: a
+    farmer expecting the wrong rate at the DPC is a real harm, not a
+    wording nicety.
+    """
     if moisture is not None:
         core = (
             "Rain is expected over the next few days. Cover your "
@@ -151,8 +161,32 @@ def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
             "discolouration and sprouting."
         )
     if msp is not None:
-        core += f" MSP for this grade is Rs {msp} per quintal."
+        core += f" Common-grade MSP is Rs {msp} per quintal."
     return core
+
+
+def drying_window_alert_split(*, moisture: int | None, msp: int | None) -> str:
+    """Alternate candidate wording (not yet chosen): the urgent
+    rain-warning stands alone as its own line; moisture/MSP context is a
+    second line, so the two don't compete for attention in one
+    paragraph. Both this and drying_window_alert() exist so real
+    rendered output can be compared before picking one -- see
+    scripts/print_tamil_strings.py. Same grade-naming and
+    never-a-guessed-number rules as drying_window_alert()."""
+    line1 = (
+        "Rain is expected over the next few days. Cover your harvested "
+        "grain -- rain during drying can cause discolouration and sprouting."
+    )
+    if moisture is not None:
+        line2 = (
+            f"Paddy needs to dry to about {moisture}% moisture before a "
+            "DPC will accept it at full price."
+        )
+    else:
+        line2 = "Paddy needs to dry before a DPC will accept it at full price."
+    if msp is not None:
+        line2 += f" Common-grade MSP is Rs {msp} per quintal."
+    return f"{line1}\n\n{line2}"
 
 
 def harvest_confirmation_prompt(area_acres: float, area_unit: str) -> str:

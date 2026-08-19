@@ -23,9 +23,14 @@ from __future__ import annotations
 # Announced: <date of the notification -- set this>
 #
 # None until a real, source-cited value is set here. Wording rule this
-# feeds (ADR-009 Part 4): "MSP for this grade is Rs X" -- never "you
-# will receive Rs X". Actual payment depends on grade, moisture, and
-# the DPC's own assessment; MSP is a published reference figure, not a
+# feeds (ADR-009 Part 4): "Common-grade MSP is Rs X" -- never "you will
+# receive Rs X", and never "MSP for this grade" either. Grade A and
+# Common carry different MSPs, and nothing in this system knows which
+# grade a given farmer's paddy will actually be assessed at -- the
+# message must name "Common grade" explicitly, or a farmer could read
+# it as the rate for whatever grade his own paddy gets, which it isn't
+# guaranteed to be. Caught on review: this is a real-harm mistake, not
+# a wording nicety. MSP itself is a published reference figure, not a
 # personal payment promise.
 MSP_PADDY_COMMON_PER_QUINTAL: int | None = None
 

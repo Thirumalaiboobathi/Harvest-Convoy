@@ -308,25 +308,49 @@ def test_advocate_argument_never_returns_model_prose() -> None:
     assert text1 == text2
 
 
-# --- drying_window_alert (ADR-009 Part 4) ---
+# --- harvest_confirmation_prompt (ADR-009 Part 2) ---
+
+def test_harvest_confirmation_prompt_area_includes_unit_not_bare_number() -> None:
+    """Confirmed directly, per review: "{area} வயலுக்கு" interpolates
+    with format_area() (e.g. "2.5 ஏக்கர்"), not a bare number."""
+    text_ta = messages_ta.harvest_confirmation_prompt(2.5, "acre")
+    assert "2.5 ஏக்கர்" in text_ta
+    assert "2.5 வயலுக்கு" not in text_ta  # the bare-number failure mode this pins down
+
+    text_ta_cent = messages_ta.harvest_confirmation_prompt(0.5, "cent")
+    assert "50 சென்ட்" in text_ta_cent
+
+    text_en = messages_en.harvest_confirmation_prompt(2.5, "acre")
+    assert "2.5 acres" in text_en
+
+
+# --- drying_window_alert / drying_window_alert_split (ADR-009 Part 4) ---
+# Two candidate wordings, not yet chosen between -- both must satisfy
+# the same omission and grade-naming rules.
+
+_DRYING_FUNCS = ["drying_window_alert", "drying_window_alert_split"]
+
 
 @pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
-def test_drying_window_alert_with_both_figures_set_includes_both(mod) -> None:
-    text = mod.drying_window_alert(moisture=14, msp=2300)
+@pytest.mark.parametrize("func_name", _DRYING_FUNCS)
+def test_drying_window_alert_with_both_figures_set_includes_both(mod, func_name) -> None:
+    text = getattr(mod, func_name)(moisture=14, msp=2300)
     assert "14" in text
     assert "2300" in text
 
 
 @pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
-def test_drying_window_alert_omits_moisture_when_unset(mod) -> None:
-    text = mod.drying_window_alert(moisture=None, msp=2300)
+@pytest.mark.parametrize("func_name", _DRYING_FUNCS)
+def test_drying_window_alert_omits_moisture_when_unset(mod, func_name) -> None:
+    text = getattr(mod, func_name)(moisture=None, msp=2300)
     assert "2300" in text
     assert "%" not in text
 
 
 @pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
-def test_drying_window_alert_omits_msp_when_unset(mod) -> None:
-    text = mod.drying_window_alert(moisture=14, msp=None)
+@pytest.mark.parametrize("func_name", _DRYING_FUNCS)
+def test_drying_window_alert_omits_msp_when_unset(mod, func_name) -> None:
+    text = getattr(mod, func_name)(moisture=14, msp=None)
     assert "14" in text
     # No currency figure at all when MSP is unset -- never invent one.
     assert "Rs" not in text
@@ -334,17 +358,51 @@ def test_drying_window_alert_omits_msp_when_unset(mod) -> None:
 
 
 @pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
-def test_drying_window_alert_with_neither_set_still_sends_the_rain_warning(mod) -> None:
-    text = mod.drying_window_alert(moisture=None, msp=None)
+@pytest.mark.parametrize("func_name", _DRYING_FUNCS)
+def test_drying_window_alert_with_neither_set_still_sends_the_rain_warning(mod, func_name) -> None:
+    text = getattr(mod, func_name)(moisture=None, msp=None)
     assert isinstance(text, str) and text.strip()
     assert "%" not in text
     assert "Rs" not in text and "ரூ" not in text
 
 
-def test_drying_window_alert_english_never_promises_payment() -> None:
-    """Hard wording constraint: 'MSP for this grade is Rs X', never
-    'you will receive Rs X' -- actual payment depends on grade, moisture,
-    and the DPC's own assessment."""
-    text = messages_en.drying_window_alert(moisture=14, msp=2300)
+@pytest.mark.parametrize("func_name", _DRYING_FUNCS)
+def test_drying_window_alert_english_never_promises_payment(func_name) -> None:
+    """Hard wording constraint: never 'you will receive Rs X' -- actual
+    payment depends on grade, moisture, and the DPC's own assessment."""
+    text = getattr(messages_en, func_name)(moisture=14, msp=2300)
     assert "you will receive" not in text.lower()
-    assert "MSP for this grade is Rs 2300" in text
+
+
+@pytest.mark.parametrize("func_name", _DRYING_FUNCS)
+def test_drying_window_alert_english_names_common_grade_explicitly(func_name) -> None:
+    """Grade fix: MSP_PADDY_COMMON_PER_QUINTAL is specifically the
+    Common-grade figure -- Grade A carries a different MSP, and this
+    system doesn't know which grade a farmer's paddy will be assessed
+    at. The message must name "Common grade" explicitly, never say "this
+    grade" (which would wrongly imply the figure applies to whatever
+    grade the farmer's own paddy gets)."""
+    text = getattr(messages_en, func_name)(moisture=14, msp=2300)
+    assert "common" in text.lower()
+    assert "for this grade" not in text.lower()
+
+
+@pytest.mark.parametrize("func_name", _DRYING_FUNCS)
+def test_drying_window_alert_tamil_names_common_grade_explicitly(func_name) -> None:
+    text = getattr(messages_ta, func_name)(moisture=14, msp=2300)
+    assert "காமன்" in text  # "Common" (grade), named explicitly
+    assert "இந்த தரத்திற்கான" not in text  # the old, ambiguous "for this grade" wording
+
+
+def test_drying_window_alert_split_has_the_rain_warning_before_the_market_context() -> None:
+    """Version B's structural point: two lines, urgent first."""
+    text_en = messages_en.drying_window_alert_split(moisture=14, msp=2300)
+    line1, _, line2 = text_en.partition("\n\n")
+    assert "rain" in line1.lower()
+    assert "cover" in line1.lower()
+    assert "moisture" in line2.lower() or "MSP" in line2
+
+    text_ta = messages_ta.drying_window_alert_split(moisture=14, msp=2300)
+    ta_line1, _, ta_line2 = text_ta.partition("\n\n")
+    assert "மழை" in ta_line1  # "rain"
+    assert "%" in ta_line2 or "ரூ" in ta_line2
