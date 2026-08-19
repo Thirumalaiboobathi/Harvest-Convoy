@@ -2,7 +2,7 @@ from datetime import date
 
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.storage.file_storage import FileStorage
-from harvest_convoy.storage.interface import LedgerEntry
+from harvest_convoy.storage.interface import DecisionRecord, LedgerEntry
 
 
 def _cluster() -> Cluster:
@@ -260,3 +260,83 @@ def test_harvest_state_persists_across_a_reload(tmp_path) -> None:
 
     reloaded = FileStorage(path)
     assert reloaded.get_harvested_plot_ids("c1", "2026-kuruvai") == {"p01"}
+
+
+# --- Decision records -- ADR-010 Part 0.5 ---
+
+def _decision_record(
+    plot_id: str, season_id: str = "2026-kuruvai", decision_date: str = "2026-09-09",
+    **overrides,
+) -> DecisionRecord:
+    base = dict(
+        plot_id=plot_id, farmer_id=f"farmer-{plot_id}", cluster_id="c1",
+        season_id=season_id, decision_date=decision_date,
+        accumulated_gdd=1681.4, maturity_gdd_used=1637.0, threshold_source="calibrated",
+        outcome="contested", days_past_maturity=6, urgency=0.3, route_position=None,
+        rain_threshold_mm=5.0, forecast_horizon_days=16, usable_harvest_days=3,
+        machine_capacity_acres_per_day=3.5, capacity_budget_acres=10.5,
+    )
+    base.update(overrides)
+    return DecisionRecord(**base)
+
+
+def test_decision_record_round_trips(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    record = _decision_record(
+        "p03", opponent_plot_id="p04",
+        own_claim={"urgency_score": 0.3, "concedes": False},
+        opponent_claim={"urgency_score": 0.05, "concedes": False},
+        rounds_run=3, resolution="escalated", fairness_decisive=None,
+    )
+    result = storage.put_decision_record(record)
+
+    assert result.success
+    loaded = storage.get_decision_record("p03", "2026-kuruvai", "2026-09-09")
+    assert loaded == record
+
+
+def test_get_decision_record_returns_none_when_not_found(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    assert storage.get_decision_record("nope", "2026-kuruvai", "2026-09-09") is None
+
+
+def test_put_decision_record_overwrites_on_a_retried_write(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_decision_record(_decision_record("p03", resolution="escalated"))
+    storage.put_decision_record(_decision_record("p03", resolution="escalated_won"))
+
+    loaded = storage.get_decision_record("p03", "2026-kuruvai", "2026-09-09")
+    assert loaded.resolution == "escalated_won"
+
+
+def test_get_decision_records_for_plot_filters_by_season_when_given(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_decision_record(_decision_record("p03", season_id="2026-kuruvai"))
+    storage.put_decision_record(_decision_record("p03", season_id="2026-samba"))
+
+    kuruvai_only = storage.get_decision_records_for_plot("p03", season_id="2026-kuruvai")
+    assert len(kuruvai_only) == 1
+    assert kuruvai_only[0].season_id == "2026-kuruvai"
+
+
+def test_get_decision_records_for_plot_returns_every_season_when_none_given(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_decision_record(_decision_record("p03", season_id="2026-kuruvai"))
+    storage.put_decision_record(_decision_record("p03", season_id="2026-samba"))
+
+    all_seasons = storage.get_decision_records_for_plot("p03")
+    assert {r.season_id for r in all_seasons} == {"2026-kuruvai", "2026-samba"}
+
+
+def test_get_decision_records_for_cluster_filters_by_cluster_and_season(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_decision_record(_decision_record("p03", cluster_id="c1"))
+    storage.put_decision_record(_decision_record("p07", cluster_id="c2"))
+
+    records = storage.get_decision_records_for_cluster("c1", "2026-kuruvai")
+    assert {r.plot_id for r in records} == {"p03"}
+
+
+def test_a_plot_with_no_decision_history_returns_an_empty_list(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    assert storage.get_decision_records_for_plot("never-decided") == []

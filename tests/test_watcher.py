@@ -323,6 +323,37 @@ def test_triggered_run_creates_a_harvest_confirmation_record_for_each_fits_plot(
     assert storage.get_harvest_confirmation("p2", "2026-kuruvai") is None
 
 
+def test_triggered_run_persists_a_decision_record_for_every_plot(tmp_path, monkeypatch) -> None:
+    """ADR-010 Part 0.5: the whole point -- a real end-to-end
+    run_daily_watch() call must leave a DecisionRecord behind for every
+    plot it decided, carrying the real weather/capacity context this
+    trigger actually used, not just an in-memory result discarded after
+    notifications are sent."""
+    storage = FileStorage(tmp_path / "s.json")
+    plots = [_plot("p1", "f1", 110), _plot("p2", "f2", 5)]  # p1 fits, p2 too green
+    farmers = [_farmer("f1"), _farmer("f2")]
+    _seed(storage, plots, farmers)
+    _patch_weather(monkeypatch, [ForecastDay("d0", 0.0), ForecastDay("d1", 20.0)])
+
+    watcher_mod.run_daily_watch(
+        "c1", "2026-kuruvai", storage=storage, today=TODAY, telegram_client=_FakeClient(),
+        get_claim=_truthful_claim,
+    )
+
+    fits_record = storage.get_decision_record("p1", "2026-kuruvai", TODAY.isoformat())
+    assert fits_record is not None
+    assert fits_record.outcome == "fits"
+    assert fits_record.threshold_source == "fallback"  # this fixture cluster has no override
+    assert fits_record.rain_threshold_mm == watcher_mod.RAIN_THRESHOLD_MM
+    assert fits_record.usable_harvest_days == 1  # one dry day (d0) before rain on d1
+    assert fits_record.machine_capacity_acres_per_day == 3.5
+    assert fits_record.capacity_budget_acres == 3.5  # 1 usable day x 3.5 acres/day
+
+    too_green_record = storage.get_decision_record("p2", "2026-kuruvai", TODAY.isoformat())
+    assert too_green_record is not None
+    assert too_green_record.outcome == "too_green"
+
+
 def test_run_evening_confirmations_sends_prompt_and_sets_asked_at(tmp_path) -> None:
     from harvest_convoy.storage.interface import HarvestConfirmation
 

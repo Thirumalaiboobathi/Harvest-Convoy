@@ -54,6 +54,39 @@ def _escalation_key(cluster_id: str, plot_a_id: str, plot_b_id: str) -> str:
     return f"{cluster_id}:{plot_a_id}:{plot_b_id}"
 
 
+def _resolve_decision_record(
+    storage: Storage, plot_id: str, season_id: str, decision_date: str, resolution: str,
+) -> None:
+    """Updates the DecisionRecord the coordinator wrote at trigger time
+    (resolution="escalated", resolved_at=None) to its final, human-decided
+    outcome. fairness_decisive is left None on the record -- a human tap
+    is not a score comparison, and recording one as if it were would
+    misattribute a human's judgment to the algorithm. See ADR-010 Part 0.5
+    Decision D. Never blocks or crashes the resolution: a missing or
+    failed-to-update record is logged, not raised -- the two farmers still
+    get notified either way.
+    """
+    record = storage.get_decision_record(plot_id, season_id, decision_date)
+    if record is None:
+        logger.warning(
+            "escalation resolution: no DecisionRecord found for plot=%s "
+            "season=%s decision_date=%s -- cannot update it with the final "
+            "resolution (the trigger-time write may have failed, or this "
+            "escalation predates ADR-010 Part 0.5)",
+            plot_id, season_id, decision_date,
+        )
+        return
+    updated = replace(
+        record, resolution=resolution, resolved_at=datetime.now(timezone.utc).isoformat()
+    )
+    result = storage.put_decision_record(updated)
+    if not result.success:
+        logger.error(
+            "DECISION RECORD UPDATE FAILED: plot=%s season=%s decision_date=%s: %s",
+            plot_id, season_id, decision_date, result.error,
+        )
+
+
 def register_escalation(escalation: EscalationPayload) -> None:
     """Call this after sending an escalation message, so a later tap can
     look up its claims to build a specific resolution reason."""
@@ -288,6 +321,20 @@ def handle_callback_query(
             winner_claim, loser_claim = escalation.claim_b, escalation.claim_a
         loser_language = loser_result[0].language if loser_result is not None else "ta"
         reason = notify.resolution_reason_text(loser_language, winner_claim, loser_claim)
+
+        if escalation.decision_date:
+            _resolve_decision_record(
+                storage, chosen_plot_id, season_id, escalation.decision_date, "escalated_won"
+            )
+            _resolve_decision_record(
+                storage, loser_plot_id, season_id, escalation.decision_date, "escalated_lost"
+            )
+        else:
+            logger.info(
+                "escalation %s: pending payload has no decision_date -- "
+                "cannot update its DecisionRecord (predates ADR-010 Part 0.5)",
+                key,
+            )
     else:
         logger.warning(
             "escalation %s resolved but no pending payload found (process "

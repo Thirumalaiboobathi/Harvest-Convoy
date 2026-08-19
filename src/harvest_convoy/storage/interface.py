@@ -68,6 +68,63 @@ class HarvestConfirmation:
     drying_alert_sent: bool = False
 
 
+@dataclass(frozen=True)
+class DecisionRecord:
+    """What the deterministic core and the coordinator actually computed
+    for one plot on one trigger day -- written at the moment the decision
+    is made (or, for an escalated pair, updated at the moment a human
+    resolves it), so a later reader never has to recompute or guess.
+    See ADR-010 Part 0.5.
+    """
+
+    plot_id: str
+    farmer_id: str
+    cluster_id: str
+    season_id: str
+    decision_date: str  # ISO date -- the trigger day this record is for
+
+    # scheduling/solver.py:PlotDecision, copied at the moment it's known
+    accumulated_gdd: float
+    maturity_gdd_used: float
+    threshold_source: str  # "calibrated" | "fallback"
+    outcome: str  # PlotOutcome.value -- too_green | fits | contested | harvested
+    days_past_maturity: int | None
+    urgency: float
+    route_position: int | None  # only set for fits
+
+    # The weather/capacity context that produced this trigger day's
+    # classification -- identical for every plot decided this run, stored
+    # per-record anyway so a single plot's DecisionRecord is fully
+    # self-contained and never needs a second lookup to make sense.
+    rain_threshold_mm: float
+    forecast_horizon_days: int
+    usable_harvest_days: int
+    machine_capacity_acres_per_day: float
+    capacity_budget_acres: float
+
+    # Negotiation -- populated only for a plot that went through
+    # negotiate_pair() this trigger day; None for too_green/fits/harvested
+    # and for a contested plot with no pairing partner this round.
+    opponent_plot_id: str | None = None
+    own_claim: dict | None = None  # AdvocateClaim.model_dump()
+    opponent_claim: dict | None = None  # AdvocateClaim.model_dump()
+    rounds_run: int | None = None
+    resolution: str | None = None
+    # "won" | "lost" (resolved this trigger, no escalation) |
+    # "escalated" (pending human resolution) |
+    # "escalated_won" | "escalated_lost" (webhook.py updates this after a
+    # human taps) | "contested_no_partner_this_round" (odd plot out,
+    # ADR-003 Decision 4's pairwise-only scope limit)
+    fairness_decisive: bool | None = None
+    # True/False only when a genuine automatic score comparison decided
+    # the round -- derived post-hoc, pure arithmetic over the two
+    # already-known claims (see coordinator.py:_fairness_was_decisive).
+    # None means "not applicable": resolved by concession (a model
+    # judgment, not a score comparison), resolved by a human tap, or not
+    # yet resolved at all (still "escalated").
+    resolved_at: str | None = None  # ISO timestamp of the FINAL resolution
+
+
 class Storage(Protocol):
     def get_cluster(self, cluster_id: str) -> Cluster | None: ...
     def put_cluster(self, cluster: Cluster) -> StorageResult: ...
@@ -156,4 +213,37 @@ class Storage(Protocol):
         project's demo-scale clusters), so callers filter in Python
         (pending-to-ask, still-unknown, yes/no counts) rather than this
         method taking a menu of server-side filter parameters."""
+        ...
+
+    def put_decision_record(self, record: DecisionRecord) -> StorageResult:
+        """Overwrite semantics, like every put_* here except
+        put_ledger_entry -- a retried write for the same (plot_id,
+        season_id, decision_date) updates rather than errors, matching
+        mark_plot_harvested's contract. See ADR-010 Part 0.5."""
+        ...
+
+    def get_decision_record(
+        self, plot_id: str, season_id: str, decision_date: str
+    ) -> DecisionRecord | None:
+        """None if no record exists for this exact key -- never asked,
+        write failed and was only logged (ADR-010 Part 0.5 Decision C),
+        or this decision predates Part 0.5 entirely. Callers distinguish
+        those cases by other evidence (a LedgerEntry, a stored code
+        version), not by anything this method returns."""
+        ...
+
+    def get_decision_records_for_plot(
+        self, plot_id: str, season_id: str | None = None
+    ) -> list[DecisionRecord]:
+        """This plot's full decision history, optionally filtered to one
+        season. season_id=None (the default) returns every recorded
+        season -- needed when the caller doesn't yet know which season a
+        requested date falls under."""
+        ...
+
+    def get_decision_records_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[DecisionRecord]:
+        """Every decision record for this cluster/season -- reporting's
+        fairness-mechanism-activity aggregate reads this."""
         ...

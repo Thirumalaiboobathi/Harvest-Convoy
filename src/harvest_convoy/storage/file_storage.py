@@ -19,7 +19,12 @@ from datetime import date
 from pathlib import Path
 
 from harvest_convoy.models import Cluster, Farmer, Plot
-from harvest_convoy.storage.interface import HarvestConfirmation, LedgerEntry, StorageResult
+from harvest_convoy.storage.interface import (
+    DecisionRecord,
+    HarvestConfirmation,
+    LedgerEntry,
+    StorageResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +34,7 @@ _EMPTY: dict = {
     "clusters": {}, "farmers": {}, "plots": {}, "ledger": {}, "watcher": {},
     "harvest": {},  # harvest[cluster_id][season_id][plot_id] = dispatched_at
     "confirmations": {},  # confirmations[plot_id][season_id] = HarvestConfirmation dict
+    "decisions": {},  # decisions[plot_id][season_id][decision_date] = DecisionRecord dict
 }
 
 
@@ -170,4 +176,38 @@ class FileStorage:
             raw = by_season.get(season_id)
             if raw and raw["cluster_id"] == cluster_id:
                 result.append(HarvestConfirmation(**raw))
+        return result
+
+    # Decision records -- ADR-010 Part 0.5
+    def put_decision_record(self, record: DecisionRecord) -> StorageResult:
+        by_season = self._data["decisions"].setdefault(record.plot_id, {})
+        by_date = by_season.setdefault(record.season_id, {})
+        by_date[record.decision_date] = asdict(record)
+        return self._save()
+
+    def get_decision_record(
+        self, plot_id: str, season_id: str, decision_date: str
+    ) -> DecisionRecord | None:
+        raw = self._data["decisions"].get(plot_id, {}).get(season_id, {}).get(decision_date)
+        return DecisionRecord(**raw) if raw else None
+
+    def get_decision_records_for_plot(
+        self, plot_id: str, season_id: str | None = None
+    ) -> list[DecisionRecord]:
+        by_season = self._data["decisions"].get(plot_id, {})
+        seasons = [season_id] if season_id is not None else list(by_season.keys())
+        result = []
+        for sid in seasons:
+            for raw in by_season.get(sid, {}).values():
+                result.append(DecisionRecord(**raw))
+        return result
+
+    def get_decision_records_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[DecisionRecord]:
+        result = []
+        for by_season in self._data["decisions"].values():
+            for raw in by_season.get(season_id, {}).values():
+                if raw["cluster_id"] == cluster_id:
+                    result.append(DecisionRecord(**raw))
         return result

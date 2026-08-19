@@ -121,3 +121,28 @@ class EscalationPayload:
     claim_b: AdvocateClaim
     rounds_run: int
     reason: str
+    # The trigger day this escalation was raised on -- lets webhook.py
+    # find the exact DecisionRecord (keyed by plot_id/season_id/
+    # decision_date) to update once a human resolves it. See ADR-010
+    # Part 0.5 Decision C/D.
+    decision_date: str = ""
+
+
+@dataclass(frozen=True)
+class TriggerContext:
+    """The weather/capacity/threshold context that produced one trigger
+    day's solve() classification -- computed once by watcher.py (it
+    already has every input) and threaded into the coordinator purely so
+    it can attach these to each plot's persisted DecisionRecord. Not a
+    new computation, just not previously passed downstream. See ADR-010
+    Part 0.5 Decision C.
+    """
+
+    decision_date: str
+    rain_threshold_mm: float
+    forecast_horizon_days: int
+    usable_harvest_days: int
+    maturity_gdd_used: float
+    threshold_source: str  # "calibrated" | "fallback"
+    machine_capacity_acres_per_day: float
+    capacity_budget_acres: float

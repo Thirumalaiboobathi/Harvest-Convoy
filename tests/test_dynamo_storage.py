@@ -75,6 +75,27 @@ def test_encode_decode_round_trip() -> None:
     assert decoded == original
 
 
+def test_to_decimal_recurses_into_nested_dicts() -> None:
+    """ADR-010's DecisionRecord carries nested dicts (own_claim/
+    opponent_claim, an AdvocateClaim.model_dump()) with float fields --
+    every entity before it was flat, so this recursion is new behavior,
+    not just an existing guarantee re-asserted."""
+    nested = {"urgency_score": 0.3, "acres": 2.5, "concedes": False, "plot_id": "p1"}
+    encoded = _to_decimal({"own_claim": nested, "plain": 1.5})
+    assert encoded["own_claim"]["urgency_score"] == Decimal("0.3")
+    assert encoded["own_claim"]["acres"] == Decimal("2.5")
+    assert encoded["own_claim"]["concedes"] is False
+    assert encoded["plain"] == Decimal("1.5")
+
+
+def test_from_decimal_recurses_into_nested_dicts_and_round_trips() -> None:
+    nested = {"urgency_score": 0.3, "acres": 2.5, "days_past_maturity": 6}
+    round_tripped = _from_decimal(_to_decimal({"own_claim": nested}))
+    assert round_tripped == {"own_claim": nested}
+    assert isinstance(round_tripped["own_claim"]["days_past_maturity"], int)
+    assert isinstance(round_tripped["own_claim"]["urgency_score"], float)
+
+
 def test_strip_keys_removes_pk_sk_and_extras() -> None:
     item = {"PK": "a", "SK": "b", "GSI1PK": "c", "GSI1SK": "d", "name": "keep"}
     assert _strip_keys(item) == {"GSI1PK": "c", "GSI1SK": "d", "name": "keep"}

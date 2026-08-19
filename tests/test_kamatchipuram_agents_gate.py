@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from harvest_convoy.agents.contracts import AdvocateClaim
+from harvest_convoy.agents.contracts import AdvocateClaim, TriggerContext
 from harvest_convoy.agents.coordinator import run_cluster_with_claims
 from harvest_convoy.agronomy import crop_params
 from harvest_convoy.agronomy.gdd import DailyTemperature
@@ -43,6 +43,17 @@ from harvest_convoy.storage.file_storage import FileStorage
 from scripts import seed_cluster
 
 REFERENCE_TODAY = date(2026, 8, 16)
+
+_TRIGGER_CONTEXT = TriggerContext(
+    decision_date=REFERENCE_TODAY.isoformat(),
+    rain_threshold_mm=5.0,
+    forecast_horizon_days=2,
+    usable_harvest_days=1,
+    maturity_gdd_used=crop_params.MATURITY_GDD_ESTIMATED,
+    threshold_source="fallback",
+    machine_capacity_acres_per_day=seed_cluster.CLUSTER.machine_capacity_acres_per_day,
+    capacity_budget_acres=seed_cluster.CLUSTER.machine_capacity_acres_per_day,
+)
 
 
 def _synthetic_days(transplant_date: date, today: date) -> list[DailyTemperature]:
@@ -81,7 +92,7 @@ def _run_gate_scenario(storage):
     )
     return run_cluster_with_claims(
         seed_cluster.PLOTS, decisions, "kamatchipuram", storage,
-        "2026-kuruvai", REFERENCE_TODAY, _truthful_claim,
+        "2026-kuruvai", REFERENCE_TODAY, _truthful_claim, _TRIGGER_CONTEXT,
     )
 
 

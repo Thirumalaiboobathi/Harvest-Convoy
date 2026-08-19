@@ -244,6 +244,64 @@ def test_uncalibrated_cluster_falls_back_to_global_constant_and_logs_loudly(capl
     )
 
 
+def test_resolve_maturity_gdd_reports_calibrated_for_a_cluster_with_an_override() -> None:
+    """ADR-010 Part 0.5: solve()'s inline threshold resolution was
+    extracted into its own function so watcher.py can resolve (and label)
+    the same threshold before solve() runs, not just after -- exercised
+    directly here, not just indirectly through solve()'s own tests above."""
+    from harvest_convoy.scheduling.solver import resolve_maturity_gdd
+
+    cluster = Cluster("c", "c", 3.5, 10.0, 77.5, maturity_gdd_override=90.0)
+    value, source = resolve_maturity_gdd(cluster)
+    assert value == 90.0
+    assert source == "calibrated"
+
+
+def test_resolve_maturity_gdd_reports_fallback_and_logs_for_an_uncalibrated_cluster(caplog) -> None:
+    import logging
+
+    from harvest_convoy.agronomy import crop_params
+    from harvest_convoy.scheduling.solver import resolve_maturity_gdd
+
+    cluster = Cluster("c", "c", 3.5, 10.0, 77.5)  # maturity_gdd_override defaults to None
+
+    with caplog.at_level(logging.WARNING):
+        value, source = resolve_maturity_gdd(cluster)
+
+    assert value == crop_params.MATURITY_GDD_ESTIMATED
+    assert source == "fallback"
+    assert any("MATURITY THRESHOLD FALLBACK" in r.message for r in caplog.records)
+
+
+def test_solve_accepts_a_pre_resolved_threshold_without_re_logging_the_fallback(caplog) -> None:
+    """When a caller (watcher.py, building a TriggerContext up front) has
+    already resolved the threshold, solve() must use that value as-is and
+    must not log the fallback warning a second time for the same
+    trigger."""
+    import logging
+
+    from harvest_convoy.scheduling.solver import resolve_maturity_gdd
+
+    today = date(2026, 8, 16)
+    transplant = today - timedelta(days=4)
+    plot = _plot("p_pre_resolved", transplant, area_acres=1.0)
+    days = _make_days(transplant, 5)
+    cluster = Cluster("c", "c", 3.5, 10.0, 77.5)  # uncalibrated
+    forecast = [ForecastDay("2026-08-16", 0.0)] * 5
+
+    pre_resolved = resolve_maturity_gdd(cluster)  # logs once, here
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING):
+        result = solve(
+            [plot], {plot.plot_id: days}, cluster, forecast, rain_threshold_mm=5.0, today=today,
+            maturity_gdd_resolved=pre_resolved,
+        )
+
+    assert not any("MATURITY THRESHOLD FALLBACK" in r.message for r in caplog.records)
+    assert result[0].accumulated_gdd == CONSTANT_DAILY_GDD * 5  # sanity: real math still ran
+
+
 def test_solve_is_deterministic_across_runs() -> None:
     days_needed = _days_to_maturity()
     today = date(2026, 8, 16)

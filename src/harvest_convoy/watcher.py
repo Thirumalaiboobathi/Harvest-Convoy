@@ -20,10 +20,15 @@ import logging
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
+from harvest_convoy.agents.contracts import TriggerContext
 from harvest_convoy.agents.coordinator import run_cluster, run_cluster_with_claims
 from harvest_convoy.models import Cluster, Farmer, Plot
-from harvest_convoy.scheduling.capacity import ForecastDay, usable_harvest_days
-from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome, solve
+from harvest_convoy.scheduling.capacity import (
+    ForecastDay,
+    harvest_day_budget_acres,
+    usable_harvest_days,
+)
+from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome, resolve_maturity_gdd, solve
 from harvest_convoy.storage import Storage, get_storage
 from harvest_convoy.storage.interface import HarvestConfirmation
 from harvest_convoy.telegram import notify, webhook
@@ -203,17 +208,34 @@ def _run_daily_watch_one(
             "watcher triggered%s: cluster=%s, %d of %d forecast days usable before rain",
             " (forced)" if usable_days >= len(forecast) else "", cluster_id, usable_days, len(forecast),
         )
+        maturity_gdd_resolved = resolve_maturity_gdd(cluster)
+        trigger_context = TriggerContext(
+            decision_date=today.isoformat(),
+            rain_threshold_mm=RAIN_THRESHOLD_MM,
+            forecast_horizon_days=len(forecast),
+            usable_harvest_days=usable_days,
+            maturity_gdd_used=maturity_gdd_resolved[0],
+            threshold_source=maturity_gdd_resolved[1],
+            machine_capacity_acres_per_day=cluster.machine_capacity_acres_per_day,
+            capacity_budget_acres=harvest_day_budget_acres(
+                usable_days, cluster.machine_capacity_acres_per_day
+            ),
+        )
         decisions = solve(
             plots, plot_days, cluster, forecast,
             rain_threshold_mm=RAIN_THRESHOLD_MM, today=today,
             harvested_plot_ids=frozenset(harvested_plot_ids),
+            maturity_gdd_resolved=maturity_gdd_resolved,
         )
         if get_claim is not None:
             result = run_cluster_with_claims(
-                plots, decisions, cluster_id, storage, season_id, today, get_claim
+                plots, decisions, cluster_id, storage, season_id, today,
+                get_claim, trigger_context,
             )
         else:
-            result = run_cluster(plots, decisions, cluster_id, storage, season_id, today)
+            result = run_cluster(
+                plots, decisions, cluster_id, storage, season_id, today, trigger_context,
+            )
 
         farmers_by_id = {f.farmer_id: f for f in storage.get_farmers_for_cluster(cluster_id)}
         plots_by_id = {p.plot_id: p for p in plots}

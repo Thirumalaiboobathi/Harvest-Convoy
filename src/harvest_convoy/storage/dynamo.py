@@ -21,7 +21,12 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from harvest_convoy.models import Cluster, Farmer, Plot
-from harvest_convoy.storage.interface import HarvestConfirmation, LedgerEntry, StorageResult
+from harvest_convoy.storage.interface import (
+    DecisionRecord,
+    HarvestConfirmation,
+    LedgerEntry,
+    StorageResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +40,18 @@ _CLIENT_CONFIG = Config(connect_timeout=2, read_timeout=3, retries={"max_attempt
 
 
 def _to_decimal(value):
+    # Recurses into dicts/lists, not just top-level values -- needed since
+    # ADR-010's DecisionRecord carries nested dicts (own_claim/
+    # opponent_claim, an AdvocateClaim.model_dump()) containing floats
+    # DynamoDB still requires as Decimal even inside a Map attribute.
+    # Every entity before DecisionRecord was flat, so this recursion is a
+    # pure extension, not a behavior change for anything else.
     if isinstance(value, float):
         return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _to_decimal(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_decimal(v) for v in value]
     return value
 
 
@@ -49,10 +64,15 @@ def _from_decimal(value):
     # deployment verification (ADR-008 follow-up): a JSON float in that
     # position is not a valid Telegram chat_id. An integral Decimal now
     # comes back as int; a genuinely fractional one (area_acres, GDD
-    # values, etc.) still comes back as float.
+    # values, etc.) still comes back as float. Recurses into dicts/lists
+    # for the same reason _to_decimal now does.
     if isinstance(value, Decimal):
         as_int = int(value)
         return as_int if as_int == value else float(value)
+    if isinstance(value, dict):
+        return {k: _from_decimal(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_from_decimal(v) for v in value]
     return value
 
 
@@ -309,6 +329,55 @@ class DynamoStorage:
             for i in items
         ]
 
+    # --- Decision records -- ADR-010 Part 0.5 ---
+
+    def put_decision_record(self, record: DecisionRecord) -> StorageResult:
+        item = {
+            "PK": f"PLOT#{record.plot_id}",
+            "SK": f"DECISION#{record.season_id}#{record.decision_date}",
+            "GSI1PK": f"CLUSTER#{record.cluster_id}",
+            "GSI1SK": f"DECISION#{record.season_id}#{record.decision_date}#{record.plot_id}",
+            **_encode(asdict(record)),
+        }
+        return self._put(item)
+
+    def get_decision_record(
+        self, plot_id: str, season_id: str, decision_date: str
+    ) -> DecisionRecord | None:
+        try:
+            resp = self._table.get_item(
+                Key={"PK": f"PLOT#{plot_id}", "SK": f"DECISION#{season_id}#{decision_date}"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "get_decision_record(%s, %s, %s) failed: %s",
+                plot_id, season_id, decision_date, exc,
+            )
+            return None
+        item = resp.get("Item")
+        if item is None:
+            return None
+        return DecisionRecord(**_decode(_strip_keys(item, extra=("GSI1PK", "GSI1SK"))))
+
+    def get_decision_records_for_plot(
+        self, plot_id: str, season_id: str | None = None
+    ) -> list[DecisionRecord]:
+        sk_prefix = f"DECISION#{season_id}#" if season_id is not None else "DECISION#"
+        items = self._query_pk_prefix(f"PLOT#{plot_id}", sk_prefix)
+        return [
+            DecisionRecord(**_decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK"))))
+            for i in items
+        ]
+
+    def get_decision_records_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[DecisionRecord]:
+        items = self._query_gsi1(cluster_id, f"DECISION#{season_id}#")
+        return [
+            DecisionRecord(**_decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK"))))
+            for i in items
+        ]
+
     # --- internals ---
 
     def _put(self, item: dict) -> StorageResult:
@@ -318,6 +387,25 @@ class DynamoStorage:
         except Exception as exc:  # noqa: BLE001
             logger.error("put_item failed: %s", exc)
             return StorageResult(success=False, error=str(exc))
+
+    def _query_pk_prefix(self, pk: str, sk_prefix: str) -> list[dict]:
+        """Base-table query (no GSI) -- every DecisionRecord for one
+        plot, e.g. explain_decision.py's season-less lookup, is a lookup
+        by the plot's own PK, not by cluster, so this doesn't reuse
+        _query_gsi1."""
+        try:
+            resp = self._table.query(
+                KeyConditionExpression=(
+                    "PK = :pk AND begins_with(SK, :sk_prefix)"
+                ),
+                ExpressionAttributeValues={":pk": pk, ":sk_prefix": sk_prefix},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "base-table query failed for pk %s prefix %s: %s", pk, sk_prefix, exc
+            )
+            return []
+        return resp.get("Items", [])
 
     def _query_gsi1(self, cluster_id: str, sk_prefix: str) -> list[dict]:
         try:

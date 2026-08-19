@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from datetime import date
 
-from harvest_convoy.agents.contracts import AdvocateClaim, PlotFacts
+from harvest_convoy.agents.contracts import AdvocateClaim, PlotFacts, TriggerContext
 from harvest_convoy.agents.coordinator import (
     CLEAR_MARGIN,
     MAX_FAIRNESS_BONUS,
+    _fairness_was_decisive,
     build_plot_facts,
     negotiate_pair,
     run_cluster_with_claims,
@@ -26,6 +27,17 @@ from harvest_convoy.storage.interface import StorageResult
 
 TEST_SEASON_ID = "2026-kuruvai"
 TEST_TODAY = date(2026, 8, 16)
+
+TEST_TRIGGER_CONTEXT = TriggerContext(
+    decision_date=TEST_TODAY.isoformat(),
+    rain_threshold_mm=5.0,
+    forecast_horizon_days=16,
+    usable_harvest_days=3,
+    maturity_gdd_used=1729.2,
+    threshold_source="fallback",
+    machine_capacity_acres_per_day=3.5,
+    capacity_budget_acres=10.5,
+)
 
 
 def _facts(plot_id: str, **overrides) -> PlotFacts:
@@ -231,7 +243,7 @@ def test_run_cluster_too_green_plots_all_concede(tmp_path) -> None:
         return _claim(facts, argument="not ready", concedes=not facts.is_ready)
 
     result = run_cluster_with_claims(
-        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
     )
 
     assert len(result.outcomes) == 2
@@ -258,7 +270,7 @@ def test_run_cluster_produces_exactly_one_escalation_for_a_tied_contested_pair(t
         return _claim(facts, argument="fits", concedes=False)
 
     result = run_cluster_with_claims(
-        plots, decisions, "kamatchipuram", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+        plots, decisions, "kamatchipuram", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
     )
 
     assert len(result.escalations) == 1
@@ -292,7 +304,7 @@ def test_run_cluster_marks_a_fits_plot_harvested(tmp_path) -> None:
         return _claim(facts, argument="fits", concedes=False)
 
     run_cluster_with_claims(
-        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
     )
 
     assert storage.get_harvested_plot_ids("c", TEST_SEASON_ID) == {"p01"}
@@ -307,7 +319,7 @@ def test_run_cluster_does_not_mark_too_green_plots_harvested(tmp_path) -> None:
         return _claim(facts, argument="not ready", concedes=True)
 
     run_cluster_with_claims(
-        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
     )
 
     assert storage.get_harvested_plot_ids("c", TEST_SEASON_ID) == set()
@@ -328,7 +340,7 @@ def test_run_cluster_does_not_mark_a_contested_negotiation_winner_harvested(tmp_
         return _claim(facts, argument="contesting", concedes=False)
 
     result = run_cluster_with_claims(
-        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
     )
 
     assert result.resolved_negotiations == [("p03", "p04")]
@@ -347,7 +359,7 @@ def test_run_cluster_logs_and_continues_when_the_harvest_write_fails(tmp_path, c
 
     with caplog.at_level(logging.ERROR):
         result = run_cluster_with_claims(
-            plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim
+            plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
         )
 
     # Never raises -- the trigger run completes, the FITS outcome still
@@ -355,3 +367,200 @@ def test_run_cluster_logs_and_continues_when_the_harvest_write_fails(tmp_path, c
     assert len(result.outcomes) == 1
     assert result.outcomes[0].outcome == PlotOutcome.FITS
     assert any("HARVEST STATE WRITE FAILED" in r.message for r in caplog.records)
+
+
+# --- ADR-010 Part 0.5: persisted decision records ---
+
+def test_fairness_was_decisive_is_none_when_either_side_conceded() -> None:
+    winner = _claim(_facts("a", urgency=0.1), argument="x", concedes=False)
+    loser = _claim(_facts("b", urgency=0.05), argument="x", concedes=True)
+    assert _fairness_was_decisive(winner, loser, "a", "b", "a") is None
+
+
+def test_fairness_was_decisive_true_when_the_bonus_flips_the_raw_winner() -> None:
+    # A hypothetical the real negotiate_pair() resolution path can never
+    # actually produce (CLEAR_MARGIN is wider than 2x MAX_FAIRNESS_BONUS,
+    # so a flip can never also clear the resolution margin -- see the
+    # completion report) -- tested directly against the pure helper
+    # itself, which makes no assumption about how its inputs arose.
+    claim_a = _claim(_facts("a", urgency=0.35), argument="x", concedes=False, urgency_score=0.35)
+    claim_b = _claim(
+        _facts("b", urgency=0.32), argument="x", concedes=False,
+        urgency_score=0.32, weighted_bump_days=4.0,  # max fairness bonus
+    )
+    # raw: a ahead (0.35 > 0.32); scored: b ahead (0.32+0.04=0.36 > 0.35)
+    assert _fairness_was_decisive(claim_a, claim_b, "a", "b", "b") is True
+
+
+def test_fairness_was_decisive_false_when_the_bonus_does_not_flip_the_winner() -> None:
+    claim_a = _claim(_facts("a", urgency=0.6), argument="x", concedes=False, urgency_score=0.6)
+    claim_b = _claim(
+        _facts("b", urgency=0.1), argument="x", concedes=False,
+        urgency_score=0.1, weighted_bump_days=4.0,
+    )
+    assert _fairness_was_decisive(claim_a, claim_b, "a", "b", "a") is False
+
+
+def test_run_cluster_writes_a_decision_record_for_a_fits_plot(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "storage.json")
+    plots = [_plot("p01")]
+    decisions = [_decision("p01", PlotOutcome.FITS, days_past_maturity=5, urgency=0.5)]
+
+    def get_claim(facts, round_num, opponent_argument):
+        return _claim(facts, argument="fits", concedes=False)
+
+    run_cluster_with_claims(
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
+    )
+
+    record = storage.get_decision_record("p01", TEST_SEASON_ID, TEST_TRIGGER_CONTEXT.decision_date)
+    assert record is not None
+    assert record.outcome == "fits"
+    assert record.accumulated_gdd == 2000.0
+    assert record.maturity_gdd_used == TEST_TRIGGER_CONTEXT.maturity_gdd_used
+    assert record.threshold_source == TEST_TRIGGER_CONTEXT.threshold_source
+    assert record.route_position == 0
+    assert record.opponent_plot_id is None
+    assert record.own_claim is None
+    assert record.resolution is None
+    assert record.resolved_at is not None
+
+
+def test_run_cluster_writes_a_decision_record_for_a_too_green_plot(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "storage.json")
+    plots = [_plot("p05")]
+    decisions = [_decision("p05", PlotOutcome.TOO_GREEN)]
+
+    def get_claim(facts, round_num, opponent_argument):
+        return _claim(facts, argument="not ready", concedes=True)
+
+    run_cluster_with_claims(
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
+    )
+
+    record = storage.get_decision_record("p05", TEST_SEASON_ID, TEST_TRIGGER_CONTEXT.decision_date)
+    assert record is not None
+    assert record.outcome == "too_green"
+    assert record.route_position is None
+    assert record.rounds_run is None
+
+
+def test_run_cluster_writes_cross_referenced_decision_records_for_a_resolved_pair(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "storage.json")
+    plots = [_plot("p03"), _plot("p04")]
+    decisions = [
+        _decision("p03", PlotOutcome.CONTESTED, days_past_maturity=10, urgency=0.6),
+        _decision("p04", PlotOutcome.CONTESTED, days_past_maturity=2, urgency=0.1),
+    ]
+
+    def get_claim(facts, round_num, opponent_argument):
+        return _claim(facts, argument=f"contesting {facts.plot_id}", concedes=False)
+
+    run_cluster_with_claims(
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
+    )
+
+    record_a = storage.get_decision_record("p03", TEST_SEASON_ID, TEST_TRIGGER_CONTEXT.decision_date)
+    record_b = storage.get_decision_record("p04", TEST_SEASON_ID, TEST_TRIGGER_CONTEXT.decision_date)
+
+    assert record_a.resolution == "won"
+    assert record_b.resolution == "lost"
+    assert record_a.opponent_plot_id == "p04"
+    assert record_b.opponent_plot_id == "p03"
+    # Cross-referenced, not both copies of the same claim.
+    assert record_a.own_claim["plot_id"] == "p03"
+    assert record_a.opponent_claim["plot_id"] == "p04"
+    assert record_b.own_claim["plot_id"] == "p04"
+    assert record_b.opponent_claim["plot_id"] == "p03"
+    assert record_a.rounds_run == 1
+    # No fairness weight on either side -- the resolution came from raw
+    # urgency alone, so the bonus (zero either way) could not have been
+    # decisive.
+    assert record_a.fairness_decisive is False
+    assert record_a.resolved_at is not None
+
+
+def test_run_cluster_writes_escalated_decision_records_pending_human_resolution(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "storage.json")
+    plots = [_plot("p03"), _plot("p04")]
+    decisions = [
+        _decision("p03", PlotOutcome.CONTESTED, days_past_maturity=6, urgency=0.3),
+        _decision("p04", PlotOutcome.CONTESTED, days_past_maturity=0, urgency=0.0),
+    ]
+
+    def get_claim(facts, round_num, opponent_argument):
+        # Tied regardless of round -- forces escalation, same trick
+        # test_run_cluster_produces_exactly_one_escalation_for_a_tied_contested_pair
+        # uses.
+        return _claim(facts, argument=f"round {round_num}", concedes=False, urgency_score=0.5)
+
+    result = run_cluster_with_claims(
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
+    )
+
+    assert len(result.escalations) == 1
+    assert result.escalations[0].decision_date == TEST_TRIGGER_CONTEXT.decision_date
+
+    for plot_id in ("p03", "p04"):
+        record = storage.get_decision_record(plot_id, TEST_SEASON_ID, TEST_TRIGGER_CONTEXT.decision_date)
+        assert record.resolution == "escalated"
+        assert record.resolved_at is None
+        assert record.rounds_run == 3
+
+
+def test_run_cluster_writes_a_decision_record_for_the_odd_contested_plot(tmp_path) -> None:
+    """Three contested plots, no even pairing -- the last one never enters
+    negotiate_pair() at all (ADR-003 Decision 4's pairwise-only scope
+    limit), but still gets a DecisionRecord so it isn't invisible to a
+    later reader."""
+    storage = FileStorage(tmp_path / "storage.json")
+    plots = [_plot("p03"), _plot("p04"), _plot("p07")]
+    decisions = [
+        _decision("p03", PlotOutcome.CONTESTED, days_past_maturity=10, urgency=0.6),
+        _decision("p04", PlotOutcome.CONTESTED, days_past_maturity=2, urgency=0.1),
+        _decision("p07", PlotOutcome.CONTESTED, days_past_maturity=3, urgency=0.2),
+    ]
+
+    def get_claim(facts, round_num, opponent_argument):
+        return _claim(facts, argument="contesting", concedes=False)
+
+    run_cluster_with_claims(
+        plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
+    )
+
+    record = storage.get_decision_record("p07", TEST_SEASON_ID, TEST_TRIGGER_CONTEXT.decision_date)
+    assert record is not None
+    assert record.resolution == "contested_no_partner_this_round"
+    assert record.opponent_plot_id is None
+    assert record.resolved_at is not None
+
+
+class _FailingDecisionStorage(FileStorage):
+    """Every put_decision_record call fails -- tests the coordinator's
+    degrade-and-log path for this write the same way _FailingMarkStorage
+    already does for mark_plot_harvested."""
+
+    def put_decision_record(self, record):
+        return StorageResult(success=False, error="simulated write failure")
+
+
+def test_run_cluster_logs_and_continues_when_the_decision_record_write_fails(tmp_path, caplog) -> None:
+    import logging
+
+    storage = _FailingDecisionStorage(tmp_path / "storage.json")
+    plots = [_plot("p01")]
+    decisions = [_decision("p01", PlotOutcome.FITS, days_past_maturity=5, urgency=0.5)]
+
+    def get_claim(facts, round_num, opponent_argument):
+        return _claim(facts, argument="fits", concedes=False)
+
+    with caplog.at_level(logging.ERROR):
+        result = run_cluster_with_claims(
+            plots, decisions, "c", storage, TEST_SEASON_ID, TEST_TODAY, get_claim, TEST_TRIGGER_CONTEXT
+        )
+
+    # Never raises -- the trigger run completes and the plot is still
+    # marked harvested; only the audit record was lost.
+    assert len(result.outcomes) == 1
+    assert storage.get_harvested_plot_ids("c", TEST_SEASON_ID) == {"p01"}
+    assert any("DECISION RECORD WRITE FAILED" in r.message for r in caplog.records)

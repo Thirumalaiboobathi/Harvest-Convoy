@@ -15,8 +15,8 @@ TOO_GREEN outcomes from the solver are never rewritten here.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timezone
 from typing import Callable
 
 from harvest_convoy.agents.advocate import get_advocate_claim
@@ -24,6 +24,7 @@ from harvest_convoy.agents.contracts import (
     AdvocateClaim,
     EscalationPayload,
     PlotFacts,
+    TriggerContext,
     classify_rain_vulnerability,
 )
 from harvest_convoy.agronomy import crop_params
@@ -32,6 +33,7 @@ from harvest_convoy.observability.otel import get_tracer
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome
 from harvest_convoy.storage import Storage
 from harvest_convoy.storage.fairness import was_bumped_last_season, weighted_bump_days
+from harvest_convoy.storage.interface import DecisionRecord
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer(__name__)
@@ -101,6 +103,29 @@ def _fairness_bonus(claim: AdvocateClaim) -> float:
 
 def _score(claim: AdvocateClaim) -> float:
     return claim.urgency_score + _fairness_bonus(claim)
+
+
+def _fairness_was_decisive(
+    claim_a: AdvocateClaim, claim_b: AdvocateClaim,
+    plot_a_id: str, plot_b_id: str, actual_winner: str,
+) -> bool | None:
+    """None if the round was resolved by a concession (a model judgment,
+    not a score comparison at all) -- otherwise: would the raw
+    urgency_score alone (no fairness bonus) have picked a different
+    winner than the actual (bonus-included) score did? Pure arithmetic
+    over two already-computed claims, reusing this module's own
+    _score()/_fairness_bonus() -- a post-hoc check of the comparison that
+    already ran, not a new source of truth. See ADR-010 Part 0.5."""
+    if claim_a.concedes or claim_b.concedes:
+        return None
+    scored_winner = plot_a_id if _score(claim_a) > _score(claim_b) else plot_b_id
+    if actual_winner != scored_winner:
+        # Shouldn't arise given how negotiate_pair() derives its winner --
+        # an explicit None instead of a confidently wrong True/False if it
+        # ever does.
+        return None
+    raw_winner = plot_a_id if claim_a.urgency_score >= claim_b.urgency_score else plot_b_id
+    return raw_winner != scored_winner
 
 
 def negotiate_pair(
@@ -182,6 +207,46 @@ class ClusterResult:
     escalations: list[EscalationPayload]
 
 
+def _base_decision_record(
+    d: PlotDecision, farmer_id: str, cluster_id: str, season_id: str,
+    trigger_context: TriggerContext,
+) -> DecisionRecord:
+    """The deterministic-core fields every DecisionRecord shares,
+    regardless of outcome -- negotiation fields are added by the caller
+    for a contested plot. See ADR-010 Part 0.5."""
+    return DecisionRecord(
+        plot_id=d.plot_id, farmer_id=farmer_id, cluster_id=cluster_id,
+        season_id=season_id, decision_date=trigger_context.decision_date,
+        accumulated_gdd=d.accumulated_gdd,
+        maturity_gdd_used=trigger_context.maturity_gdd_used,
+        threshold_source=trigger_context.threshold_source,
+        outcome=d.outcome.value,
+        days_past_maturity=d.days_past_maturity,
+        urgency=d.urgency,
+        route_position=d.route_position,
+        rain_threshold_mm=trigger_context.rain_threshold_mm,
+        forecast_horizon_days=trigger_context.forecast_horizon_days,
+        usable_harvest_days=trigger_context.usable_harvest_days,
+        machine_capacity_acres_per_day=trigger_context.machine_capacity_acres_per_day,
+        capacity_budget_acres=trigger_context.capacity_budget_acres,
+    )
+
+
+def _write_decision_record(storage: Storage, record: DecisionRecord) -> None:
+    """Never blocks or crashes the run -- same discipline ADR-009 Part 1.5
+    established for mark_plot_harvested. A lost DecisionRecord degrades
+    one plot's future auditability, not the scheduling run it's part of."""
+    result = storage.put_decision_record(record)
+    if not result.success:
+        logger.error(
+            "DECISION RECORD WRITE FAILED: plot=%s cluster=%s season=%s "
+            "decision_date=%s -- not persisted, this decision will not be "
+            "replayable later: %s",
+            record.plot_id, record.cluster_id, record.season_id,
+            record.decision_date, result.error,
+        )
+
+
 def run_cluster(
     plots: list[Plot],
     decisions: list[PlotDecision],
@@ -189,6 +254,7 @@ def run_cluster(
     storage: Storage,
     season_id: str,
     today: date,
+    trigger_context: TriggerContext,
     *,
     model=None,
 ) -> ClusterResult:
@@ -201,7 +267,8 @@ def run_cluster(
         )
 
     return run_cluster_with_claims(
-        plots, decisions, cluster_id, storage, season_id, today, default_get_claim
+        plots, decisions, cluster_id, storage, season_id, today,
+        default_get_claim, trigger_context,
     )
 
 
@@ -213,14 +280,17 @@ def run_cluster_with_claims(
     season_id: str,
     today: date,
     get_claim: ClaimProvider,
+    trigger_context: TriggerContext,
 ) -> ClusterResult:
     """Same orchestration, with an injectable claim provider -- used for
     deterministic tests and by run_cluster() for the real agent path.
 
     season_id/today (ADR-009 Part 1.5): needed to mark a FITS plot
-    harvested at the point it's dispatched -- see the loop below. Both
-    are already resolved by watcher.py before it calls in here, so this
-    is a threading change, not a new dependency.
+    harvested at the point it's dispatched -- see the loop below.
+    trigger_context (ADR-010 Part 0.5): the weather/capacity/threshold
+    context this trigger day resolved, needed to persist a DecisionRecord
+    per plot. All three are already resolved by watcher.py before it
+    calls in here, so this is a threading change, not a new dependency.
     """
     plots_by_id = {p.plot_id: p for p in plots}
 
@@ -242,6 +312,15 @@ def run_cluster_with_claims(
             facts = build_plot_facts(plots_by_id[d.plot_id], d, storage)
             claim = get_claim(facts, 1, None)
             outcomes.append(CoordinatorOutcome(d.plot_id, d.outcome, claim))
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            _write_decision_record(
+                storage,
+                replace(
+                    _base_decision_record(d, facts.farmer_id, cluster_id, season_id, trigger_context),
+                    resolved_at=now_iso,
+                ),
+            )
 
             if d.outcome == PlotOutcome.FITS:
                 # The coordinator dispatching a plot IS the harvested
@@ -269,6 +348,21 @@ def run_cluster_with_claims(
             outcomes.append(CoordinatorOutcome(facts_a.plot_id, PlotOutcome.CONTESTED, result.claim_a))
             outcomes.append(CoordinatorOutcome(facts_b.plot_id, PlotOutcome.CONTESTED, result.claim_b))
 
+            record_a = replace(
+                _base_decision_record(d_a, facts_a.farmer_id, cluster_id, season_id, trigger_context),
+                opponent_plot_id=facts_b.plot_id,
+                own_claim=result.claim_a.model_dump(),
+                opponent_claim=result.claim_b.model_dump(),
+                rounds_run=result.rounds_used,
+            )
+            record_b = replace(
+                _base_decision_record(d_b, facts_b.farmer_id, cluster_id, season_id, trigger_context),
+                opponent_plot_id=facts_a.plot_id,
+                own_claim=result.claim_b.model_dump(),
+                opponent_claim=result.claim_a.model_dump(),
+                rounds_run=result.rounds_used,
+            )
+
             if result.escalated:
                 logger.info(
                     "escalating %s vs %s after %d rounds",
@@ -283,8 +377,14 @@ def run_cluster_with_claims(
                         claim_b=result.claim_b,
                         rounds_run=result.rounds_used,
                         reason="No clear resolution after max negotiation rounds.",
+                        decision_date=trigger_context.decision_date,
                     )
                 )
+                # resolution="escalated", resolved_at=None -- webhook.py
+                # updates both records once a human resolves it. See
+                # ADR-010 Part 0.5 Decision D.
+                _write_decision_record(storage, replace(record_a, resolution="escalated"))
+                _write_decision_record(storage, replace(record_b, resolution="escalated"))
             else:
                 loser_id = (
                     facts_b.plot_id
@@ -293,11 +393,45 @@ def run_cluster_with_claims(
                 )
                 resolved_negotiations.append((result.winner_plot_id, loser_id))
 
+                fairness_decisive = _fairness_was_decisive(
+                    result.claim_a, result.claim_b,
+                    facts_a.plot_id, facts_b.plot_id, result.winner_plot_id,
+                )
+                now_iso = datetime.now(timezone.utc).isoformat()
+                _write_decision_record(
+                    storage,
+                    replace(
+                        record_a,
+                        resolution="won" if result.winner_plot_id == facts_a.plot_id else "lost",
+                        fairness_decisive=fairness_decisive,
+                        resolved_at=now_iso,
+                    ),
+                )
+                _write_decision_record(
+                    storage,
+                    replace(
+                        record_b,
+                        resolution="won" if result.winner_plot_id == facts_b.plot_id else "lost",
+                        fairness_decisive=fairness_decisive,
+                        resolved_at=now_iso,
+                    ),
+                )
+
         if len(contested) % 2 == 1:
             d = contested[-1]
             facts = build_plot_facts(plots_by_id[d.plot_id], d, storage)
             claim = get_claim(facts, 1, None)
             outcomes.append(CoordinatorOutcome(d.plot_id, PlotOutcome.CONTESTED, claim))
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            _write_decision_record(
+                storage,
+                replace(
+                    _base_decision_record(d, facts.farmer_id, cluster_id, season_id, trigger_context),
+                    resolution="contested_no_partner_this_round",
+                    resolved_at=now_iso,
+                ),
+            )
 
         return ClusterResult(
             outcomes=sorted(outcomes, key=lambda o: o.plot_id),

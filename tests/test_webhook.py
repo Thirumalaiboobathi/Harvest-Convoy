@@ -4,6 +4,7 @@ from harvest_convoy.agents.contracts import AdvocateClaim, EscalationPayload
 from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.storage.fairness import get_ledger_history
 from harvest_convoy.storage.file_storage import FileStorage
+from harvest_convoy.storage.interface import DecisionRecord
 from harvest_convoy.telegram import messages_ta, webhook
 from harvest_convoy.telegram.client import SendResult
 from harvest_convoy.telegram.registration import RegistrationState, save_state
@@ -200,6 +201,97 @@ def test_callback_resolution_writes_a_real_ledger_entry(tmp_path) -> None:
     assert len(winner_history) == 1
     assert winner_history[0].days_bumped == 0
     assert winner_history[0].outcome == "won"
+
+
+def _decision_record_for(plot_id: str, opponent_id: str, cluster_id: str, decision_date: str) -> DecisionRecord:
+    return DecisionRecord(
+        plot_id=plot_id, farmer_id=f"farmer-{plot_id}", cluster_id=cluster_id,
+        season_id=SEASON, decision_date=decision_date,
+        accumulated_gdd=1681.4, maturity_gdd_used=1637.0, threshold_source="calibrated",
+        outcome="contested", days_past_maturity=6, urgency=0.3, route_position=None,
+        rain_threshold_mm=5.0, forecast_horizon_days=16, usable_harvest_days=3,
+        machine_capacity_acres_per_day=3.5, capacity_budget_acres=10.5,
+        opponent_plot_id=opponent_id, own_claim={"plot_id": plot_id}, rounds_run=3,
+        resolution="escalated",
+    )
+
+
+def test_callback_resolution_updates_the_decision_record_to_the_human_outcome(tmp_path) -> None:
+    """ADR-010 Part 0.5 Decision D: a human tap must update the
+    DecisionRecord the coordinator wrote at trigger time (resolution=
+    "escalated", resolved_at=None) to its final outcome -- and must never
+    record fairness_decisive as True/False, since a human tap is not a
+    score comparison."""
+    storage = FileStorage(tmp_path / "storage.json")
+    client = _FakeClient()
+    farmer_a = _farmer("p03", 111, name="Kannan Raja")
+    farmer_b = _farmer("p04", 222, name="Meena Subramani")
+    plots = {"p03": (farmer_a, _plot("p03")), "p04": (farmer_b, _plot("p04"))}
+    decision_date = "2026-09-09"
+
+    storage.put_decision_record(_decision_record_for("p03", "p04", "decision-test", decision_date))
+    storage.put_decision_record(_decision_record_for("p04", "p03", "decision-test", decision_date))
+
+    escalation = EscalationPayload(
+        cluster_id="decision-test", plot_a_id="p03", plot_b_id="p04",
+        claim_a=_claim("p03", days_past_maturity=6),
+        claim_b=_claim("p04", days_past_maturity=0, bumped=True),
+        rounds_run=3, reason="tied", decision_date=decision_date,
+    )
+    webhook.register_escalation(escalation)
+
+    update = {
+        "callback_query": {
+            "id": "cbq-decision",
+            "data": "resolve:decision-test:p03:p04:p03",
+            "message": {"chat": {"id": 999}, "message_id": 1},
+        }
+    }
+    webhook.handle_update(
+        client, update, storage, SEASON, lookup_farmer_for_plot=lambda pid: plots.get(pid)
+    )
+
+    winner_record = storage.get_decision_record("p03", SEASON, decision_date)
+    loser_record = storage.get_decision_record("p04", SEASON, decision_date)
+    assert winner_record.resolution == "escalated_won"
+    assert winner_record.resolved_at is not None
+    assert winner_record.fairness_decisive is None
+    assert loser_record.resolution == "escalated_lost"
+    assert loser_record.resolved_at is not None
+
+
+def test_callback_resolution_without_a_decision_date_does_not_crash(tmp_path) -> None:
+    """An EscalationPayload with no decision_date (the default for a
+    payload built before ADR-010 Part 0.5, or hand-built without it, as
+    every other EscalationPayload in this test file is) must still
+    resolve and notify both farmers normally -- it just can't update a
+    DecisionRecord it has no key for."""
+    storage = FileStorage(tmp_path / "storage.json")
+    client = _FakeClient()
+    farmer_a = _farmer("p03", 111, name="Kannan Raja")
+    farmer_b = _farmer("p04", 222, name="Meena Subramani")
+    plots = {"p03": (farmer_a, _plot("p03")), "p04": (farmer_b, _plot("p04"))}
+
+    escalation = EscalationPayload(
+        cluster_id="no-date-test", plot_a_id="p03", plot_b_id="p04",
+        claim_a=_claim("p03", days_past_maturity=6),
+        claim_b=_claim("p04", days_past_maturity=0, bumped=True),
+        rounds_run=3, reason="tied",
+    )
+    webhook.register_escalation(escalation)
+
+    update = {
+        "callback_query": {
+            "id": "cbq-no-date",
+            "data": "resolve:no-date-test:p03:p04:p03",
+            "message": {"chat": {"id": 999}, "message_id": 1},
+        }
+    }
+    webhook.handle_update(
+        client, update, storage, SEASON, lookup_farmer_for_plot=lambda pid: plots.get(pid)
+    )
+
+    assert len(client.sent_messages) == 2
 
 
 def test_registered_escalation_gives_loser_a_specific_reason(tmp_path) -> None:

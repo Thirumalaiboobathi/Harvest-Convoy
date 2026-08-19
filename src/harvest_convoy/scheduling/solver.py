@@ -108,6 +108,29 @@ def assess_plot(
     )
 
 
+def resolve_maturity_gdd(cluster: Cluster) -> tuple[float, str]:
+    """Returns (maturity_gdd, "calibrated" | "fallback"). Extracted out of
+    solve() (ADR-010 Part 0.5) so watcher.py can resolve and log the exact
+    same threshold, the exact same way, without duplicating the
+    None-means-fallback rule or its warning wording in a second place --
+    watcher.py needs this value up front to build a TriggerContext before
+    solve() runs, not just after.
+    """
+    maturity_gdd = cluster.maturity_gdd_override
+    if maturity_gdd is None:
+        maturity_gdd = crop_params.MATURITY_GDD_ESTIMATED
+        logger.warning(
+            "MATURITY THRESHOLD FALLBACK: cluster=%s has no derived "
+            "maturity_gdd_override -- using the global Theni-reference "
+            "constant (%.1f GDD, see crop_params.MATURITY_GDD_ESTIMATED) "
+            "instead of this cluster's own climatology. Run the seed "
+            "script with --calibrate to derive one for this cluster.",
+            cluster.cluster_id, maturity_gdd,
+        )
+        return maturity_gdd, "fallback"
+    return maturity_gdd, "calibrated"
+
+
 def solve(
     plots: list[Plot],
     plot_days: dict[str, list[DailyTemperature]],
@@ -117,6 +140,7 @@ def solve(
     today: date,
     *,
     harvested_plot_ids: frozenset[str] = frozenset(),
+    maturity_gdd_resolved: tuple[float, str] | None = None,
 ) -> list[PlotDecision]:
     """Full scheduling pass over a cluster's plots for one weather trigger.
 
@@ -144,21 +168,20 @@ def solve(
     against its own climatology (agronomy/calibration.py); otherwise
     falls back to the global, Theni-derived
     `crop_params.MATURITY_GDD_ESTIMATED` and logs a loud warning so an
-    uncalibrated cluster is never a silent assumption.
+    uncalibrated cluster is never a silent assumption. `maturity_gdd_resolved`
+    lets a caller that already resolved this (watcher.py, building a
+    TriggerContext before calling solve() -- ADR-010 Part 0.5) pass the
+    same `(value, source)` pair through instead of solve() re-resolving
+    and re-logging the fallback warning a second time for one trigger;
+    every other caller (tests, backtest, trigger_scenario.py) omits it and
+    solve() resolves it here exactly as before.
     """
     plots_by_id = {p.plot_id: p for p in plots}
 
-    maturity_gdd = cluster.maturity_gdd_override
-    if maturity_gdd is None:
-        maturity_gdd = crop_params.MATURITY_GDD_ESTIMATED
-        logger.warning(
-            "MATURITY THRESHOLD FALLBACK: cluster=%s has no derived "
-            "maturity_gdd_override -- using the global Theni-reference "
-            "constant (%.1f GDD, see crop_params.MATURITY_GDD_ESTIMATED) "
-            "instead of this cluster's own climatology. Run the seed "
-            "script with --calibrate to derive one for this cluster.",
-            cluster.cluster_id, maturity_gdd,
-        )
+    if maturity_gdd_resolved is not None:
+        maturity_gdd, _source = maturity_gdd_resolved
+    else:
+        maturity_gdd, _source = resolve_maturity_gdd(cluster)
 
     harvested = [
         PlotDecision(
