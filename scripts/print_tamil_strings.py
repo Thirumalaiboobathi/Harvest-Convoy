@@ -209,7 +209,7 @@ def main() -> None:
     print("As it actually renders, appended to COMPLETE_MESSAGE:")
     print(messages_ta.COMPLETE_MESSAGE + " " + messages_ta.projected_maturity_sentence(sample_date))
 
-    _section("NEW (ADR-009 Part 4) -- post-harvest drying-window alert -- DRAFT, unreviewed, TWO CANDIDATE WORDINGS")
+    _section("NEW (ADR-009 Part 4) -- post-harvest drying-window alert -- DRAFT, unreviewed")
     print(
         "*** moisture=14, msp=2300 below are FAKE, ILLUSTRATIVE NUMBERS "
         "hardcoded in THIS SCRIPT to show what the message looks like "
@@ -218,7 +218,8 @@ def main() -> None:
         "at the end of this section, which has no numbers at all. ***"
     )
     print()
-    print("--- Version A: single message (current implementation) ---")
+    print("Two lines, chosen over an earlier single-paragraph draft: the")
+    print("rain warning stands alone; moisture/MSP context is a separate line.")
     print()
     print("[illustrative] moisture=14, msp=2300:")
     print(messages_ta.drying_window_alert(moisture=14, msp=2300))
@@ -229,30 +230,11 @@ def main() -> None:
     print("[illustrative] moisture=None, msp=2300:")
     print(messages_ta.drying_window_alert(moisture=None, msp=2300))
     print()
-    print("--- Version B: split into two lines (candidate, not yet chosen) ---")
-    print()
-    print("[illustrative] moisture=14, msp=2300:")
-    print(messages_ta.drying_window_alert_split(moisture=14, msp=2300))
-    print()
-    print("[illustrative] moisture=14, msp=None:")
-    print(messages_ta.drying_window_alert_split(moisture=14, msp=None))
-    print()
-    print("[illustrative] moisture=None, msp=2300:")
-    print(messages_ta.drying_window_alert_split(moisture=None, msp=2300))
-    print()
     print(
         "--- REAL current state (market_params.py's actual values right "
         "now -- both None, no illustrative numbers) ---"
     )
-    print()
-    print("Version A:")
     print(messages_ta.drying_window_alert(
-        moisture=market_params.DPC_MOISTURE_THRESHOLD_PERCENT,
-        msp=market_params.MSP_PADDY_COMMON_PER_QUINTAL,
-    ))
-    print()
-    print("Version B:")
-    print(messages_ta.drying_window_alert_split(
         moisture=market_params.DPC_MOISTURE_THRESHOLD_PERCENT,
         msp=market_params.MSP_PADDY_COMMON_PER_QUINTAL,
     ))

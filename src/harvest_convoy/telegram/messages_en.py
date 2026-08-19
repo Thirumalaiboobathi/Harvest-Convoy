@@ -131,6 +131,9 @@ def not_ready(area_acres: float, area_unit: str) -> str:
 def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
     """Sent at most once per confirmed harvest's 4-day drying window
     (ADR-009 Part 4), only when rain enters the near-term forecast.
+    Two lines, chosen over a single-paragraph draft after review: the
+    urgent rain-warning stands alone on its own line so it doesn't
+    compete for attention with the moisture/MSP context on the second.
     Worded to cover a period ("over the next few days"), not a moment --
     the alert may fire on day 1 for rain arriving day 3, or after a dry
     gap, and must stay accurate either way. `moisture`/`msp` come from
@@ -146,33 +149,6 @@ def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
     farmer expecting the wrong rate at the DPC is a real harm, not a
     wording nicety.
     """
-    if moisture is not None:
-        core = (
-            "Rain is expected over the next few days. Cover your "
-            f"harvested grain -- paddy needs to dry to about {moisture}% "
-            "moisture before a DPC will accept it at full price, and "
-            "rain during drying can cause discolouration and sprouting."
-        )
-    else:
-        core = (
-            "Rain is expected over the next few days. Cover your "
-            "harvested grain -- paddy needs to dry before a DPC will "
-            "accept it at full price, and rain during drying can cause "
-            "discolouration and sprouting."
-        )
-    if msp is not None:
-        core += f" Common-grade MSP is Rs {msp} per quintal."
-    return core
-
-
-def drying_window_alert_split(*, moisture: int | None, msp: int | None) -> str:
-    """Alternate candidate wording (not yet chosen): the urgent
-    rain-warning stands alone as its own line; moisture/MSP context is a
-    second line, so the two don't compete for attention in one
-    paragraph. Both this and drying_window_alert() exist so real
-    rendered output can be compared before picking one -- see
-    scripts/print_tamil_strings.py. Same grade-naming and
-    never-a-guessed-number rules as drying_window_alert()."""
     line1 = (
         "Rain is expected over the next few days. Cover your harvested "
         "grain -- rain during drying can cause discolouration and sprouting."

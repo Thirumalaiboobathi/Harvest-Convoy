@@ -978,6 +978,47 @@ answering genuinely different questions from the same data.
 proving the MSP/moisture independent-omission logic and the "never a
 payment promise" wording constraint directly.
 
+### Two review findings, fixed before any real MSP/moisture figures are set
+
+1. **Grade mismatch, a real-harm bug, not a wording nicety.**
+   `MSP_PADDY_COMMON_PER_QUINTAL` is specifically the Common-grade
+   figure — Grade A carries a different MSP, and this system has no way
+   to know which grade a given farmer's paddy will be assessed at. The
+   original draft said "MSP for this grade" / "இந்த தரத்திற்கான", which
+   wrongly implied the figure applies to whatever grade the farmer's own
+   paddy turns out to be. Fixed to name "Common grade" / "காமன் தரம்"
+   explicitly, in both languages, everywhere the MSP sentence appears.
+2. **A reporting mistake, not a code defect, caught on review.** A
+   sample render used `moisture=14, msp=2300` — hardcoded illustrative
+   literals in `scripts/print_tamil_strings.py`, clearly labeled there
+   as illustrative — but the label was dropped when the sample was
+   quoted back in conversation, making it look like a real number had
+   reached the message path. It never did:
+   `agronomy/market_params.py`'s real values stayed `None` throughout,
+   and the same script run also printed the real-state (both-`None`)
+   render alongside it, with zero digits. Fixed by strengthening the
+   script's labeling (an unmissable banner plus `[illustrative]` tags on
+   every fake-number line) so a future summary can't drop it as easily,
+   and by re-confirming the real-state render live.
+
+Also confirmed directly, with a new test: the confirmation prompt's
+area interpolates with its unit (`harvest_confirmation_prompt` renders
+"2.5 ஏக்கர்", never a bare "2.5") — a third review question, answered
+without needing a code change.
+
+### Wording choice: split into two lines, not one paragraph
+
+Drafted a second candidate, `drying_window_alert_split` (rain warning
+alone on line 1, moisture/MSP context on line 2), alongside the
+original single-paragraph version, rendered both through the real
+functions via `scripts/print_tamil_strings.py`, and presented both for
+a choice: **the split version was picked.** The single-paragraph
+version was then removed rather than kept alongside an unused
+alternative — `drying_window_alert()` in both message modules is now
+the two-line version; `notify.build_drying_window_alert_text` needed no
+change since the function name didn't change. Net test count after
+consolidating from two candidates back to one: 394.
+
 ---
 
 ## Backtest re-run after Parts 2–4
