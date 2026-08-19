@@ -17,18 +17,36 @@ All display strings live in messages_ta.py/messages_en.py -- this module
 holds only the state machine and input parsing (which must accept Tamil
 script AND Tanglish, but isn't itself a "string" in the localization
 sense).
+
+Persistence (ADR-009 Part 3): advance_registration() above stays a pure
+function, unchanged -- persistence and the live maturity-projection call
+happen only in handle_incoming(), the stateful wrapper, at the exact
+moment a farmer's step transitions into COMPLETE. A farmer's Telegram-
+provided first_name/username (IncomingMessage.sender_name, threaded from
+webhook.parse_incoming_message) becomes Farmer.name -- the four-message
+flow itself never asks for one, and Telegram already gives it to us for
+free on every message, so asking would fail the "does the agent already
+know enough to speak first" test in reverse.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 from dataclasses import dataclass, replace
 from datetime import date
 from enum import Enum
 from typing import Literal
 
+from harvest_convoy.agronomy.calibration import project_maturity_for_plot
+from harvest_convoy.models import Farmer, Plot
+from harvest_convoy.storage import Storage
 from harvest_convoy.telegram import messages_en, messages_ta
 from harvest_convoy.telegram.client import TelegramClient
+from harvest_convoy.weather.openmeteo import WeatherError
+
+logger = logging.getLogger(__name__)
 
 CROP = "paddy"
 VARIETY = "ADT45"
@@ -75,6 +93,9 @@ class RegistrationState:
 class IncomingMessage:
     text: str | None = None
     location: tuple[float, float] | None = None  # (lat, lon)
+    # Telegram's own User.first_name/username (see webhook.parse_incoming_message)
+    # -- becomes Farmer.name at the COMPLETE transition. See ADR-009 Part 3.
+    sender_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -331,13 +352,102 @@ def save_state(state: RegistrationState) -> None:
     _STATE_STORE[state.chat_id] = state
 
 
-def handle_incoming(chat_id: int, incoming: IncomingMessage) -> OutboundMessage:
+def _persist_completed_registration(
+    new_state: RegistrationState, incoming: IncomingMessage, storage: Storage
+) -> str:
+    """Called only on the step-transitions-into-COMPLETE edge. Persists a
+    Farmer/Plot with deterministic IDs (farmer-{chat_id}/plot-{chat_id})
+    -- an upsert, so a second completed registration from the same
+    chat_id updates them rather than duplicating or being rejected, per
+    ADR-009's Prerequisite: one Telegram chat is one farmer's one active
+    plot in this system's model, whether the reason for registering
+    again is a typo five minutes later or a new season five months
+    later. Then tries to compose the one-sentence maturity projection.
+
+    Never raises, never blocks registration: cluster misconfiguration,
+    a storage write failure, or a WeatherError all degrade to returning
+    the plain COMPLETE_MESSAGE, logged loudly. The farmer still completes
+    registration from their point of view either way.
+    """
+    lang = _lang_module(new_state.language)
+    cluster_id = os.environ.get("HARVEST_CONVOY_CLUSTER_ID")
+    if not cluster_id:
+        logger.error(
+            "HARVEST_CONVOY_CLUSTER_ID is not set -- chat_id=%s completed "
+            "registration but nothing was persisted",
+            new_state.chat_id,
+        )
+        return lang.COMPLETE_MESSAGE
+
+    cluster = storage.get_cluster(cluster_id)
+    if cluster is None:
+        logger.error(
+            "HARVEST_CONVOY_CLUSTER_ID=%s not found in storage -- chat_id=%s "
+            "completed registration but nothing was persisted",
+            cluster_id, new_state.chat_id,
+        )
+        return lang.COMPLETE_MESSAGE
+
+    name = (incoming.sender_name or "").strip() or f"Farmer {new_state.chat_id}"
+    farmer = Farmer(
+        farmer_id=f"farmer-{new_state.chat_id}", name=name, cluster_id=cluster_id,
+        telegram_chat_id=new_state.chat_id, language=new_state.language,
+    )
+    plot = Plot(
+        plot_id=f"plot-{new_state.chat_id}", farmer_id=farmer.farmer_id,
+        cluster_id=cluster_id, lat=new_state.lat, lon=new_state.lon,
+        crop=CROP, variety=VARIETY, transplant_date=new_state.transplant_date,
+        area_acres=new_state.area_acres, area_unit=new_state.area_unit,
+    )
+    farmer_result = storage.put_farmer(farmer)
+    plot_result = storage.put_plot(plot)
+    if not farmer_result.success or not plot_result.success:
+        logger.error(
+            "failed to persist registration for chat_id=%s: farmer=%s plot=%s",
+            new_state.chat_id, farmer_result.error, plot_result.error,
+        )
+        return lang.COMPLETE_MESSAGE
+
+    try:
+        projected_iso = project_maturity_for_plot(plot, cluster)
+        formatted = lang.format_date(date.fromisoformat(projected_iso))
+        return lang.COMPLETE_MESSAGE + " " + lang.projected_maturity_sentence(formatted)
+    except WeatherError as exc:
+        logger.warning(
+            "maturity projection failed for chat_id=%s: %s -- registration "
+            "still completed, message omits the projection sentence",
+            new_state.chat_id, exc,
+        )
+        return lang.COMPLETE_MESSAGE
+
+
+def handle_incoming(
+    chat_id: int, incoming: IncomingMessage, storage: Storage | None = None
+) -> OutboundMessage:
     """Stateful entrypoint webhook.py calls: loads state, advances it,
     persists it, returns the outbound message (text + optional keyboard)
-    to send."""
+    to send.
+
+    storage (ADR-009 Part 3): optional. Real callers (webhook.py) always
+    pass one; pure state-machine tests that never reach COMPLETE can omit
+    it -- persistence is simply skipped, not defaulted to some other
+    behavior. When the step transitions into COMPLETE and storage was
+    given, this is also where the Farmer/Plot get persisted and the
+    maturity-projection sentence gets composed -- see
+    _persist_completed_registration above.
+    """
     state = get_or_create_state(chat_id)
     new_state, outbound = advance_registration(state, incoming)
     save_state(new_state)
+
+    if (
+        storage is not None
+        and state.step != RegistrationStep.COMPLETE
+        and new_state.step == RegistrationStep.COMPLETE
+    ):
+        text = _persist_completed_registration(new_state, incoming, storage)
+        outbound = replace(outbound, text=text)
+
     return outbound
 
 

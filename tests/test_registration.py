@@ -338,3 +338,176 @@ def test_acre_unit_tanglish_word_ekar() -> None:
     new_state, _ = advance_registration(state, IncomingMessage(text="18 May 2026, 2 ekar"))
     assert new_state.area_acres == 2.0
     assert new_state.area_unit == "acre"
+
+
+# ---------------------------------------------------------------------
+# Persistence prerequisite + maturity projection (ADR-009 Part 3)
+# ---------------------------------------------------------------------
+
+from harvest_convoy.models import Cluster  # noqa: E402
+from harvest_convoy.storage.file_storage import FileStorage  # noqa: E402
+from harvest_convoy.weather.openmeteo import WeatherError  # noqa: E402
+
+
+def _cluster(cluster_id="c1", maturity_gdd_override=None) -> Cluster:
+    return Cluster(
+        cluster_id=cluster_id, name="Test Cluster", machine_capacity_acres_per_day=3.5,
+        machine_start_lat=9.865, machine_start_lon=77.454,
+        maturity_gdd_override=maturity_gdd_override,
+    )
+
+
+def _complete_registration(
+    chat_id: int, storage, *, transplant_text: str, sender_name: str = "Test Farmer",
+) -> "registration.OutboundMessage":
+    handle_incoming(chat_id, IncomingMessage(text="hi", sender_name=sender_name), storage)
+    handle_incoming(chat_id, IncomingMessage(text="Kamatchipuram", sender_name=sender_name), storage)
+    handle_incoming(chat_id, IncomingMessage(location=(9.87, 77.46), sender_name=sender_name), storage)
+    handle_incoming(chat_id, IncomingMessage(text="yes", sender_name=sender_name), storage)
+    return handle_incoming(
+        chat_id, IncomingMessage(text=transplant_text, sender_name=sender_name), storage
+    )
+
+
+def test_registration_completion_persists_farmer_and_plot(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HARVEST_CONVOY_CLUSTER_ID", "c1")
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    monkeypatch.setattr(
+        registration, "project_maturity_for_plot", lambda plot, cluster: "2026-08-20"
+    )
+
+    _complete_registration(90001, storage, transplant_text="18 May 2026, 2.5 acres")
+
+    farmer = storage.get_farmer("farmer-90001")
+    plot = storage.get_plot("plot-90001")
+    assert farmer is not None and farmer.name == "Test Farmer" and farmer.cluster_id == "c1"
+    assert farmer.telegram_chat_id == 90001
+    assert plot is not None
+    assert plot.farmer_id == "farmer-90001"
+    assert plot.transplant_date == date(2026, 5, 18)
+    assert plot.area_acres == 2.5
+
+
+def test_registration_completion_uses_telegram_sender_name(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HARVEST_CONVOY_CLUSTER_ID", "c1")
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    monkeypatch.setattr(
+        registration, "project_maturity_for_plot", lambda plot, cluster: "2026-08-20"
+    )
+
+    _complete_registration(90002, storage, transplant_text="18 May 2026, 2.5 acres", sender_name="Muthu Pandian")
+
+    assert storage.get_farmer("farmer-90002").name == "Muthu Pandian"
+
+
+def test_registration_completion_appends_maturity_sentence_when_weather_available(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("HARVEST_CONVOY_CLUSTER_ID", "c1")
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    monkeypatch.setattr(
+        registration, "project_maturity_for_plot", lambda plot, cluster: "2026-08-20"
+    )
+
+    outbound = _complete_registration(90003, storage, transplant_text="18 May 2026, 2.5 acres")
+
+    assert registration.messages_ta.COMPLETE_MESSAGE in outbound.text
+    assert "20 ஆகஸ்ட் 2026" in outbound.text  # Tamil default, day-first format
+
+
+def test_registration_completion_falls_back_to_plain_message_on_weather_error(
+    monkeypatch, tmp_path
+) -> None:
+    """The required negative test: registration still completes, the
+    farmer/plot still get persisted, only the projection sentence is
+    omitted."""
+    monkeypatch.setenv("HARVEST_CONVOY_CLUSTER_ID", "c1")
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+
+    def boom(plot, cluster):
+        raise WeatherError("simulated Open-Meteo outage")
+
+    monkeypatch.setattr(registration, "project_maturity_for_plot", boom)
+
+    outbound = _complete_registration(90004, storage, transplant_text="18 May 2026, 2.5 acres")
+
+    assert outbound.text == registration.messages_ta.COMPLETE_MESSAGE
+    # Registration still completed and persisted -- weather failure never blocks it.
+    assert storage.get_farmer("farmer-90004") is not None
+    assert storage.get_plot("plot-90004") is not None
+    assert get_or_create_state(90004).step == RegistrationStep.COMPLETE
+
+
+def test_registration_completion_without_cluster_id_env_var_still_completes(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.delenv("HARVEST_CONVOY_CLUSTER_ID", raising=False)
+    storage = FileStorage(tmp_path / "s.json")
+
+    outbound = _complete_registration(90005, storage, transplant_text="18 May 2026, 2.5 acres")
+
+    assert outbound.text == registration.messages_ta.COMPLETE_MESSAGE
+    assert storage.get_farmer("farmer-90005") is None  # nothing to persist against
+    assert get_or_create_state(90005).step == RegistrationStep.COMPLETE  # never blocked
+
+
+def test_registration_completion_with_unknown_cluster_id_skips_persistence(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("HARVEST_CONVOY_CLUSTER_ID", "does-not-exist")
+    storage = FileStorage(tmp_path / "s.json")
+
+    outbound = _complete_registration(90006, storage, transplant_text="18 May 2026, 2.5 acres")
+
+    assert outbound.text == registration.messages_ta.COMPLETE_MESSAGE
+    assert storage.get_farmer("farmer-90006") is None
+
+
+def test_handle_incoming_without_storage_skips_persistence_entirely() -> None:
+    """No storage passed at all -- the pre-Part-3 call shape, still
+    supported for pure state-machine tests. Persistence is skipped, not
+    defaulted to any other behavior; the farmer still completes."""
+    save_state(RegistrationState(chat_id=90007, greeted=True))
+    handle_incoming(90007, IncomingMessage(text="Kamatchipuram"))
+    handle_incoming(90007, IncomingMessage(location=(9.87, 77.46)))
+    handle_incoming(90007, IncomingMessage(text="yes"))
+    outbound = handle_incoming(90007, IncomingMessage(text="18 May 2026, 2.5 acres"))
+
+    assert outbound.text == registration.messages_ta.COMPLETE_MESSAGE
+    assert get_or_create_state(90007).step == RegistrationStep.COMPLETE
+
+
+def test_second_registration_from_same_chat_id_updates_existing_plot(
+    monkeypatch, tmp_path
+) -> None:
+    """ADR-009 Prerequisite: a second complete run from the same chat_id
+    updates the existing Farmer/Plot -- not a duplicate, not a rejection.
+    Simulates the realistic trigger (a process restart loses in-memory
+    RegistrationState -- see registration.py's _STATE_STORE docstring)
+    by resetting state explicitly rather than the state machine looping
+    back on itself, which it structurally cannot do today."""
+    monkeypatch.setenv("HARVEST_CONVOY_CLUSTER_ID", "c1")
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    monkeypatch.setattr(
+        registration, "project_maturity_for_plot", lambda plot, cluster: "2026-08-20"
+    )
+    chat_id = 90008
+
+    _complete_registration(chat_id, storage, transplant_text="1 May 2026, 2.5 acres")
+    first_plot = storage.get_plot(f"plot-{chat_id}")
+    assert first_plot.transplant_date == date(2026, 5, 1)
+    assert first_plot.area_acres == 2.5
+
+    # Simulate a process restart: fresh in-memory state, same chat_id.
+    save_state(RegistrationState(chat_id=chat_id))
+    _complete_registration(chat_id, storage, transplant_text="20 June 2026, 4.0 acres")
+
+    updated_plot = storage.get_plot(f"plot-{chat_id}")
+    assert updated_plot.transplant_date == date(2026, 6, 20)
+    assert updated_plot.area_acres == 4.0
+    assert len(storage.get_plots_for_cluster("c1")) == 1

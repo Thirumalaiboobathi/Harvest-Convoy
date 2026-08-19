@@ -355,3 +355,20 @@ def test_missing_farmer_lookup_degrades_without_crashing(tmp_path) -> None:
     # default lookup (unset) returns None for everything -- must not raise.
     webhook.handle_update(client, update, storage, SEASON)
     assert client.sent_messages == []  # no farmers found, nothing sent, no crash
+
+
+# --- parse_incoming_message sender_name extraction (ADR-009 Part 3) ---
+
+def test_parse_incoming_message_prefers_first_name() -> None:
+    message = {"text": "hi", "from": {"first_name": "Muthu", "username": "muthu99"}}
+    assert webhook.parse_incoming_message(message).sender_name == "Muthu"
+
+
+def test_parse_incoming_message_falls_back_to_username_without_first_name() -> None:
+    message = {"text": "hi", "from": {"username": "muthu99"}}
+    assert webhook.parse_incoming_message(message).sender_name == "muthu99"
+
+
+def test_parse_incoming_message_sender_name_is_none_without_a_from_field() -> None:
+    message = {"text": "hi"}
+    assert webhook.parse_incoming_message(message).sender_name is None

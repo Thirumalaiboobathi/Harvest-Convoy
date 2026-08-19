@@ -327,7 +327,13 @@ def parse_incoming_message(message: dict) -> IncomingMessage:
     loc = message.get("location")
     if loc:
         location = (loc["latitude"], loc["longitude"])
-    return IncomingMessage(text=text, location=location)
+    # Telegram's own User object on every message -- free, no extra
+    # farmer interaction. first_name over username: it's the display
+    # name a real person actually recognizes; username is often unset or
+    # a handle, not a name. See ADR-009 Part 3.
+    sender = message.get("from") or {}
+    sender_name = sender.get("first_name") or sender.get("username")
+    return IncomingMessage(text=text, location=location, sender_name=sender_name)
 
 
 def handle_update(
@@ -374,5 +380,5 @@ def handle_update(
         return
 
     incoming = parse_incoming_message(message)
-    outbound = registration.handle_incoming(chat_id, incoming)
+    outbound = registration.handle_incoming(chat_id, incoming, storage)
     client.send_message(chat_id, outbound.text, reply_markup=outbound.reply_markup)

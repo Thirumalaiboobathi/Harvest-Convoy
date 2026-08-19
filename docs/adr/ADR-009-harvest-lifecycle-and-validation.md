@@ -807,6 +807,39 @@ every prior Tamil string in this project.
 — asserts the unmodified `COMPLETE_MESSAGE` is sent and registration
 still transitions to `COMPLETE` normally when the weather call raises.
 
+### Implemented — one gap found during implementation, one design choice on the persistence signature
+
+**`Farmer.name` has no source.** The four-message flow never asks a
+farmer their name, and `Farmer.name` is a required field. Not something
+this ADR anticipated. Fix: Telegram already sends a `User` object
+(`first_name`/`username`) on every message, for free, no extra farmer
+interaction — `webhook.parse_incoming_message` now extracts it into a
+new `IncomingMessage.sender_name` field, and
+`registration._persist_completed_registration` uses it for
+`Farmer.name`, falling back to `f"Farmer {chat_id}"` only if Telegram
+genuinely sent nothing (rare — effectively never for a real user
+message). This is the same "does the agent already know enough to
+speak first" test applied to data collection, not just messaging: yes,
+Telegram already told it.
+
+**`handle_incoming` takes `storage: Storage | None = None`, not a
+required parameter.** ADR-004 Decision 2 keeps `advance_registration`
+pure (unaffected — persistence and the projection call live only in
+`handle_incoming`, the stateful wrapper). Making `storage` required
+would have broken roughly twenty existing tests that exercise
+state-machine behavior unrelated to persistence and never reach
+`COMPLETE` (confirmed by grep — none of them do). `None` skips
+persistence entirely rather than defaulting to some other behavior;
+`webhook.handle_update` (the only real caller) always passes a real one.
+
+Everything else matches the design above as drafted. 8 new tests in
+`tests/test_registration.py` (persist-on-complete, sender-name-used,
+projection-sentence-appended, the required WeatherError negative,
+missing/unknown `HARVEST_CONVOY_CLUSTER_ID` both degrade without
+blocking, `storage=None` still supported, and the re-registration
+update-not-duplicate test), plus 3 in `tests/test_webhook.py` for
+`sender_name` extraction itself. 370 tests total.
+
 ---
 
 ## Part 4: Post-harvest drying-window rain alert

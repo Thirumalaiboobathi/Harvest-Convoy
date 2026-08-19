@@ -90,6 +90,15 @@ COMPLETE_MESSAGE = (
     "is decided or your plot needs attention -- no need to check in."
 )
 
+
+def projected_maturity_sentence(formatted_date: str) -> str:
+    """One sentence, appended to COMPLETE_MESSAGE -- a forecast
+    projection, never a promise. "Should be ready around" carries the
+    non-guaranteed nature the same way "around" does on its own; this
+    isn't a report, so it stays exactly one sentence. See ADR-009
+    Part 3."""
+    return f"Based on today's weather, your plot should be ready around {formatted_date}."
+
 CROP_CONFIRM_DECLINED_MESSAGE = (
     "Understood -- this season we're only coordinating paddy (ADT 45). "
     "We can't register a different crop right now. Thanks for checking "

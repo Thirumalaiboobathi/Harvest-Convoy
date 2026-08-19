@@ -18,10 +18,11 @@ global crop_params.MATURITY_GDD_ESTIMATED reference constant).
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from harvest_convoy.agronomy import crop_params
 from harvest_convoy.agronomy.gdd import accumulate_gdd
+from harvest_convoy.models import Cluster, Plot
 from harvest_convoy.weather.openmeteo import get_daily_temperatures
 
 # Same window ADR-002 used for Theni: a Kuruvai-season proxy window, not
@@ -81,3 +82,53 @@ def derive_cluster_maturity_gdd(
     """
     rate = derive_reference_gdd_rate(lat, lon, years=years, today=today)
     return crop_params.ADT45_FIELD_DURATION_DAYS_ESTIMATED * rate
+
+
+def project_maturity_for_plot(
+    plot: Plot, cluster: Cluster, *, today: date | None = None
+) -> str:
+    """Projected maturity date for a plot that (usually) hasn't reached
+    maturity yet -- built for registration-time farmer messaging (ADR-009
+    Part 3), where the real project_maturity_date() in agronomy/gdd.py
+    can't be used directly: a farmer registers right around transplant,
+    ~90-110 real field days before maturity, while Open-Meteo's forecast
+    horizon is only 16 days -- walking real+forecast data that far ahead
+    would almost always return None.
+
+    Composed instead from two pieces this codebase already has, not a
+    third independently-invented method: real elapsed GDD from
+    transplant_date to `today` (a genuine live Open-Meteo call -- raises
+    WeatherError on failure, same as every other GDD computation here),
+    plus the cluster's own already-derived rate (or the global reference
+    rate, if uncalibrated) for the remaining days no weather data can
+    reach yet. Same maturity-threshold resolution scheduling/solver.py
+    uses: cluster.maturity_gdd_override if calibrated, else
+    crop_params.MATURITY_GDD_ESTIMATED.
+
+    If `plot.transplant_date` is still in the future relative to `today`
+    (a farmer registering ahead of transplanting), there's no elapsed
+    GDD to fetch at all -- no network call is made, and the projection
+    runs purely off the rate, anchored at the transplant date itself
+    rather than today.
+    """
+    today = today or date.today()
+
+    maturity_gdd = cluster.maturity_gdd_override
+    if maturity_gdd is None:
+        maturity_gdd = crop_params.MATURITY_GDD_ESTIMATED
+    if cluster.maturity_gdd_override is not None:
+        rate = cluster.maturity_gdd_override / crop_params.ADT45_FIELD_DURATION_DAYS_ESTIMATED
+    else:
+        rate = crop_params.KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED
+
+    if plot.transplant_date > today:
+        accumulated_so_far = 0.0
+        anchor = plot.transplant_date
+    else:
+        days = get_daily_temperatures(plot.lat, plot.lon, plot.transplant_date, today)
+        accumulated_so_far = accumulate_gdd(days, crop_params.T_BASE_C)
+        anchor = today
+
+    remaining_gdd = max(0.0, maturity_gdd - accumulated_so_far)
+    days_remaining = round(remaining_gdd / rate)
+    return (anchor + timedelta(days=days_remaining)).isoformat()

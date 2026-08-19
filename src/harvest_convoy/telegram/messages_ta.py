@@ -173,6 +173,18 @@ COMPLETE_MESSAGE = (
 # "Registered. You won't hear from us again until the machine's route
 #  is decided or your plot needs attention -- no need to check in."
 
+
+def projected_maturity_sentence(formatted_date: str) -> str:
+    return (
+        f"இன்றைய வானிலையின் அடிப்படையில், உங்கள் வயல் {formatted_date} "
+        "அளவில் தயாராக இருக்கக்கூடும்."
+    )
+    # "Based on today's weather, your plot may become ready around
+    #  {date}." -- DRAFT, pending native-speaker review (ADR-009 Part 3).
+    # "இருக்கக்கூடும்" (may be/could be) carries the non-guaranteed,
+    # projected nature the way "should" does in the English draft, on
+    # top of "around" already doing that work in both.
+
 CROP_CONFIRM_DECLINED_MESSAGE = (
     "புரிந்தது -- இந்த பருவத்தில் நாங்கள் நெல் (ADT 45) பயிரை "
     "மட்டும் ஒருங்கிணைக்கிறோம். வேறு பயிரை இப்போது பதிவு செய்ய "
