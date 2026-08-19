@@ -24,6 +24,24 @@ def _plot(plot_id: str, cluster_id: str = "c1", farmer_id: str = "f1") -> Plot:
     )
 
 
+def test_list_cluster_ids_returns_every_seeded_cluster_sorted(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(Cluster(
+        cluster_id="zebra", name="Z", machine_capacity_acres_per_day=3.5,
+        machine_start_lat=1.0, machine_start_lon=1.0,
+    ))
+    storage.put_cluster(Cluster(
+        cluster_id="apple", name="A", machine_capacity_acres_per_day=3.5,
+        machine_start_lat=1.0, machine_start_lon=1.0,
+    ))
+    assert storage.list_cluster_ids() == ["apple", "zebra"]
+
+
+def test_list_cluster_ids_empty_when_no_clusters_seeded(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    assert storage.list_cluster_ids() == []
+
+
 def test_cluster_round_trips(tmp_path) -> None:
     storage = FileStorage(tmp_path / "s.json")
     assert storage.get_cluster("c1") is None

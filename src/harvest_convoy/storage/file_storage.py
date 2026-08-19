@@ -68,6 +68,9 @@ class FileStorage:
         raw = self._data["clusters"].get(cluster_id)
         return Cluster(**raw) if raw else None
 
+    def list_cluster_ids(self) -> list[str]:
+        return sorted(self._data["clusters"].keys())
+
     def put_cluster(self, cluster: Cluster) -> StorageResult:
         self._data["clusters"][cluster.cluster_id] = asdict(cluster)
         return self._save()

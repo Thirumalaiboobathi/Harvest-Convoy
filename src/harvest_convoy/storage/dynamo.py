@@ -126,6 +126,23 @@ class DynamoStorage:
         }
         return self._put(item)
 
+    def list_cluster_ids(self) -> list[str]:
+        """The one Scan in this file -- every other method here is a
+        targeted GetItem/Query. Justified because there is no other way
+        to enumerate "every cluster" without a dedicated index for it, and
+        this is a low-frequency, on-demand read (ADR-010 Part 3's
+        machinery_gap.py), not a per-trigger call."""
+        try:
+            resp = self._table.scan(
+                FilterExpression="SK = :sk AND begins_with(PK, :pk_prefix)",
+                ExpressionAttributeValues={":sk": "METADATA", ":pk_prefix": "CLUSTER#"},
+                ProjectionExpression="cluster_id",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("list_cluster_ids() failed: %s", exc)
+            return []
+        return sorted(i["cluster_id"] for i in resp.get("Items", []))
+
     # --- Farmer ---
 
     def get_farmer(self, farmer_id: str) -> Farmer | None:
