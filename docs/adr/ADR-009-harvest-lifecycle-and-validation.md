@@ -980,6 +980,25 @@ payment promise" wording constraint directly.
 
 ---
 
+## Backtest re-run after Parts 2–4
+
+Re-ran `scripts/backtest_2025_kuruvai.py` after all three parts landed:
+**byte-for-byte identical output to the post-Part-1.5 run** — same 172
+trigger days per cluster, same 3/6 residual CONTESTED days, same 0-of-11
+regression count. Expected, not a null result worth glossing over: Parts
+2–4 all live in code paths the backtest deliberately never touches. Part
+2's confirmation loop needs a real Telegram reply and real `Storage`
+writes (`mark_plot_harvested`/`clear_plot_harvest`); the backtest's own
+harvested-plot tracking is a local in-memory set specifically so it
+never has to touch `Storage` (Decision 3/Decision F). Part 3 only
+affects the registration flow, which the backtest never runs — it reads
+the seeded fixture `Plot`s directly. Part 4 triggers off a
+`HarvestConfirmation.confirmed=True` record that, again, only exists if
+Part 2's real Storage-backed loop ran. None of the three can reach
+`scheduling/solver.py:solve()` or `agronomy/gdd.py`, which is the only
+code this backtest exercises. Confirming this by re-running, rather than
+asserting it from the design alone, is what makes it trustworthy.
+
 ## Explicitly out of scope (restated for the record)
 
 DPC/godown location lookup, mandi prices, scheme information, loan help,
