@@ -341,6 +341,7 @@ def test_drying_window_alert_omits_moisture_when_unset(mod) -> None:
     text = mod.drying_window_alert(moisture=None, msp=2300)
     assert "2300" in text
     assert "%" not in text
+    assert "\n\n" in text  # msp alone still earns the second line
 
 
 @pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
@@ -350,12 +351,18 @@ def test_drying_window_alert_omits_msp_when_unset(mod) -> None:
     # No currency figure at all when MSP is unset -- never invent one.
     assert "Rs" not in text
     assert "ரூ" not in text
+    assert "\n\n" in text  # moisture alone still earns the second line
 
 
 @pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
-def test_drying_window_alert_with_neither_set_still_sends_the_rain_warning(mod) -> None:
+def test_drying_window_alert_with_neither_set_drops_the_second_line_entirely(mod) -> None:
+    """A bare "paddy needs to dry" sentence with no figure attached tells
+    the farmer nothing he doesn't already know -- so when both moisture
+    and MSP are unset, only the rain warning goes out, not a two-line
+    message with an empty second line. Caught on review."""
     text = mod.drying_window_alert(moisture=None, msp=None)
     assert isinstance(text, str) and text.strip()
+    assert "\n\n" not in text  # no second line at all
     assert "%" not in text
     assert "Rs" not in text and "ரூ" not in text
 

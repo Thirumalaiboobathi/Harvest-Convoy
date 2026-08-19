@@ -148,11 +148,18 @@ def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
     farmer's paddy happens to be assessed at) -- caught on review: a
     farmer expecting the wrong rate at the DPC is a real harm, not a
     wording nicety.
+
+    When both `moisture` and `msp` are None there is no figure to state,
+    and a bare "paddy needs to dry" sentence tells the farmer nothing he
+    doesn't already know -- so the second line is dropped entirely and
+    only the rain warning is sent. Caught on review.
     """
     line1 = (
         "Rain is expected over the next few days. Cover your harvested "
         "grain -- rain during drying can cause discolouration and sprouting."
     )
+    if moisture is None and msp is None:
+        return line1
     if moisture is not None:
         line2 = (
             f"Paddy needs to dry to about {moisture}% moisture before a "

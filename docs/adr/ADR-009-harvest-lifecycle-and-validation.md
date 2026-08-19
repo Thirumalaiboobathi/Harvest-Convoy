@@ -1019,6 +1019,18 @@ the two-line version; `notify.build_drying_window_alert_text` needed no
 change since the function name didn't change. Net test count after
 consolidating from two candidates back to one: 394.
 
+One follow-up fix after the split version shipped: when both `moisture`
+and `msp` are `None` (today's real state), the second line rendered as
+a bare "paddy needs to dry before a DPC will accept it at full price" —
+a sentence with no figure attached that tells the farmer nothing he
+didn't already know, i.e. noise. Fixed in both languages so the second
+line is dropped entirely when neither figure is set, leaving only the
+rain warning. All four `(moisture, msp)` combinations are now covered
+by `tests/test_messages.py` directly. Net test count unchanged at 394
+(two existing tests strengthened, one renamed to describe the new
+behavior — no new test added since the four-combination coverage
+already existed as four parametrized/direct cases).
+
 ---
 
 ## Backtest re-run after Parts 2–4

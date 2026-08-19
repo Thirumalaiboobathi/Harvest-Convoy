@@ -254,6 +254,11 @@ def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
     # the figure applies to whatever grade the farmer's paddy turns out
     # to be. Now names "காமன் தரம்" (Common grade) explicitly instead. A
     # farmer expecting the wrong DPC rate is a real harm.
+    #
+    # When both moisture and msp are None there's no figure to state, and
+    # a bare "paddy needs to dry" line tells the farmer nothing new -- so
+    # the second line is dropped entirely and only the rain warning goes
+    # out. Caught on review.
     line1 = (
         "அடுத்த சில நாட்களில் மழை வரக்கூடும். அறுவடை செய்த "
         "நெல்லை மூடி வையுங்கள் -- உலர்த்தும் போது மழை நிறம் "
@@ -262,6 +267,8 @@ def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
     # "Rain is expected over the next few days. Cover your harvested
     #  grain -- rain during drying can cause discolouration and
     #  sprouting."
+    if moisture is None and msp is None:
+        return line1
     if moisture is not None:
         line2 = (
             f"DPC முழு விலைக்கு ஏற்க நெல் ஈரப்பதம் சுமார் {moisture}% "
