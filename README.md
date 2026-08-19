@@ -57,6 +57,47 @@ a plot's case when two plots are genuinely tied, and write the messages
 farmers read. See [ARCHITECTURE.md](ARCHITECTURE.md) for why that split
 matters and how it's enforced in code, not just convention.
 
+## Where this fits: Tamil Nadu's Custom Hiring Centres
+
+Tamil Nadu runs a Custom Hiring Centre (CHC) scheme, funded through
+central and state programs (SMAM, NADP), that places combine harvesters
+and other farm machinery with cooperatives, FPOs, and private operators
+so a farmer who can't afford to own one can still hire one. This isn't
+inferred from the scheme being statewide — the state Agriculture
+Department's own published dashboard, [Custom Hiring Centres formed in
+Tamil Nadu from 2014-15 to 2020-21,
+tnagrisnet.tn.gov.in](https://www.tnagrisnet.tn.gov.in/dashboard/report/10_09.pdf)
+(fetched directly, not search-surfaced), reports 65 CHCs formed in Theni
+district and 100 in Thanjavur district over that period. The table
+breaks CHCs down by funding category, not by which implements each one
+stocks, so this confirms the scheme's real presence in both districts —
+not that a combine harvester specifically sits in either one today.
+
+What doesn't exist is a way to decide whose field that one shared
+machine visits first when the harvest window is short and more farmers
+want it than it can reach in time. That's exactly the moment weather
+forces every season, and exactly the moment informal or first-come
+allocation is most likely to leave someone's crop standing too long
+while a less urgent field gets cut first.
+
+Harvest Convoy is a scheduling layer for that moment, not a new piece of
+machinery and not a new institution. It sits in front of a CHC's
+existing harvester and existing route, and decides — from real GDD
+accumulation, real weather, and real capacity math, not guesswork —
+which contested plot gets today's slot, escalating to a human operator
+only when two farmers' claims are genuinely, defensibly tied.
+
+**This project has no integration with any real CHC booking system,
+with TN's AGRISNET portal, or with any other government system, and
+does not claim to.** No API access and no data-sharing agreement exists
+with either — building one anyway would mean inventing an interface
+against a system nobody working on this project can actually see, which
+would be worse than not building it: it would look real right up until
+someone tried to call it. See
+[ADR-010](docs/adr/ADR-010-reporting-decision-replay-equity-machinery.md)
+for that decision recorded at the point it was made, not as an
+afterthought.
+
 ## Quickstart — zero AWS required
 
 No AWS account, no AWS credentials, no Docker.
