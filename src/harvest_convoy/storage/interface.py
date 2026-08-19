@@ -59,6 +59,13 @@ class HarvestConfirmation:
     asked_at: str | None = None      # ISO timestamp the evening prompt was sent
     confirmed: bool | None = None    # None = unknown/no reply -- never assumed
     confirmed_at: str | None = None  # ISO timestamp of the farmer's reply, if any
+    # One flag for the whole post-harvest drying window (ADR-009 Part 4),
+    # not per day and not per rain event -- once True, the daily watcher
+    # skips this plot for the rest of its 4-day window regardless of how
+    # many more days show rain. Meaningless (stays False forever) unless
+    # confirmed is True -- the drying window is chained off a *confirmed*
+    # harvest, never a merely-scheduled one.
+    drying_alert_sent: bool = False
 
 
 class Storage(Protocol):

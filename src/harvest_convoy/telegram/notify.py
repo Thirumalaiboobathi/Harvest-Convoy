@@ -15,6 +15,7 @@ import logging
 import math
 
 from harvest_convoy.agents.contracts import AdvocateClaim
+from harvest_convoy.agronomy import market_params
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.scheduling.route import haversine_km
 from harvest_convoy.telegram import messages_en, messages_ta
@@ -95,6 +96,26 @@ def build_harvest_scheduled_text(plot: Plot, route_position: int, *, language: s
 
 def build_not_ready_text(plot: Plot, *, language: str = "ta") -> str:
     return _lang_module(language).not_ready(plot.area_acres, plot.area_unit)
+
+
+def build_drying_window_alert_text(*, language: str = "ta") -> str:
+    """Reads agronomy/market_params.py directly at call time (not passed
+    in) -- both figures are manually-set config, not per-message data,
+    same reasoning as crop_params.py constants being imported directly
+    rather than threaded through every caller. See ADR-009 Part 4."""
+    return _lang_module(language).drying_window_alert(
+        moisture=market_params.DPC_MOISTURE_THRESHOLD_PERCENT,
+        msp=market_params.MSP_PADDY_COMMON_PER_QUINTAL,
+    )
+
+
+def send_drying_window_alert(client: TelegramClient, farmer: Farmer) -> SendResult:
+    if farmer.telegram_chat_id is None:
+        logger.error("no chat_id for farmer %s, cannot send drying alert", farmer.farmer_id)
+        return SendResult(success=False, error="farmer has no telegram_chat_id")
+    return client.send_message(
+        farmer.telegram_chat_id, build_drying_window_alert_text(language=farmer.language)
+    )
 
 
 def build_escalation_resolved_text(

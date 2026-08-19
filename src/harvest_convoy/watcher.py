@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from harvest_convoy.agents.coordinator import run_cluster, run_cluster_with_claims
 from harvest_convoy.models import Cluster, Farmer, Plot
-from harvest_convoy.scheduling.capacity import usable_harvest_days
+from harvest_convoy.scheduling.capacity import ForecastDay, usable_harvest_days
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome, solve
 from harvest_convoy.storage import Storage, get_storage
 from harvest_convoy.storage.interface import HarvestConfirmation
@@ -51,6 +51,15 @@ FORECAST_HORIZON_DAYS = 16  # Open-Meteo's confirmed max forecast horizon, ADR-0
 # never a fairness ledger write. Change freely; nothing depends on the
 # exact number.
 UNCONFIRMED_HARVEST_WINDOW_DAYS = 2
+
+# Post-harvest drying window (ADR-009 Part 4): how many days after a
+# CONFIRMED harvest (not merely a scheduled one) the daily watcher keeps
+# watching for rain in the near-term forecast. The number itself ("4
+# days", paddy dropping from ~20-24% moisture off the combine to the
+# ~14% a DPC requires) came from you, not independently re-derived here
+# -- same status as UNCONFIRMED_HARVEST_WINDOW_DAYS: a stated constant,
+# not a sourced one.
+DRYING_WINDOW_DAYS = 4
 
 
 def run_daily_watch(
@@ -174,6 +183,13 @@ def _run_daily_watch_one(
         return {"cluster_id": cluster_id, "status": "error", "reason": "weather_unavailable"}
 
     try:
+        # Drying-window alerts (ADR-009 Part 4) run every pass, whether
+        # or not today's scheduling trigger fires below -- a plot in its
+        # drying window doesn't need a NEW dispatch to matter, only rain
+        # in the forecast this run already fetched. Same forecast, no
+        # second weather call, no new data source.
+        _check_drying_window_alerts(client, storage, cluster, season_id, forecast, today)
+
         usable_days = usable_harvest_days(forecast, RAIN_THRESHOLD_MM)
         if usable_days >= len(forecast) and not force:
             logger.info(
@@ -299,6 +315,63 @@ def _send_notifications(
             escalation.plot_b_id, farmer_b, plots_by_id[escalation.plot_b_id], escalation.claim_b,
             operator_language=cluster.operator_language,
         )
+
+
+def _check_drying_window_alerts(
+    client: TelegramClient,
+    storage: Storage,
+    cluster: Cluster,
+    season_id: str,
+    forecast: list[ForecastDay],
+    today: date,
+) -> None:
+    """ADR-009 Part 4: for every CONFIRMED harvest (Part 2) still inside
+    its DRYING_WINDOW_DAYS, send one cover-your-grain alert if rain has
+    entered the near-term forecast -- at most once per drying window,
+    not per day and not per rain event (HarvestConfirmation.drying_alert_sent).
+    Chained off confirmation, not off Part 1.5's harvest marker: a
+    merely-scheduled-but-unconfirmed plot never triggers this.
+    """
+    near_term = forecast[:DRYING_WINDOW_DAYS]
+    if not any(day.precipitation_mm > RAIN_THRESHOLD_MM for day in near_term):
+        return  # nothing to check further -- no rain in the near-term window at all
+
+    confirmations = storage.get_confirmations_for_cluster(cluster.cluster_id, season_id)
+    for confirmation in confirmations:
+        if not confirmation.confirmed or confirmation.confirmed_at is None:
+            continue  # only a CONFIRMED "yes" starts a drying window
+        if confirmation.drying_alert_sent:
+            continue  # already alerted for this window
+        confirmed_date = date.fromisoformat(confirmation.confirmed_at[:10])
+        if (today - confirmed_date).days >= DRYING_WINDOW_DAYS:
+            continue  # window has closed
+
+        farmer = storage.get_farmer(confirmation.farmer_id)
+        if farmer is None or farmer.telegram_chat_id is None:
+            logger.info(
+                "drying-window alert: no reachable farmer for plot=%s, skipping",
+                confirmation.plot_id,
+            )
+            continue
+
+        send_result = notify.send_drying_window_alert(client, farmer)
+        if send_result.success:
+            update_result = storage.put_harvest_confirmation(
+                replace(confirmation, drying_alert_sent=True)
+            )
+            if not update_result.success:
+                logger.error(
+                    "DRYING ALERT FLAG WRITE FAILED: plot=%s cluster=%s "
+                    "season=%s -- this farmer may be re-alerted on a "
+                    "later trigger day within the same window: %s",
+                    confirmation.plot_id, cluster.cluster_id, season_id,
+                    update_result.error,
+                )
+        else:
+            logger.error(
+                "drying-window alert send failed for plot=%s: %s",
+                confirmation.plot_id, send_result.error,
+            )
 
 
 def confirmation_status(

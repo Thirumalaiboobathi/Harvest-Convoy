@@ -433,3 +433,145 @@ def test_partial_failure_mid_pipeline_does_not_mark_the_day_done(tmp_path, monke
     assert result["status"] == "error"
     assert "RuntimeError" in result["reason"]
     assert storage.get_watcher_last_run("c1") is None  # not marked -- retryable
+
+
+# ---------------------------------------------------------------------
+# Post-harvest drying-window alerts (ADR-009 Part 4)
+# ---------------------------------------------------------------------
+
+from harvest_convoy.storage.interface import HarvestConfirmation  # noqa: E402
+
+SEASON = "2026-kuruvai"
+
+
+def _confirmed(
+    plot_id="p1", farmer_id="f1", confirmed_at=None, drying_alert_sent=False,
+) -> HarvestConfirmation:
+    return HarvestConfirmation(
+        plot_id=plot_id, farmer_id=farmer_id, cluster_id="c1", season_id=SEASON,
+        scheduled_date=TODAY.isoformat(), asked_at=f"{TODAY.isoformat()}T18:00:00+00:00",
+        confirmed=True, confirmed_at=confirmed_at or f"{TODAY.isoformat()}T19:00:00+00:00",
+        drying_alert_sent=drying_alert_sent,
+    )
+
+
+def test_drying_alert_sends_when_rain_in_near_term_forecast(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    _seed(storage, [_plot("p1", "f1", 110)], [_farmer("f1")])
+    storage.put_harvest_confirmation(_confirmed())
+    forecast = [ForecastDay("d0", 0.0), ForecastDay("d1", 12.0)] + [ForecastDay(f"d{i}", 0.0) for i in range(2, 16)]
+    client = _FakeClient()
+
+    watcher_mod._check_drying_window_alerts(client, storage, _cluster(), SEASON, forecast, TODAY)
+
+    assert len(client.sent) == 1
+    assert client.sent[0][0] == 101  # f1's chat_id
+    updated = storage.get_harvest_confirmation("p1", SEASON)
+    assert updated.drying_alert_sent is True
+
+
+def test_drying_alert_sends_nothing_when_no_rain_in_near_term_forecast(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    _seed(storage, [_plot("p1", "f1", 110)], [_farmer("f1")])
+    storage.put_harvest_confirmation(_confirmed())
+    forecast = [ForecastDay(f"d{i}", 0.0) for i in range(16)]
+    client = _FakeClient()
+
+    watcher_mod._check_drying_window_alerts(client, storage, _cluster(), SEASON, forecast, TODAY)
+
+    assert client.sent == []
+    assert storage.get_harvest_confirmation("p1", SEASON).drying_alert_sent is False
+
+
+def test_drying_alert_ignores_rain_outside_the_near_term_window(tmp_path) -> None:
+    """Rain on day 10 of a 16-day forecast is not "the next few days" --
+    only the first DRYING_WINDOW_DAYS days count."""
+    storage = FileStorage(tmp_path / "s.json")
+    _seed(storage, [_plot("p1", "f1", 110)], [_farmer("f1")])
+    storage.put_harvest_confirmation(_confirmed())
+    forecast = [ForecastDay(f"d{i}", 0.0) for i in range(9)] + [ForecastDay("d9", 20.0)] + [ForecastDay(f"d{i}", 0.0) for i in range(10, 16)]
+
+    watcher_mod._check_drying_window_alerts(_FakeClient(), storage, _cluster(), SEASON, forecast, TODAY)
+
+    assert storage.get_harvest_confirmation("p1", SEASON).drying_alert_sent is False
+
+
+def test_drying_alert_does_not_resend_within_the_same_window(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    _seed(storage, [_plot("p1", "f1", 110)], [_farmer("f1")])
+    storage.put_harvest_confirmation(_confirmed(drying_alert_sent=True))
+    forecast = [ForecastDay("d0", 12.0)] + [ForecastDay(f"d{i}", 0.0) for i in range(1, 16)]
+    client = _FakeClient()
+
+    watcher_mod._check_drying_window_alerts(client, storage, _cluster(), SEASON, forecast, TODAY)
+
+    assert client.sent == []
+
+
+def test_drying_alert_skips_unconfirmed_harvest(tmp_path) -> None:
+    """Scheduled but never confirmed -- Part 1.5's harvest marker alone
+    never starts a drying window, only Part 2's confirmed=True does."""
+    storage = FileStorage(tmp_path / "s.json")
+    _seed(storage, [_plot("p1", "f1", 110)], [_farmer("f1")])
+    storage.put_harvest_confirmation(HarvestConfirmation(
+        plot_id="p1", farmer_id="f1", cluster_id="c1", season_id=SEASON,
+        scheduled_date=TODAY.isoformat(),  # confirmed stays None
+    ))
+    forecast = [ForecastDay("d0", 12.0)] + [ForecastDay(f"d{i}", 0.0) for i in range(1, 16)]
+    client = _FakeClient()
+
+    watcher_mod._check_drying_window_alerts(client, storage, _cluster(), SEASON, forecast, TODAY)
+
+    assert client.sent == []
+
+
+def test_drying_alert_skips_after_the_window_closes(tmp_path) -> None:
+    from datetime import timedelta
+
+    storage = FileStorage(tmp_path / "s.json")
+    _seed(storage, [_plot("p1", "f1", 110)], [_farmer("f1")])
+    old_confirm = (TODAY - timedelta(days=5)).isoformat() + "T19:00:00+00:00"
+    storage.put_harvest_confirmation(_confirmed(confirmed_at=old_confirm))
+    forecast = [ForecastDay("d0", 12.0)] + [ForecastDay(f"d{i}", 0.0) for i in range(1, 16)]
+    client = _FakeClient()
+
+    watcher_mod._check_drying_window_alerts(client, storage, _cluster(), SEASON, forecast, TODAY)
+
+    assert client.sent == []
+
+
+def test_drying_alert_skips_farmer_with_no_chat_id(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(Farmer(farmer_id="f1", name="F1", cluster_id="c1"))  # no chat_id
+    storage.put_plot(_plot("p1", "f1", 110))
+    storage.put_harvest_confirmation(_confirmed())
+    forecast = [ForecastDay("d0", 12.0)] + [ForecastDay(f"d{i}", 0.0) for i in range(1, 16)]
+    client = _FakeClient()
+
+    watcher_mod._check_drying_window_alerts(client, storage, _cluster(), SEASON, forecast, TODAY)
+
+    assert client.sent == []
+    assert storage.get_harvest_confirmation("p1", SEASON).drying_alert_sent is False
+
+
+def test_drying_alert_fires_from_within_the_real_run_daily_watch_pipeline(
+    tmp_path, monkeypatch
+) -> None:
+    """Integration point: run_daily_watch (not just the helper directly)
+    reaches _check_drying_window_alerts using the same forecast it
+    already fetched for the scheduling trigger -- no second weather call."""
+    storage = FileStorage(tmp_path / "s.json")
+    _seed(storage, [_plot("p1", "f1", 5)], [_farmer("f1")])
+    storage.put_harvest_confirmation(_confirmed(plot_id="p1", farmer_id="f1"))
+    forecast = [ForecastDay("d0", 12.0)] + [ForecastDay(f"d{i}", 0.0) for i in range(1, 16)]
+    _patch_weather(monkeypatch, forecast)
+
+    client = _FakeClient()
+    watcher_mod.run_daily_watch(
+        "c1", SEASON, storage=storage, today=TODAY, telegram_client=client
+    )
+
+    chat_ids_sent = {c for c, _, _ in client.sent}
+    assert 101 in chat_ids_sent
+    assert storage.get_harvest_confirmation("p1", SEASON).drying_alert_sent is True

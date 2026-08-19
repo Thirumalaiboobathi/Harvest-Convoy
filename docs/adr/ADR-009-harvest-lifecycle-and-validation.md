@@ -946,6 +946,38 @@ still-sends-rain-warning, moisture-unset-same. All against a fixed
 `monkeypatch`-the-fetch-layer pattern as everywhere else in this
 project's weather-dependent tests.
 
+### Implemented
+
+Built exactly as designed above, no surprises this time: new
+`agronomy/market_params.py` (both constants `None`, source-URL/
+announcement-date scaffolding, same discipline as `crop_params.py`);
+`HarvestConfirmation.drying_alert_sent: bool = False` (both storage
+backends pick it up for free — they serialize via `asdict`/`**kwargs`,
+not a hardcoded field list, so a legacy record missing the key falls
+through to the dataclass default, same pattern as every other schema
+addition in this project); `watcher._check_drying_window_alerts()`,
+called from inside `_run_daily_watch_one`'s existing try block, before
+the no-trigger early return, so it always runs on the forecast already
+fetched that day, triggered or not; `notify.send_drying_window_alert`/
+`build_drying_window_alert_text`; message functions in both modules
+(drafts, sent for review below).
+
+One clarification worth naming: the drying check only looks at the
+first `DRYING_WINDOW_DAYS` (4) days of the fetched 16-day forecast for
+rain, matching "over the next few days" — not the whole horizon. Since
+the main scheduling trigger checks the *entire* forecast, rain that
+appears only later in the window (day 10, say) can fire a scheduling
+trigger without firing a drying alert, and vice versa is not possible
+(rain inside the first 4 days always also breaks the scheduling
+trigger's own usable-days count). Not a bug — the two checks are
+answering genuinely different questions from the same data.
+
+17 new tests (390 total): 8 in `tests/test_watcher.py` against
+`_check_drying_window_alerts` directly plus one real
+`run_daily_watch()` integration test, and 6 in `tests/test_messages.py`
+proving the MSP/moisture independent-omission logic and the "never a
+payment promise" wording constraint directly.
+
 ---
 
 ## Explicitly out of scope (restated for the record)

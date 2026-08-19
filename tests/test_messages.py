@@ -306,3 +306,45 @@ def test_advocate_argument_never_returns_model_prose() -> None:
         rain_vulnerability="none", bumped_last_season=False, concedes=True,
     )
     assert text1 == text2
+
+
+# --- drying_window_alert (ADR-009 Part 4) ---
+
+@pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
+def test_drying_window_alert_with_both_figures_set_includes_both(mod) -> None:
+    text = mod.drying_window_alert(moisture=14, msp=2300)
+    assert "14" in text
+    assert "2300" in text
+
+
+@pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
+def test_drying_window_alert_omits_moisture_when_unset(mod) -> None:
+    text = mod.drying_window_alert(moisture=None, msp=2300)
+    assert "2300" in text
+    assert "%" not in text
+
+
+@pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
+def test_drying_window_alert_omits_msp_when_unset(mod) -> None:
+    text = mod.drying_window_alert(moisture=14, msp=None)
+    assert "14" in text
+    # No currency figure at all when MSP is unset -- never invent one.
+    assert "Rs" not in text
+    assert "ரூ" not in text
+
+
+@pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])
+def test_drying_window_alert_with_neither_set_still_sends_the_rain_warning(mod) -> None:
+    text = mod.drying_window_alert(moisture=None, msp=None)
+    assert isinstance(text, str) and text.strip()
+    assert "%" not in text
+    assert "Rs" not in text and "ரூ" not in text
+
+
+def test_drying_window_alert_english_never_promises_payment() -> None:
+    """Hard wording constraint: 'MSP for this grade is Rs X', never
+    'you will receive Rs X' -- actual payment depends on grade, moisture,
+    and the DPC's own assessment."""
+    text = messages_en.drying_window_alert(moisture=14, msp=2300)
+    assert "you will receive" not in text.lower()
+    assert "MSP for this grade is Rs 2300" in text

@@ -128,6 +128,33 @@ def not_ready(area_acres: float, area_unit: str) -> str:
     )
 
 
+def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
+    """Sent at most once per confirmed harvest's 4-day drying window
+    (ADR-009 Part 4), only when rain enters the near-term forecast.
+    Worded to cover a period ("over the next few days"), not a moment --
+    the alert may fire on day 1 for rain arriving day 3, or after a dry
+    gap, and must stay accurate either way. `moisture`/`msp` come from
+    agronomy/market_params.py -- both manually set, source-cited,
+    independently omitted (never a guessed number) if either is None."""
+    if moisture is not None:
+        core = (
+            "Rain is expected over the next few days. Cover your "
+            f"harvested grain -- paddy needs to dry to about {moisture}% "
+            "moisture before a DPC will accept it at full price, and "
+            "rain during drying can cause discolouration and sprouting."
+        )
+    else:
+        core = (
+            "Rain is expected over the next few days. Cover your "
+            "harvested grain -- paddy needs to dry before a DPC will "
+            "accept it at full price, and rain during drying can cause "
+            "discolouration and sprouting."
+        )
+    if msp is not None:
+        core += f" MSP for this grade is Rs {msp} per quintal."
+    return core
+
+
 def harvest_confirmation_prompt(area_acres: float, area_unit: str) -> str:
     return (
         f"Did the machine come to your {format_area(area_acres, area_unit)} "
