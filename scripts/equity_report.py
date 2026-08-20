@@ -34,7 +34,7 @@ from harvest_convoy.reporting.config import SMALLHOLDER_THRESHOLD_ACRES
 from harvest_convoy.reporting.provenance import Provenance, build_provenance, render_provenance_text
 from harvest_convoy.storage import get_storage
 from harvest_convoy.storage.fairness import operator_follow_through_rate
-from harvest_convoy.storage.interface import Storage
+from harvest_convoy.storage.interface import BreakdownDisplacement, Storage
 from harvest_convoy.watcher import confirmation_status, rollover_status
 
 CAVEAT = (
@@ -67,6 +67,7 @@ class SeasonEquitySection:
     confirmed_no: int
     pending: int
     unknown: int
+    cancelled: int
     follow_through_rate: float | None
     decision_records_found: int
     fairness_influenced_count: int
@@ -75,6 +76,7 @@ class SeasonEquitySection:
     rollover_confirmed_plot_ids: list[str]
     rollover_declined_plot_ids: list[str]
     rollover_unknown_plot_ids: list[str]
+    breakdown_displacements: list[BreakdownDisplacement]
 
 
 @dataclass(frozen=True)
@@ -140,8 +142,19 @@ def _build_season_section(
     served_larger = [p for p in larger if p.plot_id in served_plot_ids]
 
     statuses = [confirmation_status(c, date.today()) for c in confirmations]
-    counts = {s: statuses.count(s) for s in ("confirmed_yes", "confirmed_no", "pending", "unknown")}
+    counts = {
+        s: statuses.count(s)
+        for s in ("confirmed_yes", "confirmed_no", "pending", "unknown", "cancelled")
+    }
     rate = operator_follow_through_rate(cluster_id, season_id, storage)
+
+    # Breakdown displacements (ADR-011 Part 2): visible here so a reader
+    # can see how many "never served" or "no-show"-looking cases were
+    # actually machine failures, never counted as bumps anywhere above.
+    breakdown_displacements = sorted(
+        storage.get_breakdown_displacements_for_cluster(cluster_id, season_id),
+        key=lambda d: (d.original_scheduled_date, d.plot_id),
+    )
 
     decision_records = storage.get_decision_records_for_cluster(cluster_id, season_id)
     fairness_influenced = sum(1 for r in decision_records if r.fairness_decisive is True)
@@ -181,6 +194,7 @@ def _build_season_section(
         confirmed_no=counts["confirmed_no"],
         pending=counts["pending"],
         unknown=counts["unknown"],
+        cancelled=counts["cancelled"],
         follow_through_rate=rate,
         decision_records_found=len(decision_records),
         fairness_influenced_count=fairness_influenced,
@@ -189,6 +203,7 @@ def _build_season_section(
         rollover_confirmed_plot_ids=rollover_confirmed,
         rollover_declined_plot_ids=rollover_declined,
         rollover_unknown_plot_ids=rollover_unknown,
+        breakdown_displacements=breakdown_displacements,
     )
 
 
@@ -261,7 +276,8 @@ def _render_section_text(s: SeasonEquitySection) -> list[str]:
     rate_str = f"{s.follow_through_rate:.0%}" if s.follow_through_rate is not None else "n/a (no replies yet)"
     lines.append(
         f"    Operator follow-through: {s.confirmed_yes} confirmed, {s.confirmed_no} no-show, "
-        f"{s.pending} pending, {s.unknown} unknown (silence never counted either way) "
+        f"{s.pending} pending, {s.unknown} unknown (silence never counted either way), "
+        f"{s.cancelled} cancelled (machine breakdown -- see below, never counted as a no-show) "
         f"-- rate: {rate_str}"
     )
     if s.decision_records_found == 0:
@@ -292,6 +308,16 @@ def _render_section_text(s: SeasonEquitySection) -> list[str]:
             f"separately because they are different facts about a person, not one collapsed "
             f"'excluded' state."
         )
+    if not s.breakdown_displacements:
+        lines.append("    Breakdown displacements: none recorded this season.")
+    else:
+        lines.append(
+            f"    Breakdown displacements: {len(s.breakdown_displacements)} plot-day(s) -- "
+            "never counted as a fairness bump; the ledger measures farmers losing to "
+            "farmers, not mechanical failures:"
+        )
+        for d in s.breakdown_displacements:
+            lines.append(f"      {d.original_scheduled_date}: {d.plot_id} (farmer {d.farmer_id})")
     return lines
 
 

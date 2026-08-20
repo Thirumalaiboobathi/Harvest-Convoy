@@ -229,6 +229,7 @@ def _base_decision_record(
         usable_harvest_days=trigger_context.usable_harvest_days,
         machine_capacity_acres_per_day=trigger_context.machine_capacity_acres_per_day,
         capacity_budget_acres=trigger_context.capacity_budget_acres,
+        trigger_reason=trigger_context.trigger_reason,
     )
 
 

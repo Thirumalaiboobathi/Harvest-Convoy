@@ -22,9 +22,11 @@ from botocore.exceptions import ClientError
 
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.storage.interface import (
+    BreakdownDisplacement,
     DecisionRecord,
     HarvestConfirmation,
     LedgerEntry,
+    MachineStatus,
     SeasonRolloverPrompt,
     StorageResult,
 )
@@ -433,6 +435,70 @@ class DynamoStorage:
             SeasonRolloverPrompt(**_decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK"))))
             for i in items
         ]
+
+    # --- Machine breakdown -- ADR-011 Part 2 ---
+
+    def put_breakdown_displacement(self, displacement: BreakdownDisplacement) -> StorageResult:
+        item = {
+            "PK": f"PLOT#{displacement.plot_id}",
+            "SK": f"BREAKDOWN#{displacement.season_id}#{displacement.original_scheduled_date}",
+            "GSI1PK": f"CLUSTER#{displacement.cluster_id}",
+            "GSI1SK": (
+                f"BREAKDOWN#{displacement.season_id}#"
+                f"{displacement.original_scheduled_date}#{displacement.plot_id}"
+            ),
+            **_encode(asdict(displacement)),
+        }
+        return self._put(item)
+
+    def get_breakdown_displacements_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[BreakdownDisplacement]:
+        items = self._query_gsi1(cluster_id, f"BREAKDOWN#{season_id}#")
+        return [
+            BreakdownDisplacement(**_decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK"))))
+            for i in items
+        ]
+
+    def get_breakdown_displacements_for_date(
+        self, cluster_id: str, season_id: str, report_date: str
+    ) -> list[BreakdownDisplacement]:
+        items = self._query_gsi1(cluster_id, f"BREAKDOWN#{season_id}#{report_date}#")
+        return [
+            BreakdownDisplacement(**_decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK"))))
+            for i in items
+        ]
+
+    def put_machine_status(self, status: MachineStatus) -> StorageResult:
+        item = {
+            "PK": f"CLUSTER#{status.cluster_id}",
+            "SK": "MACHINE#STATUS",
+            **_encode(asdict(status)),
+        }
+        return self._put(item)
+
+    def get_machine_status(self, cluster_id: str) -> MachineStatus | None:
+        try:
+            resp = self._table.get_item(
+                Key={"PK": f"CLUSTER#{cluster_id}", "SK": "MACHINE#STATUS"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("get_machine_status(%s) failed: %s", cluster_id, exc)
+            return None
+        item = resp.get("Item")
+        if item is None:
+            return None
+        return MachineStatus(**_decode(_strip_keys(item)))
+
+    def clear_machine_status(self, cluster_id: str) -> StorageResult:
+        try:
+            self._table.delete_item(
+                Key={"PK": f"CLUSTER#{cluster_id}", "SK": "MACHINE#STATUS"}
+            )
+            return StorageResult(success=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("clear_machine_status(%s) failed: %s", cluster_id, exc)
+            return StorageResult(success=False, error=str(exc))
 
     # --- internals ---
 

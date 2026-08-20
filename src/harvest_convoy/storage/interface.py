@@ -66,6 +66,15 @@ class HarvestConfirmation:
     # confirmed is True -- the drying window is chained off a *confirmed*
     # harvest, never a merely-scheduled one.
     drying_alert_sent: bool = False
+    # True when a machine breakdown invalidated the dispatch this
+    # confirmation was created for (ADR-011 Part 2, Decision 9) -- a
+    # cancelled confirmation is never asked about in the evening sweep,
+    # and a reply against it (a farmer truthfully tapping "no" after the
+    # prompt already went out) is acknowledged but never credited to the
+    # fairness ledger. Distinct from "unknown": unknown means we don't
+    # know what happened; cancelled means we know, and it wasn't the
+    # farmer's or another farmer's doing.
+    cancelled: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,6 +132,13 @@ class DecisionRecord:
     # judgment, not a score comparison), resolved by a human tap, or not
     # yet resolved at all (still "escalated").
     resolved_at: str | None = None  # ISO timestamp of the FINAL resolution
+    # "scheduled" (the normal daily trigger) | "breakdown_recompute" (this
+    # record was produced by a machine-breakdown recompute -- ADR-011
+    # Part 2 -- not the day's original trigger). Lets a reader of
+    # explain_decision.py tell *why* a plot's numbers look the way they
+    # do on a given day, e.g. zero capacity because of a breakdown, not
+    # because of rain.
+    trigger_reason: str = "scheduled"
 
 
 @dataclass(frozen=True)
@@ -150,6 +166,46 @@ class SeasonRolloverPrompt:
     asked_at: str
     replied: bool | None = None
     replied_at: str | None = None
+
+
+@dataclass(frozen=True)
+class BreakdownDisplacement:
+    """A plot un-harvested because the machine broke down, not because
+    another farmer's claim was stronger. Deliberately separate from
+    LedgerEntry -- record_bump()/LedgerEntry exist to detect one farmer
+    losing to another farmer's genuinely stronger claim; crediting a
+    mechanical failure into that same ledger would make it measure
+    equipment reliability instead of the thing it's actually for,
+    silently, in a way nobody reading equity_report.py later could tell
+    apart from a real bump. Nothing in the breakdown path ever writes a
+    LedgerEntry. See ADR-011 Part 2, Decision 8.
+    """
+
+    plot_id: str
+    farmer_id: str
+    cluster_id: str
+    season_id: str
+    original_scheduled_date: str
+    reported_at: str
+    reason: str = "machine_breakdown"
+
+
+@dataclass(frozen=True)
+class MachineStatus:
+    """Whether a cluster's shared machine is known to be down
+    indefinitely -- set by the operator's "down indefinitely" follow-up
+    tap (ADR-011 Part 2), cleared only by a symmetric "machine is back"
+    tap. Absence of a record (get_machine_status returns None) means
+    operational -- the common, default case, matching every other
+    entity's "no record = nothing unusual" convention in this codebase.
+    A status that could only ever be set and never cleared would leave a
+    cluster permanently stuck at zero capacity, which is why the
+    clearing action exists and is built in the same part, not deferred.
+    """
+
+    cluster_id: str
+    status: str  # "down" -- "operational" is represented by no record at all
+    reported_at: str
 
 
 class Storage(Protocol):
@@ -306,4 +362,44 @@ class Storage(Protocol):
         """Every rollover-prompt record for this cluster/season -- the
         watcher's scheduling-exclusion filter and equity_report.py's
         Season participation section both read this."""
+        ...
+
+    def put_breakdown_displacement(self, displacement: BreakdownDisplacement) -> StorageResult:
+        """Overwrite semantics -- a retried write for the same
+        (plot_id, season_id, original_scheduled_date) key updates rather
+        than errors. See ADR-011 Part 2."""
+        ...
+
+    def get_breakdown_displacements_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[BreakdownDisplacement]:
+        """Every breakdown displacement for this cluster/season --
+        equity_report.py's Breakdown displacements section reads this."""
+        ...
+
+    def get_breakdown_displacements_for_date(
+        self, cluster_id: str, season_id: str, report_date: str
+    ) -> list[BreakdownDisplacement]:
+        """Filtered to one report_date -- the breakdown callback's
+        double-tap idempotency check reads this before doing anything
+        else: if a displacement already exists for today, the second tap
+        is a no-op, not a second recompute and a second round of
+        notifications."""
+        ...
+
+    def put_machine_status(self, status: MachineStatus) -> StorageResult:
+        """Overwrite semantics, keyed by cluster_id alone -- one status
+        per cluster. See ADR-011 Part 2."""
+        ...
+
+    def get_machine_status(self, cluster_id: str) -> MachineStatus | None:
+        """None means operational -- the default, common case. A status
+        record only exists while a cluster is down; clear_machine_status
+        removes it entirely rather than writing status="operational"."""
+        ...
+
+    def clear_machine_status(self, cluster_id: str) -> StorageResult:
+        """The symmetric "machine is back" action -- removes the down
+        status. Safe on a cluster that was never marked down (a no-op
+        success, not an error), same discipline as clear_plot_harvest."""
         ...

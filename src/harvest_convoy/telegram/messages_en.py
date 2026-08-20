@@ -294,6 +294,48 @@ def unrecognized_action() -> str:
     return "Unrecognized action."
 
 
+# --- Machine breakdown (ADR-011 Part 2) -- operator-only, dispatched by
+# Cluster.operator_language, same as every other operator-facing string
+# in this module.
+
+BREAKDOWN_BUTTON_LABEL = "🚜 Machine down today"
+MACHINE_BACK_BUTTON_LABEL = "🚜 Machine is back"
+BREAKDOWN_FOLLOWUP_TOMORROW_LABEL = "Back tomorrow"
+BREAKDOWN_FOLLOWUP_INDEFINITE_LABEL = "Down indefinitely"
+
+
+def breakdown_acknowledged() -> str:
+    return "Recorded; recalculating the route."
+
+
+def breakdown_already_reported() -> str:
+    return "Already reported today."
+
+
+def breakdown_no_route() -> str:
+    return "No route today to report a breakdown for."
+
+
+def breakdown_recompute_failed() -> str:
+    return "Recorded, but the recompute couldn't run right now -- will retry on the next scheduled check."
+
+
+def breakdown_followup_prompt() -> str:
+    return "Is this a one-day issue, or ongoing?"
+
+
+def breakdown_back_tomorrow_ack() -> str:
+    return "Noted -- tomorrow's run will proceed normally."
+
+
+def machine_down_indefinite_ack() -> str:
+    return "Marked down until further notice. Tap below when it's back."
+
+
+def machine_back_ack() -> str:
+    return "Marked operational again."
+
+
 # --- Harvest confirmation loop (ADR-009 Part 2) ---
 
 CONFIRMATION_YES_LABEL = "Yes"

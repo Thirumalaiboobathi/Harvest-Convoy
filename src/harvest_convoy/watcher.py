@@ -30,7 +30,12 @@ from harvest_convoy.scheduling.capacity import (
 )
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome, resolve_maturity_gdd, solve
 from harvest_convoy.storage import Storage, get_storage
-from harvest_convoy.storage.interface import HarvestConfirmation, SeasonRolloverPrompt
+from harvest_convoy.storage.interface import (
+    BreakdownDisplacement,
+    HarvestConfirmation,
+    MachineStatus,
+    SeasonRolloverPrompt,
+)
 from harvest_convoy.telegram import notify, webhook
 from harvest_convoy.telegram.client import TelegramClient
 from harvest_convoy.weather.openmeteo import (
@@ -126,6 +131,30 @@ def run_daily_watch(
     )
 
 
+def _apply_rollover_exclusion(storage: Storage, cluster_id: str, season_id: str) -> list[Plot]:
+    """This season's plot roster, minus any plot whose farmer declined a
+    rollover prompt or never replied to one (ADR-011 Part 1) -- excluded
+    from the scheduling pool entirely, not merely ranked last. A plot
+    with no rollover-prompt record at all for this season_id is included
+    by default (a brand-new registration, or a cluster/season
+    run_season_rollover has never been triggered for). Shared by the
+    normal daily trigger and the machine-breakdown recompute (ADR-011
+    Part 2), so a plot excluded this morning doesn't reappear in an
+    afternoon recompute.
+    """
+    plots = storage.get_plots_for_cluster(cluster_id)
+    rollover_prompts = storage.get_season_rollover_prompts_for_cluster(cluster_id, season_id)
+    excluded_by_rollover = {p.plot_id for p in rollover_prompts if p.replied is not True}
+    if excluded_by_rollover:
+        logger.info(
+            "watcher: cluster=%s excluding %d plot(s) not confirmed for "
+            "season %s (declined or no reply to the rollover prompt): %s",
+            cluster_id, len(excluded_by_rollover), season_id, sorted(excluded_by_rollover),
+        )
+        plots = [p for p in plots if p.plot_id not in excluded_by_rollover]
+    return plots
+
+
 def _run_daily_watch_one(
     cluster_id: str,
     season_id: str,
@@ -154,23 +183,7 @@ def _run_daily_watch_one(
         logger.error("watcher: cluster %s not found in storage", cluster_id)
         return {"cluster_id": cluster_id, "status": "error", "reason": "cluster_not_found"}
 
-    plots = storage.get_plots_for_cluster(cluster_id)
-
-    # Season-participation exclusion (ADR-011 Part 1): a plot whose
-    # farmer declined a rollover prompt, or never replied to one, is
-    # excluded from this season's scheduling pool entirely -- not merely
-    # ranked last. A plot with no rollover-prompt record at all for this
-    # season_id is included by default (a brand-new registration, or a
-    # cluster/season run_season_rollover has never been triggered for).
-    rollover_prompts = storage.get_season_rollover_prompts_for_cluster(cluster_id, season_id)
-    excluded_by_rollover = {p.plot_id for p in rollover_prompts if p.replied is not True}
-    if excluded_by_rollover:
-        logger.info(
-            "watcher: cluster=%s excluding %d plot(s) not confirmed for "
-            "season %s (declined or no reply to the rollover prompt): %s",
-            cluster_id, len(excluded_by_rollover), season_id, sorted(excluded_by_rollover),
-        )
-        plots = [p for p in plots if p.plot_id not in excluded_by_rollover]
+    plots = _apply_rollover_exclusion(storage, cluster_id, season_id)
 
     if not plots:
         logger.warning("watcher: cluster %s has no plots, nothing to check", cluster_id)
@@ -211,6 +224,21 @@ def _run_daily_watch_one(
         # in the forecast this run already fetched. Same forecast, no
         # second weather call, no new data source.
         _check_drying_window_alerts(client, storage, cluster, season_id, forecast, today)
+
+        # Machine down indefinitely (ADR-011 Part 2): set by an
+        # operator's breakdown follow-up tap, cleared only by a
+        # symmetric "machine is back" tap. Gates dispatch only --
+        # drying-window alerts above are unrelated to whether today's
+        # machine run happens, so they still run either way.
+        machine_status = storage.get_machine_status(cluster_id)
+        if machine_status is not None and machine_status.status == "down":
+            logger.info(
+                "watcher no-op: cluster=%s machine reported down indefinitely "
+                "since %s, not scheduling",
+                cluster_id, machine_status.reported_at,
+            )
+            storage.set_watcher_last_run(cluster_id, today.isoformat())
+            return {"cluster_id": cluster_id, "date": today.isoformat(), "status": "machine_down"}
 
         usable_days = usable_harvest_days(forecast, RAIN_THRESHOLD_MM)
         if usable_days >= len(forecast) and not force:
@@ -334,7 +362,8 @@ def _send_notifications(
 
     if fits_route:
         notify.send_operator_route_summary(
-            client, cluster.operator_chat_id, cluster, fits_route
+            client, cluster.operator_chat_id, cluster, fits_route,
+            season_id=season_id, report_date=today.isoformat(),
         )
 
     for escalation in result.escalations:
@@ -416,13 +445,25 @@ def _check_drying_window_alerts(
 def confirmation_status(
     confirmation: HarvestConfirmation, today: date
 ) -> str:
-    """One of "confirmed_yes", "confirmed_no", "pending" (asked, still
+    """One of "cancelled" (invalidated by a machine breakdown -- ADR-011
+    Part 2), "confirmed_yes", "confirmed_no", "pending" (asked, still
     within the window, plausibly on its way), or "unknown" (never asked,
     or asked and the window has closed with no reply). This is a purely
     computed classification -- nothing about "unknown" is written to
     storage; `HarvestConfirmation.confirmed` simply stays None forever
     for a plot nobody ever answers about, exactly as it should for a
-    signal we genuinely don't have. See ADR-009 Part 2."""
+    signal we genuinely don't have. See ADR-009 Part 2.
+
+    "cancelled" is checked first and is final -- a farmer's late reply
+    against a cancelled confirmation still updates `confirmed`/
+    `confirmed_at` (the truth stays on record), but it must never be
+    reported as an ordinary confirmed_yes/no: "cancelled" means we know
+    what happened and why (a breakdown, not the farmer's or another
+    farmer's doing), which is a different fact from either a real
+    confirmation or real silence.
+    """
+    if confirmation.cancelled:
+        return "cancelled"
     if confirmation.confirmed is True:
         return "confirmed_yes"
     if confirmation.confirmed is False:
@@ -459,7 +500,11 @@ def run_evening_confirmations(
     client = telegram_client or TelegramClient()
 
     confirmations = storage.get_confirmations_for_cluster(cluster_id, season_id)
-    to_ask = [c for c in confirmations if c.asked_at is None]
+    # A cancelled confirmation (ADR-011 Part 2 -- its dispatch was
+    # invalidated by a machine breakdown) is never asked about: it's
+    # already known the machine didn't come, and why, which is a
+    # different fact from silence.
+    to_ask = [c for c in confirmations if c.asked_at is None and not c.cancelled]
 
     asked = 0
     skipped_no_chat_id = 0
@@ -625,3 +670,195 @@ def run_season_rollover(
         "skipped_no_farmer": skipped_no_farmer,
         "skipped_already_prompted": skipped_already_prompted,
     }
+
+
+def handle_machine_breakdown(
+    cluster_id: str,
+    season_id: str,
+    report_date: date,
+    *,
+    storage: Storage | None = None,
+    telegram_client: TelegramClient | None = None,
+    get_claim=None,
+) -> dict:
+    """ADR-011 Part 2: an operator's "machine down today" tap. Marks
+    today's dispatched plots as not-actually-harvested (the
+    clear_plot_harvest reversal hook ADR-009 Part 1.5 built and left
+    unused for exactly this), recomputes the schedule against the
+    remaining harvest days, re-notifies every affected farmer with
+    either a revised slot or an honest "not ready" -- never a fabricated
+    promise -- and records a BreakdownDisplacement for each affected
+    plot. Never writes a LedgerEntry: a breakdown displacement is not a
+    farmer losing to another farmer, and crediting it to the fairness
+    ledger would make that ledger measure equipment reliability instead
+    of the thing it exists to measure (Decision 8).
+
+    Idempotent per (cluster_id, season_id, report_date): a second tap
+    for a day already reported is a no-op, not a second recompute and a
+    second round of notifications.
+
+    Known simplification, disclosed rather than hidden: the recomputed
+    capacity budget starts from tomorrow (today's forecast day is
+    dropped, since today's machine-hours are lost to the breakdown
+    regardless of rain), but a plot that fits within that budget still
+    gets the existing harvest_scheduled wording ("the machine is coming
+    to your plot today"). Building a distinctly-worded "your revised
+    slot" message was out of scope for this pass; flagged here rather
+    than silently reused as if it were exactly accurate.
+    """
+    storage = storage or get_storage()
+    client = telegram_client or TelegramClient()
+    report_date_iso = report_date.isoformat()
+
+    already = storage.get_breakdown_displacements_for_date(cluster_id, season_id, report_date_iso)
+    if already:
+        logger.info(
+            "machine breakdown: cluster=%s season=%s date=%s already reported "
+            "(%d plot(s)) -- no-op",
+            cluster_id, season_id, report_date_iso, len(already),
+        )
+        return {
+            "cluster_id": cluster_id, "season_id": season_id, "date": report_date_iso,
+            "status": "already_reported", "displaced": 0,
+        }
+
+    cluster = storage.get_cluster(cluster_id)
+    if cluster is None:
+        logger.error("machine breakdown: cluster %s not found in storage", cluster_id)
+        return {"cluster_id": cluster_id, "status": "error", "reason": "cluster_not_found"}
+
+    confirmations = storage.get_confirmations_for_cluster(cluster_id, season_id)
+    todays = [
+        c for c in confirmations
+        if c.scheduled_date == report_date_iso and not c.cancelled
+    ]
+    if not todays:
+        logger.info(
+            "machine breakdown: cluster=%s date=%s -- no route that day, "
+            "nothing to recompute",
+            cluster_id, report_date_iso,
+        )
+        return {
+            "cluster_id": cluster_id, "season_id": season_id, "date": report_date_iso,
+            "status": "no_route", "displaced": 0,
+        }
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for confirmation in todays:
+        storage.clear_plot_harvest(confirmation.plot_id, cluster_id, season_id)
+        storage.put_breakdown_displacement(BreakdownDisplacement(
+            plot_id=confirmation.plot_id, farmer_id=confirmation.farmer_id,
+            cluster_id=cluster_id, season_id=season_id,
+            original_scheduled_date=report_date_iso, reported_at=now_iso,
+        ))
+        storage.put_harvest_confirmation(replace(confirmation, cancelled=True))
+
+    try:
+        forecast = get_precipitation_forecast(
+            cluster.machine_start_lat, cluster.machine_start_lon,
+            report_date, report_date + timedelta(days=FORECAST_HORIZON_DAYS - 1),
+        )
+    except WeatherError as exc:
+        logger.error(
+            "machine breakdown: weather fetch failed, cluster=%s: %s -- "
+            "plots un-harvested, but the recompute could not run; will be "
+            "picked up by the next scheduled trigger",
+            cluster_id, exc,
+        )
+        return {
+            "cluster_id": cluster_id, "season_id": season_id, "date": report_date_iso,
+            "status": "weather_unavailable", "displaced": len(todays),
+        }
+
+    # Today's machine-hours are lost regardless of rain -- the recomputed
+    # budget starts from tomorrow, not from a fresh reading of today's
+    # forecast day.
+    remaining_forecast = forecast[1:]
+
+    plots = _apply_rollover_exclusion(storage, cluster_id, season_id)
+    harvested_plot_ids = storage.get_harvested_plot_ids(cluster_id, season_id)
+    try:
+        plot_days = {
+            p.plot_id: get_daily_temperatures(p.lat, p.lon, p.transplant_date, report_date)
+            for p in plots
+            if p.plot_id not in harvested_plot_ids
+        }
+    except WeatherError as exc:
+        logger.error(
+            "machine breakdown: per-plot weather fetch failed, cluster=%s: %s",
+            cluster_id, exc,
+        )
+        return {
+            "cluster_id": cluster_id, "season_id": season_id, "date": report_date_iso,
+            "status": "weather_unavailable", "displaced": len(todays),
+        }
+
+    maturity_gdd_resolved = resolve_maturity_gdd(cluster)
+    remaining_usable_days = usable_harvest_days(remaining_forecast, RAIN_THRESHOLD_MM)
+    trigger_context = TriggerContext(
+        decision_date=report_date_iso,
+        rain_threshold_mm=RAIN_THRESHOLD_MM,
+        forecast_horizon_days=len(remaining_forecast),
+        usable_harvest_days=remaining_usable_days,
+        maturity_gdd_used=maturity_gdd_resolved[0],
+        threshold_source=maturity_gdd_resolved[1],
+        machine_capacity_acres_per_day=cluster.machine_capacity_acres_per_day,
+        capacity_budget_acres=harvest_day_budget_acres(
+            remaining_usable_days, cluster.machine_capacity_acres_per_day
+        ),
+        trigger_reason="breakdown_recompute",
+    )
+    decisions = solve(
+        plots, plot_days, cluster, remaining_forecast,
+        rain_threshold_mm=RAIN_THRESHOLD_MM, today=report_date,
+        harvested_plot_ids=frozenset(harvested_plot_ids),
+        maturity_gdd_resolved=maturity_gdd_resolved,
+    )
+    if get_claim is not None:
+        result = run_cluster_with_claims(
+            plots, decisions, cluster_id, storage, season_id, report_date,
+            get_claim, trigger_context,
+        )
+    else:
+        result = run_cluster(
+            plots, decisions, cluster_id, storage, season_id, report_date, trigger_context,
+        )
+
+    farmers_by_id = {f.farmer_id: f for f in storage.get_farmers_for_cluster(cluster_id)}
+    plots_by_id = {p.plot_id: p for p in plots}
+    decisions_by_id = {d.plot_id: d for d in decisions}
+    _send_notifications(
+        client, cluster, decisions_by_id, result, farmers_by_id, plots_by_id,
+        storage, season_id, report_date,
+    )
+
+    return {
+        "cluster_id": cluster_id,
+        "season_id": season_id,
+        "date": report_date_iso,
+        "status": "recomputed",
+        "displaced": len(todays),
+        "escalations": len(result.escalations),
+    }
+
+
+def set_machine_down(cluster_id: str, *, storage: Storage | None = None, today: date | None = None) -> dict:
+    """The "down indefinitely" follow-up (ADR-011 Part 2) -- suppresses
+    dispatch on every subsequent trigger day until clear_machine_down()
+    is called. Deliberately narrow: this alone does not touch today's
+    already-handled breakdown recompute, only future trigger days."""
+    storage = storage or get_storage()
+    today = today or date.today()
+    result = storage.put_machine_status(MachineStatus(
+        cluster_id=cluster_id, status="down",
+        reported_at=datetime.now(timezone.utc).isoformat(),
+    ))
+    return {"cluster_id": cluster_id, "status": "down" if result.success else "error"}
+
+
+def clear_machine_down(cluster_id: str, *, storage: Storage | None = None) -> dict:
+    """The symmetric "machine is back" action -- safe to call on a
+    cluster that was never marked down (a no-op success)."""
+    storage = storage or get_storage()
+    result = storage.clear_machine_status(cluster_id)
+    return {"cluster_id": cluster_id, "status": "operational" if result.success else "error"}

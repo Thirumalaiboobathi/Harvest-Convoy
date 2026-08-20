@@ -464,6 +464,61 @@ def unrecognized_action() -> str:
     # full escalation context, round 3 review.
 
 
+# --- Machine breakdown (ADR-011 Part 2) -- operator-only. DRAFT, pending
+# native-speaker review, same print_tamil_strings.py discipline as every
+# other string in this file.
+
+BREAKDOWN_BUTTON_LABEL = "🚜 இன்று இயந்திரம் பழுதடைந்தது"
+# "🚜 Machine down today"
+MACHINE_BACK_BUTTON_LABEL = "🚜 இயந்திரம் மீண்டும் இயங்குகிறது"
+# "🚜 Machine is back"
+BREAKDOWN_FOLLOWUP_TOMORROW_LABEL = "நாளை திரும்பும்"
+# "Back tomorrow"
+BREAKDOWN_FOLLOWUP_INDEFINITE_LABEL = "காலவரையின்றி பழுதடைந்தது"
+# "Down indefinitely"
+
+
+def breakdown_acknowledged() -> str:
+    return "பதிவு செய்யப்பட்டது; பாதை மறு கணக்கீடு செய்யப்படுகிறது."
+    # "Recorded; recalculating the route."
+
+
+def breakdown_already_reported() -> str:
+    return "இன்று ஏற்கனவே பதிவு செய்யப்பட்டுள்ளது."
+    # "Already reported today."
+
+
+def breakdown_no_route() -> str:
+    return "இன்று பழுது பதிவு செய்ய பாதை எதுவும் இல்லை."
+    # "No route today to report a breakdown for."
+
+
+def breakdown_recompute_failed() -> str:
+    return "பதிவு செய்யப்பட்டது, ஆனால் மறு கணக்கீடு இப்போது இயங்கவில்லை -- அடுத்த சோதனையில் மீண்டும் முயற்சிக்கப்படும்."
+    # "Recorded, but the recompute couldn't run right now -- will retry
+    #  on the next scheduled check."
+
+
+def breakdown_followup_prompt() -> str:
+    return "இது ஒரு நாள் பிரச்சனையா, அல்லது தொடர்கிறதா?"
+    # "Is this a one-day issue, or ongoing?"
+
+
+def breakdown_back_tomorrow_ack() -> str:
+    return "குறிப்பிடப்பட்டது -- நாளை வழக்கம் போல் இயங்கும்."
+    # "Noted -- tomorrow's run will proceed normally."
+
+
+def machine_down_indefinite_ack() -> str:
+    return "மேலும் அறிவிக்கும் வரை பழுதடைந்ததாகக் குறிக்கப்பட்டது. இயந்திரம் திரும்பியதும் கீழே தட்டவும்."
+    # "Marked down until further notice. Tap below when it's back."
+
+
+def machine_back_ack() -> str:
+    return "மீண்டும் இயங்குவதாகக் குறிக்கப்பட்டது."
+    # "Marked operational again."
+
+
 # --- Harvest confirmation loop (ADR-009 Part 2) ---
 # DRAFT, pending native-speaker review, same process as every other
 # string in this file (scripts/print_tamil_strings.py dump-and-review).

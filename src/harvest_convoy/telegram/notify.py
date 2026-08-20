@@ -209,21 +209,85 @@ def send_escalation_resolved(
     )
 
 
+def build_breakdown_keyboard(cluster_id: str, season_id: str, report_date: str, *, language: str = "ta") -> dict:
+    """One inline button on the operator's route summary, always present
+    regardless of whether the route is empty -- a stale button from an
+    earlier message may still be the one tapped, and that degrade path
+    (Decision 10, "a breakdown reported for a day with no route") is
+    handled at the callback, not by hiding the button. See ADR-011 Part 2."""
+    mod = _lang_module(language)
+    return {
+        "inline_keyboard": [
+            [{
+                "text": mod.BREAKDOWN_BUTTON_LABEL,
+                "callback_data": f"breakdown:{cluster_id}:{season_id}:{report_date}",
+            }]
+        ]
+    }
+
+
+def build_breakdown_followup_keyboard(cluster_id: str, *, language: str = "ta") -> dict:
+    """Optional second tap, sent as a follow-up after the first tap's
+    recompute already completed -- purely additive context, never a
+    prerequisite for the recompute itself. See ADR-011 Part 2."""
+    mod = _lang_module(language)
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": mod.BREAKDOWN_FOLLOWUP_TOMORROW_LABEL,
+                    "callback_data": f"breakdown_followup:{cluster_id}:tomorrow",
+                },
+                {
+                    "text": mod.BREAKDOWN_FOLLOWUP_INDEFINITE_LABEL,
+                    "callback_data": f"breakdown_followup:{cluster_id}:indefinite",
+                },
+            ]
+        ]
+    }
+
+
+def build_machine_back_keyboard(cluster_id: str, *, language: str = "ta") -> dict:
+    """The symmetric clearing action for "down indefinitely" -- sent
+    alongside the acknowledgment of that tap, so the operator has an
+    obvious, persistent place to report the machine is running again."""
+    mod = _lang_module(language)
+    return {
+        "inline_keyboard": [
+            [{"text": mod.MACHINE_BACK_BUTTON_LABEL, "callback_data": f"machine_back:{cluster_id}"}]
+        ]
+    }
+
+
 def send_operator_route_summary(
     client: TelegramClient,
     operator_chat_id: int | None,
     cluster: Cluster,
     route: list[tuple[Farmer, Plot]],
+    *,
+    season_id: str | None = None,
+    report_date: str | None = None,
 ) -> SendResult:
+    """season_id/report_date are optional so every existing call site
+    (and every existing test) keeps working unchanged -- when both are
+    given, the message gets the "machine down today" button (ADR-011
+    Part 2); when either is omitted, it renders exactly as before, no
+    keyboard at all."""
     if operator_chat_id is None:
         logger.error(
             "cluster %s has no operator configured; route summary not sent",
             cluster.name,
         )
         return SendResult(success=False, error="no operator configured for cluster")
+    reply_markup = None
+    if season_id is not None and report_date is not None:
+        reply_markup = build_breakdown_keyboard(
+            cluster.cluster_id, season_id, report_date, language=cluster.operator_language
+        )
     return client.send_message(
         operator_chat_id,
         build_operator_route_summary_text(cluster, route, language=cluster.operator_language),
+        reply_markup=reply_markup,
     )
 
 

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Callable
 
 from harvest_convoy.agents.contracts import EscalationPayload
@@ -182,7 +182,23 @@ def handle_confirmation_callback(
     )
     storage.put_harvest_confirmation(updated)
 
-    if not answer:
+    if confirmation.cancelled:
+        # ADR-011 Part 2, Decision 9: this dispatch was already
+        # invalidated by a machine breakdown before this reply arrived
+        # (the race case named explicitly in the ADR -- confirmations
+        # already sent before the breakdown was reported). The truth
+        # (confirmed/confirmed_at above) still gets recorded, but the
+        # reversal-and-ledger-credit branch below must NEVER fire here:
+        # a breakdown already caused a BreakdownDisplacement record, not
+        # a LedgerEntry, and a truthful "no" tap must not reach
+        # record_bump through this second door.
+        logger.info(
+            "confirmation %s/%s: reply received against a cancelled "
+            "confirmation (machine breakdown) -- recorded, not credited "
+            "to the fairness ledger",
+            plot_id, season_id,
+        )
+    elif not answer:
         # The reversal hook: return the plot to the schedulable pool AND
         # credit the fairness ledger -- the farmer was effectively bumped
         # regardless of what the system decided. Both calls are safe to
@@ -289,6 +305,225 @@ def handle_rollover_callback(
     client.answer_callback_query(callback_query_id, mod.season_rollover_date_prompt())
     if farmer is not None and farmer.telegram_chat_id is not None:
         client.send_message(farmer.telegram_chat_id, mod.season_rollover_date_prompt())
+    if chat_id is not None and message_id is not None:
+        client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+
+
+def _is_operator(callback_query: dict, cluster) -> bool:
+    """The tapping user's own Telegram identity, not the chat the
+    message lives in -- see ADR-011 Part 2, Decision 6. Only the
+    operator's own tap on a machine-status action is honored."""
+    tapper_id = (callback_query.get("from") or {}).get("id")
+    return cluster is not None and tapper_id is not None and tapper_id == cluster.operator_chat_id
+
+
+def parse_breakdown_callback_data(data: str) -> tuple[str, str, str] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "breakdown":
+        return None
+    _, cluster_id, season_id, report_date = parts
+    return cluster_id, season_id, report_date
+
+
+def handle_breakdown_callback(
+    client: TelegramClient,
+    callback_query: dict,
+    storage: Storage,
+) -> None:
+    """ADR-011 Part 2: the operator's "machine down today" tap, attached
+    to the day's route summary message. One tap is sufficient on its
+    own -- the recompute runs immediately; the follow-up keyboard sent
+    afterward is purely additive context.
+    """
+    callback_query_id = callback_query.get("id", "")
+    data = callback_query.get("data", "")
+    parsed = parse_breakdown_callback_data(data)
+
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+
+    cluster_id, season_id, report_date_str = parsed
+    cluster = storage.get_cluster(cluster_id)
+    if cluster is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    mod = notify._lang_module(cluster.operator_language)
+
+    if not _is_operator(callback_query, cluster):
+        logger.warning(
+            "breakdown callback for cluster=%s from a non-operator tapper -- refused",
+            cluster_id,
+        )
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    try:
+        report_date = date.fromisoformat(report_date_str)
+    except ValueError:
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    # Deferred import: watcher.py imports this module (webhook.py) to
+    # send escalation/notification messages, so importing watcher at
+    # module load time here would be circular. Resolving it at call
+    # time, after both modules are fully loaded, is the standard fix.
+    from harvest_convoy import watcher as watcher_mod
+
+    result = watcher_mod.handle_machine_breakdown(
+        cluster_id, season_id, report_date, storage=storage, telegram_client=client,
+    )
+
+    status = result.get("status")
+    if status == "already_reported":
+        client.answer_callback_query(callback_query_id, mod.breakdown_already_reported(), show_alert=True)
+        return
+    if status == "no_route":
+        client.answer_callback_query(callback_query_id, mod.breakdown_no_route(), show_alert=True)
+        return
+    if status in ("error", "weather_unavailable"):
+        client.answer_callback_query(callback_query_id, mod.breakdown_recompute_failed(), show_alert=True)
+        return
+
+    client.answer_callback_query(callback_query_id, mod.breakdown_acknowledged())
+    if cluster.operator_chat_id is not None:
+        client.send_message(
+            cluster.operator_chat_id, mod.breakdown_followup_prompt(),
+            reply_markup=notify.build_breakdown_followup_keyboard(
+                cluster_id, language=cluster.operator_language
+            ),
+        )
+
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if chat_id is not None and message_id is not None:
+        client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+
+
+def parse_breakdown_followup_callback_data(data: str) -> tuple[str, str] | None:
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "breakdown_followup":
+        return None
+    _, cluster_id, choice = parts
+    if choice not in ("tomorrow", "indefinite"):
+        return None
+    return cluster_id, choice
+
+
+def handle_breakdown_followup_callback(
+    client: TelegramClient,
+    callback_query: dict,
+    storage: Storage,
+) -> None:
+    """The optional second tap -- "back tomorrow" (the default; sets no
+    state at all, tomorrow's trigger just runs normally) or "down
+    indefinitely" (sets MachineStatus, and offers the symmetric
+    "machine is back" action so the cluster can never get permanently
+    stuck). See ADR-011 Part 2."""
+    callback_query_id = callback_query.get("id", "")
+    data = callback_query.get("data", "")
+    parsed = parse_breakdown_followup_callback_data(data)
+
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+
+    cluster_id, choice = parsed
+    cluster = storage.get_cluster(cluster_id)
+    if cluster is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    mod = notify._lang_module(cluster.operator_language)
+
+    if not _is_operator(callback_query, cluster):
+        logger.warning(
+            "breakdown_followup callback for cluster=%s from a non-operator "
+            "tapper -- refused",
+            cluster_id,
+        )
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    if choice == "indefinite":
+        from harvest_convoy import watcher as watcher_mod
+
+        watcher_mod.set_machine_down(cluster_id, storage=storage)
+        client.answer_callback_query(callback_query_id, mod.machine_down_indefinite_ack())
+        if cluster.operator_chat_id is not None:
+            client.send_message(
+                cluster.operator_chat_id, mod.machine_down_indefinite_ack(),
+                reply_markup=notify.build_machine_back_keyboard(
+                    cluster_id, language=cluster.operator_language
+                ),
+            )
+    else:
+        client.answer_callback_query(callback_query_id, mod.breakdown_back_tomorrow_ack())
+
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if chat_id is not None and message_id is not None:
+        client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+
+
+def parse_machine_back_callback_data(data: str) -> str | None:
+    parts = data.split(":")
+    if len(parts) != 2 or parts[0] != "machine_back":
+        return None
+    return parts[1]
+
+
+def handle_machine_back_callback(
+    client: TelegramClient,
+    callback_query: dict,
+    storage: Storage,
+) -> None:
+    """The symmetric clearing action for "down indefinitely". See
+    ADR-011 Part 2."""
+    callback_query_id = callback_query.get("id", "")
+    data = callback_query.get("data", "")
+    cluster_id = parse_machine_back_callback_data(data)
+
+    if cluster_id is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+
+    cluster = storage.get_cluster(cluster_id)
+    if cluster is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    mod = notify._lang_module(cluster.operator_language)
+
+    if not _is_operator(callback_query, cluster):
+        logger.warning(
+            "machine_back callback for cluster=%s from a non-operator tapper "
+            "-- refused",
+            cluster_id,
+        )
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    from harvest_convoy import watcher as watcher_mod
+
+    watcher_mod.clear_machine_down(cluster_id, storage=storage)
+    client.answer_callback_query(callback_query_id, mod.machine_back_ack())
+
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
     if chat_id is not None and message_id is not None:
         client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
 
@@ -475,14 +710,16 @@ def handle_update(
     uses them -- keeps the signature uniform rather than branching on
     which fields are needed for which update type.
 
-    Four distinct callback_query shapes: a "lang:ta"/"lang:en"
+    Seven distinct callback_query shapes: a "lang:ta"/"lang:en"
     registration-language tap routes to
     registration.handle_language_callback (ADR-008 Decision 7); a
     "confirm:{plot_id}:{season_id}:{yes|no}" tap routes to
     handle_confirmation_callback (ADR-009 Part 2); a
     "rollover:{plot_id}:{new_season_id}:{yes|no}" tap routes to
-    handle_rollover_callback (ADR-011 Part 1); anything else goes through
-    the existing handle_callback_query escalation flow.
+    handle_rollover_callback (ADR-011 Part 1); "breakdown:...",
+    "breakdown_followup:...", and "machine_back:..." route to their
+    matching handlers (ADR-011 Part 2); anything else goes through the
+    existing handle_callback_query escalation flow.
     """
     if "callback_query" in update:
         callback_query = update["callback_query"]
@@ -495,6 +732,15 @@ def handle_update(
             return
         if data.startswith("rollover:"):
             handle_rollover_callback(client, callback_query, storage)
+            return
+        if data.startswith("breakdown_followup:"):
+            handle_breakdown_followup_callback(client, callback_query, storage)
+            return
+        if data.startswith("breakdown:"):
+            handle_breakdown_callback(client, callback_query, storage)
+            return
+        if data.startswith("machine_back:"):
+            handle_machine_back_callback(client, callback_query, storage)
             return
         handle_callback_query(
             client, callback_query, storage, season_id, lookup_farmer_for_plot

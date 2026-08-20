@@ -20,9 +20,11 @@ from pathlib import Path
 
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.storage.interface import (
+    BreakdownDisplacement,
     DecisionRecord,
     HarvestConfirmation,
     LedgerEntry,
+    MachineStatus,
     SeasonRolloverPrompt,
     StorageResult,
 )
@@ -37,6 +39,8 @@ _EMPTY: dict = {
     "confirmations": {},  # confirmations[plot_id][season_id] = HarvestConfirmation dict
     "decisions": {},  # decisions[plot_id][season_id][decision_date] = DecisionRecord dict
     "rollover_prompts": {},  # rollover_prompts[plot_id][new_season_id] = SeasonRolloverPrompt dict
+    "breakdowns": {},  # breakdowns[cluster_id][season_id][plot_id+"#"+date] = BreakdownDisplacement dict
+    "machine_status": {},  # machine_status[cluster_id] = MachineStatus dict
 }
 
 
@@ -238,3 +242,38 @@ class FileStorage:
             if raw and raw["cluster_id"] == cluster_id:
                 result.append(SeasonRolloverPrompt(**raw))
         return result
+
+    # Machine breakdown -- ADR-011 Part 2
+    def put_breakdown_displacement(self, displacement: BreakdownDisplacement) -> StorageResult:
+        by_season = self._data["breakdowns"].setdefault(displacement.cluster_id, {})
+        by_key = by_season.setdefault(displacement.season_id, {})
+        key = f"{displacement.plot_id}#{displacement.original_scheduled_date}"
+        by_key[key] = asdict(displacement)
+        return self._save()
+
+    def get_breakdown_displacements_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[BreakdownDisplacement]:
+        raw = self._data["breakdowns"].get(cluster_id, {}).get(season_id, {})
+        return [BreakdownDisplacement(**v) for v in raw.values()]
+
+    def get_breakdown_displacements_for_date(
+        self, cluster_id: str, season_id: str, report_date: str
+    ) -> list[BreakdownDisplacement]:
+        raw = self._data["breakdowns"].get(cluster_id, {}).get(season_id, {})
+        return [
+            BreakdownDisplacement(**v) for v in raw.values()
+            if v["original_scheduled_date"] == report_date
+        ]
+
+    def put_machine_status(self, status: MachineStatus) -> StorageResult:
+        self._data["machine_status"][status.cluster_id] = asdict(status)
+        return self._save()
+
+    def get_machine_status(self, cluster_id: str) -> MachineStatus | None:
+        raw = self._data["machine_status"].get(cluster_id)
+        return MachineStatus(**raw) if raw else None
+
+    def clear_machine_status(self, cluster_id: str) -> StorageResult:
+        self._data["machine_status"].pop(cluster_id, None)
+        return self._save()

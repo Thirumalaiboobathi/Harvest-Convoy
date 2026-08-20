@@ -146,3 +146,8 @@ class TriggerContext:
     threshold_source: str  # "calibrated" | "fallback"
     machine_capacity_acres_per_day: float
     capacity_budget_acres: float
+    # "scheduled" (the normal daily trigger) | "breakdown_recompute" (a
+    # machine-breakdown recompute, ADR-011 Part 2) -- copied straight
+    # onto every DecisionRecord this trigger writes, so a later reader
+    # can tell why a plot's numbers look the way they do.
+    trigger_reason: str = "scheduled"
