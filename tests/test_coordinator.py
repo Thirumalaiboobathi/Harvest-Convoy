@@ -204,6 +204,40 @@ def test_negotiate_pair_fairness_cannot_flip_an_already_clear_margin() -> None:
     assert result.winner_plot_id == "a"
 
 
+def test_rain_urgency_boost_can_tie_but_never_invert_urgency_ordering() -> None:
+    """ADR-011 Part 3, Decision 13: the monotonicity proof in
+    agents/coordinator.py's comment above FAIRNESS_WEIGHT_PER_BUMPED_DAY --
+    min(1, x+b) is monotonic non-decreasing in x for any fixed boost b, so
+    the rain urgency boost can compress a genuine urgency gap toward zero
+    (at worst an exact tie once both sides hit the 1.0 cap) but can never
+    invert which of two plots is more urgent. Checked against the actual
+    RAIN_URGENCY_BOOST_SUSTAINED_TUNING value, including the exact
+    worst-case pair the algebra identifies: the more-urgent plot already
+    at the 1.0 cap pre-boost, the less-urgent plot close behind it.
+    """
+    from harvest_convoy.scheduling.rain_event import RAIN_URGENCY_BOOST_SUSTAINED_TUNING
+
+    def boosted(raw_urgency: float, boost: float) -> float:
+        return min(1.0, raw_urgency + boost)
+
+    high_raw = 1.0
+    low_raw = 1.0 - RAIN_URGENCY_BOOST_SUSTAINED_TUNING / 2
+    assert high_raw > low_raw
+
+    high_boosted = boosted(high_raw, RAIN_URGENCY_BOOST_SUSTAINED_TUNING)
+    low_boosted = boosted(low_raw, RAIN_URGENCY_BOOST_SUSTAINED_TUNING)
+    assert high_boosted >= low_boosted  # never inverted -- at most tied
+    assert high_boosted == 1.0 and low_boosted == 1.0  # the actual tie case
+
+    # General sweep across raw urgency pairs and boost magnitudes: ordering
+    # is always preserved or collapses to a tie, never inverts.
+    for boost in (0.0, 0.05, RAIN_URGENCY_BOOST_SUSTAINED_TUNING, 0.5, 1.0):
+        for x in (0.0, 0.2, 0.5, 0.79, 0.8, 0.95, 1.0):
+            for y in (0.0, 0.2, 0.5, 0.79, 0.8, 0.95, 1.0):
+                if x >= y:
+                    assert boosted(x, boost) >= boosted(y, boost)
+
+
 def _plot(plot_id: str, area_acres: float = 1.0) -> Plot:
     from datetime import date
 

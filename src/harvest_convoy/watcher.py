@@ -28,6 +28,7 @@ from harvest_convoy.scheduling.capacity import (
     harvest_day_budget_acres,
     usable_harvest_days,
 )
+from harvest_convoy.scheduling.rain_event import classify_rain_event, rain_urgency_boost
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome, resolve_maturity_gdd, solve
 from harvest_convoy.storage import Storage, get_storage
 from harvest_convoy.storage.interface import (
@@ -254,6 +255,12 @@ def _run_daily_watch_one(
             " (forced)" if usable_days >= len(forecast) else "", cluster_id, usable_days, len(forecast),
         )
         maturity_gdd_resolved = resolve_maturity_gdd(cluster)
+        # ADR-011 Part 3: classified once here, off the same forecast
+        # usable_harvest_days() already read -- passed through to both
+        # solve() (so the urgency boost and the classification agree with
+        # what gets persisted) and TriggerContext (so it's visible in the
+        # audit trail), never computed twice.
+        event_class = classify_rain_event(forecast, RAIN_THRESHOLD_MM)
         trigger_context = TriggerContext(
             decision_date=today.isoformat(),
             rain_threshold_mm=RAIN_THRESHOLD_MM,
@@ -265,12 +272,15 @@ def _run_daily_watch_one(
             capacity_budget_acres=harvest_day_budget_acres(
                 usable_days, cluster.machine_capacity_acres_per_day
             ),
+            rain_event_classification=event_class.value,
+            rain_urgency_boost=rain_urgency_boost(event_class),
         )
         decisions = solve(
             plots, plot_days, cluster, forecast,
             rain_threshold_mm=RAIN_THRESHOLD_MM, today=today,
             harvested_plot_ids=frozenset(harvested_plot_ids),
             maturity_gdd_resolved=maturity_gdd_resolved,
+            rain_event_classification=event_class,
         )
         if get_claim is not None:
             result = run_cluster_with_claims(
@@ -288,6 +298,7 @@ def _run_daily_watch_one(
         _send_notifications(
             client, cluster, decisions_by_id, result, farmers_by_id, plots_by_id,
             storage, season_id, today,
+            rain_event_classification=event_class.value,
         )
 
         storage.set_watcher_last_run(cluster_id, today.isoformat())
@@ -317,6 +328,8 @@ def _send_notifications(
     storage: Storage,
     season_id: str,
     today: date,
+    *,
+    rain_event_classification: str = "none",
 ) -> None:
     fits_route: list[tuple[Farmer, Plot]] = []
 
@@ -331,7 +344,10 @@ def _send_notifications(
             continue
 
         if outcome.outcome == PlotOutcome.TOO_GREEN:
-            notify.send_not_ready(client, farmer, plot)
+            # ADR-011 Part 3: reflected in the message only for a
+            # SUSTAINED event -- BRIEF/NONE render byte-identical to the
+            # existing wording, so the common case doesn't grow at all.
+            notify.send_not_ready(client, farmer, plot, rain_event_classification=rain_event_classification)
         elif outcome.outcome == PlotOutcome.FITS:
             decision = decisions_by_id[outcome.plot_id]
             notify.send_harvest_scheduled(client, farmer, plot, decision.route_position)
@@ -795,6 +811,7 @@ def handle_machine_breakdown(
 
     maturity_gdd_resolved = resolve_maturity_gdd(cluster)
     remaining_usable_days = usable_harvest_days(remaining_forecast, RAIN_THRESHOLD_MM)
+    event_class = classify_rain_event(remaining_forecast, RAIN_THRESHOLD_MM)
     trigger_context = TriggerContext(
         decision_date=report_date_iso,
         rain_threshold_mm=RAIN_THRESHOLD_MM,
@@ -807,12 +824,15 @@ def handle_machine_breakdown(
             remaining_usable_days, cluster.machine_capacity_acres_per_day
         ),
         trigger_reason="breakdown_recompute",
+        rain_event_classification=event_class.value,
+        rain_urgency_boost=rain_urgency_boost(event_class),
     )
     decisions = solve(
         plots, plot_days, cluster, remaining_forecast,
         rain_threshold_mm=RAIN_THRESHOLD_MM, today=report_date,
         harvested_plot_ids=frozenset(harvested_plot_ids),
         maturity_gdd_resolved=maturity_gdd_resolved,
+        rain_event_classification=event_class,
     )
     if get_claim is not None:
         result = run_cluster_with_claims(
@@ -830,6 +850,7 @@ def handle_machine_breakdown(
     _send_notifications(
         client, cluster, decisions_by_id, result, farmers_by_id, plots_by_id,
         storage, season_id, report_date,
+        rain_event_classification=event_class.value,
     )
 
     return {

@@ -84,6 +84,16 @@ def main() -> None:
     print(messages_ta.not_ready(0.75, "acre"))
     print(messages_ta.not_ready(1.0, "cent"))
 
+    _section("NEW (ADR-011 Part 3) -- not_ready with rain_event_classification -- DRAFT, unreviewed")
+    print("rain_event_classification='none' (byte-identical to the baseline above):")
+    print(messages_ta.not_ready(0.75, "acre", rain_event_classification="none"))
+    print()
+    print("rain_event_classification='brief' (also byte-identical to the baseline):")
+    print(messages_ta.not_ready(0.75, "acre", rain_event_classification="brief"))
+    print()
+    print("rain_event_classification='sustained' (new clause appended):")
+    print(messages_ta.not_ready(0.75, "acre", rain_event_classification="sustained"))
+
     _section("escalation_resolved_won")
     print(messages_ta.escalation_resolved_won(1.0, "acre"))
 

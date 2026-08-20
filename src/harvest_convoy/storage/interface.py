@@ -139,6 +139,11 @@ class DecisionRecord:
     # do on a given day, e.g. zero capacity because of a breakdown, not
     # because of rain.
     trigger_reason: str = "scheduled"
+    # "none" | "brief" | "sustained" and the urgency boost it produced --
+    # ADR-011 Part 3. See TriggerContext for the same fields' meaning;
+    # copied here verbatim at write time.
+    rain_event_classification: str = "none"
+    rain_urgency_boost: float = 0.0
 
 
 @dataclass(frozen=True)

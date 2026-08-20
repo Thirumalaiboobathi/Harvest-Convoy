@@ -65,6 +65,25 @@ assert MAX_FAIRNESS_BONUS < _URGENCY_GRANULARITY, (
     "or a maximally urgent plot could lose a negotiation to fairness alone"
 )
 
+# ADR-011 Part 3's rain-urgency boost (scheduling/rain_event.py) is
+# applied to every ready plot's urgency, uniformly across a cluster on a
+# given trigger day, BEFORE this module ever sees it -- so does it
+# threaten the invariant just asserted? Worked through, not just assumed
+# safe: `min(1, x+b)` is monotonic non-decreasing in x for any fixed
+# boost b, so for two plots with x >= y, `min(1,x+b) >= min(1,y+b)`
+# always holds -- the boost can compress a gap toward zero (at worst,
+# a genuine urgency lead shrinks to an exact tie once both sides hit the
+# cap), it can never invert which plot is more urgent. A tie is not a
+# violation of "fairness cannot beat a more urgent plot" -- both plots
+# genuinely became equally urgent under the boost, and letting fairness
+# settle a genuine tie is exactly what this mechanism is for. This
+# reasoning is independent of the boost's magnitude (RAIN_URGENCY_BOOST_
+# SUSTAINED_TUNING is free to change). See
+# test_rain_urgency_boost_can_tie_but_never_invert_urgency_ordering in
+# test_coordinator.py for the behavioral proof of the monotonicity claim
+# above, run against the actual worst-case pair the algebra identifies --
+# not just this comment.
+
 FAIRNESS_WEIGHT_PER_BUMPED_DAY = 0.01  # DERIVED, tuning constant, not sourced
 
 ClaimProvider = Callable[[PlotFacts, int, str | None], AdvocateClaim]
@@ -230,6 +249,8 @@ def _base_decision_record(
         machine_capacity_acres_per_day=trigger_context.machine_capacity_acres_per_day,
         capacity_budget_acres=trigger_context.capacity_budget_acres,
         trigger_reason=trigger_context.trigger_reason,
+        rain_event_classification=trigger_context.rain_event_classification,
+        rain_urgency_boost=trigger_context.rain_urgency_boost,
     )
 
 

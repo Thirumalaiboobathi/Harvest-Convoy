@@ -222,9 +222,9 @@ def harvest_scheduled(area_acres: float, area_unit: str, route_position: int) ->
     #  route," changed to the ordinal-in-line phrasing you asked for.
 
 
-def not_ready(area_acres: float, area_unit: str) -> str:
+def not_ready(area_acres: float, area_unit: str, *, rain_event_classification: str = "none") -> str:
     area = format_area(area_acres, area_unit)
-    return (
+    text = (
         f"உங்கள் {area} வயலின் கதிர் இன்னும் முற்றவில்லை -- எதுவும் "
         "செய்ய வேண்டாம், விசாரிக்கவும் வேண்டாம். நாங்கள் தினமும் "
         "கண்காணிக்கிறோம்; நேரம் வரும்போது அல்லது மாற்றம் இருந்தால் "
@@ -239,6 +239,14 @@ def not_ready(area_acres: float, area_unit: str) -> str:
     #  (grain still filling) replaced with the more natural agricultural
     #  phrase "கதிர் இன்னும் முற்றவில்லை" (grain-head not yet ripened)
     #  as the core not-ready statement itself.
+    if rain_event_classification == "sustained":
+        text += (
+            " பல நாட்களுக்கு மழை நீடிக்கும் என்பதால், வழக்கத்தை விட "
+            "சற்று தாமதமாகலாம்."
+        )
+        # "Since rain looks set to continue for several days, it may be
+        #  a little later than usual." -- ADR-011 Decision 14 wording.
+    return text
 
 
 def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:

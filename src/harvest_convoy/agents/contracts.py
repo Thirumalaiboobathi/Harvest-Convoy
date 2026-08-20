@@ -151,3 +151,9 @@ class TriggerContext:
     # onto every DecisionRecord this trigger writes, so a later reader
     # can tell why a plot's numbers look the way they do.
     trigger_reason: str = "scheduled"
+    # "none" | "brief" | "sustained" (RainEventClass.value) and the
+    # urgency boost it produced -- ADR-011 Part 3. Copied onto every
+    # DecisionRecord this trigger writes, same "make the number visible
+    # in the audit trail" discipline as everything else here.
+    rain_event_classification: str = "none"
+    rain_urgency_boost: float = 0.0

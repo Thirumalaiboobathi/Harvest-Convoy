@@ -38,6 +38,11 @@ from harvest_convoy.scheduling.capacity import (
     harvest_day_budget_acres,
     usable_harvest_days,
 )
+from harvest_convoy.scheduling.rain_event import (
+    RainEventClass,
+    classify_rain_event,
+    rain_urgency_boost,
+)
 from harvest_convoy.scheduling.route import RoutePoint, order_route
 
 logger = logging.getLogger(__name__)
@@ -66,6 +71,7 @@ def assess_plot(
     today: date,
     *,
     maturity_gdd: float = crop_params.MATURITY_GDD_ESTIMATED,
+    rain_urgency_boost: float = 0.0,
 ) -> PlotDecision:
     """Classify a single plot as TOO_GREEN or ready (returned as FITS here
     provisionally -- capacity allocation in solve() may downgrade a ready
@@ -80,6 +86,13 @@ def assess_plot(
     constant for direct callers (demo scripts, tests) that don't have a
     Cluster in hand. solve() below always passes the cluster's own
     resolved threshold explicitly -- see ADR-008 Decision 2.
+
+    `rain_urgency_boost` (ADR-011 Part 3): added to a ready plot's
+    urgency before capping at 1.0 -- never applied to a TOO_GREEN plot,
+    since rain doesn't make an immature plant more urgent. Defaults to
+    0.0 so every existing caller (tests, backtest, trigger_scenario.py)
+    is unaffected; solve() below resolves and passes the real value from
+    scheduling/rain_event.py.
     """
     total_gdd = accumulate_gdd(days, crop_params.T_BASE_C)
 
@@ -103,7 +116,7 @@ def assess_plot(
         outcome=PlotOutcome.FITS,  # provisional; solve() may downgrade to CONTESTED
         accumulated_gdd=total_gdd,
         days_past_maturity=days_past_maturity,
-        urgency=decay_fraction(days_past_maturity),
+        urgency=min(1.0, decay_fraction(days_past_maturity) + rain_urgency_boost),
         route_position=None,
     )
 
@@ -141,6 +154,7 @@ def solve(
     *,
     harvested_plot_ids: frozenset[str] = frozenset(),
     maturity_gdd_resolved: tuple[float, str] | None = None,
+    rain_event_classification: RainEventClass | None = None,
 ) -> list[PlotDecision]:
     """Full scheduling pass over a cluster's plots for one weather trigger.
 
@@ -175,6 +189,14 @@ def solve(
     and re-logging the fallback warning a second time for one trigger;
     every other caller (tests, backtest, trigger_scenario.py) omits it and
     solve() resolves it here exactly as before.
+
+    `rain_event_classification` (ADR-011 Part 3): same threading pattern
+    as `maturity_gdd_resolved` -- a caller that already classified the
+    forecast (watcher.py, building a TriggerContext) passes it through;
+    every other caller omits it and solve() classifies the forecast
+    itself via scheduling/rain_event.py:classify_rain_event(). The
+    resulting urgency boost is applied to every ready plot uniformly,
+    never to a TOO_GREEN one.
     """
     plots_by_id = {p.plot_id: p for p in plots}
 
@@ -182,6 +204,10 @@ def solve(
         maturity_gdd, _source = maturity_gdd_resolved
     else:
         maturity_gdd, _source = resolve_maturity_gdd(cluster)
+
+    if rain_event_classification is None:
+        rain_event_classification = classify_rain_event(forecast, rain_threshold_mm)
+    urgency_boost = rain_urgency_boost(rain_event_classification)
 
     harvested = [
         PlotDecision(
@@ -198,7 +224,10 @@ def solve(
     schedulable = [p for p in plots if p.plot_id not in harvested_plot_ids]
 
     assessed = [
-        assess_plot(p, plot_days[p.plot_id], today, maturity_gdd=maturity_gdd)
+        assess_plot(
+            p, plot_days[p.plot_id], today,
+            maturity_gdd=maturity_gdd, rain_urgency_boost=urgency_boost,
+        )
         for p in schedulable
     ]
 

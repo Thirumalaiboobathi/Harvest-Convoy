@@ -114,18 +114,24 @@ def harvest_scheduled(area_acres: float, area_unit: str, route_position: int) ->
     )
 
 
-def not_ready(area_acres: float, area_unit: str) -> str:
+def not_ready(area_acres: float, area_unit: str, *, rain_event_classification: str = "none") -> str:
     # Trimmed to load-bearing content (not ready / do nothing / we're
     # tracking it / you'll hear from us) -- the "grain still filling,
     # safer standing than cut early" rationale clause was cut. Kept in
     # parity with messages_ta.py's trim, same length reduction, same
     # information content minus the dropped rationale.
-    return (
+    text = (
         f"Your {format_area(area_acres, area_unit)} plot isn't ready to "
         f"harvest yet -- no action needed, and no need to check in. "
         f"We're tracking it every day; you'll hear from us when it's "
         f"time or something changes."
     )
+    if rain_event_classification == "sustained":
+        text += (
+            " Rain looks set in for several days, so it may be a little "
+            "longer than usual."
+        )
+    return text
 
 
 def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:

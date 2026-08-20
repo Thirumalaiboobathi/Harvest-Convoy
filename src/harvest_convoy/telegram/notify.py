@@ -94,8 +94,16 @@ def build_harvest_scheduled_text(plot: Plot, route_position: int, *, language: s
     return _lang_module(language).harvest_scheduled(plot.area_acres, plot.area_unit, route_position)
 
 
-def build_not_ready_text(plot: Plot, *, language: str = "ta") -> str:
-    return _lang_module(language).not_ready(plot.area_acres, plot.area_unit)
+def build_not_ready_text(
+    plot: Plot, *, language: str = "ta", rain_event_classification: str = "none"
+) -> str:
+    """rain_event_classification (ADR-011 Part 3): "none"/"brief" render
+    byte-identical to the pre-Part-3 wording; only "sustained" appends a
+    clause -- reflected in the message, without making the common case
+    any longer."""
+    return _lang_module(language).not_ready(
+        plot.area_acres, plot.area_unit, rain_event_classification=rain_event_classification,
+    )
 
 
 def build_drying_window_alert_text(*, language: str = "ta") -> str:
@@ -179,12 +187,17 @@ def send_harvest_scheduled(
     )
 
 
-def send_not_ready(client: TelegramClient, farmer: Farmer, plot: Plot) -> SendResult:
+def send_not_ready(
+    client: TelegramClient, farmer: Farmer, plot: Plot, *, rain_event_classification: str = "none"
+) -> SendResult:
     if farmer.telegram_chat_id is None:
         logger.error("no chat_id for farmer %s, cannot notify", farmer.farmer_id)
         return SendResult(success=False, error="farmer has no telegram_chat_id")
     return client.send_message(
-        farmer.telegram_chat_id, build_not_ready_text(plot, language=farmer.language)
+        farmer.telegram_chat_id,
+        build_not_ready_text(
+            plot, language=farmer.language, rain_event_classification=rain_event_classification,
+        ),
     )
 
 
