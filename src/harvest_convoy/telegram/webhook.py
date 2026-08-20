@@ -30,7 +30,7 @@ from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.storage import Storage
 from harvest_convoy.storage.fairness import record_bump
 from harvest_convoy.storage.interface import HarvestConfirmation
-from harvest_convoy.telegram import notify, registration
+from harvest_convoy.telegram import notify, registration, rollover
 from harvest_convoy.telegram.client import TelegramClient
 from harvest_convoy.telegram.registration import IncomingMessage
 
@@ -209,6 +209,86 @@ def handle_confirmation_callback(
     message = callback_query.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
     message_id = message.get("message_id")
+    if chat_id is not None and message_id is not None:
+        client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+
+
+def parse_rollover_callback_data(data: str) -> tuple[str, str, bool] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "rollover":
+        return None
+    _, plot_id, new_season_id, answer = parts
+    if answer not in ("yes", "no"):
+        return None
+    return plot_id, new_season_id, answer == "yes"
+
+
+def handle_rollover_callback(
+    client: TelegramClient,
+    callback_query: dict,
+    storage: Storage,
+) -> None:
+    """ADR-011 Part 1: the farmer's yes/no tap on the season-rollover
+    prompt. "No" is terminal here -- recorded and done. "Yes" does not
+    itself set replied=True; it only opens a short free-text exchange
+    (telegram/rollover.py) for the one thing still missing, the new
+    season's transplant date. Participation is only recorded once that
+    date actually arrives -- a "yes" tap with no follow-up date leaves
+    the plot correctly excluded (Decision 2's rule), rather than
+    including it with a stale transplant_date from last season.
+    """
+    callback_query_id = callback_query.get("id", "")
+    data = callback_query.get("data", "")
+    parsed = parse_rollover_callback_data(data)
+
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(),
+            show_alert=True,
+        )
+        return
+
+    plot_id, new_season_id, answer = parsed
+    prompt = storage.get_season_rollover_prompt(plot_id, new_season_id)
+    if prompt is None:
+        logger.warning(
+            "rollover callback for unknown plot=%s season=%s -- no record, "
+            "nothing to update",
+            plot_id, new_season_id,
+        )
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").confirmation_not_found(),
+            show_alert=True,
+        )
+        return
+
+    farmer = storage.get_farmer(prompt.farmer_id)
+    language = farmer.language if farmer is not None else "ta"
+    mod = notify._lang_module(language)
+
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+
+    if not answer:
+        updated = replace(
+            prompt, replied=False, replied_at=datetime.now(timezone.utc).isoformat()
+        )
+        storage.put_season_rollover_prompt(updated)
+        client.answer_callback_query(callback_query_id, mod.season_rollover_declined_ack())
+        if chat_id is not None and message_id is not None:
+            client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+        return
+
+    # "Yes" -- ask for the date via a real chat message (a toast alone
+    # can't be replied to), and remember which plot/season this chat_id
+    # is now mid-reply for.
+    tapper_chat_id = (callback_query.get("from") or {}).get("id")
+    if tapper_chat_id is not None:
+        rollover.start_awaiting_date(tapper_chat_id, plot_id, new_season_id, language)
+    client.answer_callback_query(callback_query_id, mod.season_rollover_date_prompt())
+    if farmer is not None and farmer.telegram_chat_id is not None:
+        client.send_message(farmer.telegram_chat_id, mod.season_rollover_date_prompt())
     if chat_id is not None and message_id is not None:
         client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
 
@@ -395,12 +475,14 @@ def handle_update(
     uses them -- keeps the signature uniform rather than branching on
     which fields are needed for which update type.
 
-    Three distinct callback_query shapes: a "lang:ta"/"lang:en"
+    Four distinct callback_query shapes: a "lang:ta"/"lang:en"
     registration-language tap routes to
     registration.handle_language_callback (ADR-008 Decision 7); a
     "confirm:{plot_id}:{season_id}:{yes|no}" tap routes to
-    handle_confirmation_callback (ADR-009 Part 2); anything else goes
-    through the existing handle_callback_query escalation flow.
+    handle_confirmation_callback (ADR-009 Part 2); a
+    "rollover:{plot_id}:{new_season_id}:{yes|no}" tap routes to
+    handle_rollover_callback (ADR-011 Part 1); anything else goes through
+    the existing handle_callback_query escalation flow.
     """
     if "callback_query" in update:
         callback_query = update["callback_query"]
@@ -410,6 +492,9 @@ def handle_update(
             return
         if data.startswith("confirm:"):
             handle_confirmation_callback(client, callback_query, storage)
+            return
+        if data.startswith("rollover:"):
+            handle_rollover_callback(client, callback_query, storage)
             return
         handle_callback_query(
             client, callback_query, storage, season_id, lookup_farmer_for_plot
@@ -427,5 +512,18 @@ def handle_update(
         return
 
     incoming = parse_incoming_message(message)
+
+    # A farmer mid-reply to a "yes, tap and tell me the date" rollover
+    # prompt is routed here, not into registration.handle_incoming --
+    # their free-text date reply must not be parsed as a brand-new
+    # registration attempt. See ADR-011 Part 1.
+    pending_rollover = rollover.get_pending_state(chat_id)
+    if pending_rollover is not None:
+        resolved, outbound = rollover.advance_rollover_reply(pending_rollover, incoming, storage)
+        if resolved:
+            rollover.clear_state(chat_id)
+        client.send_message(chat_id, outbound.text, reply_markup=outbound.reply_markup)
+        return
+
     outbound = registration.handle_incoming(chat_id, incoming, storage)
     client.send_message(chat_id, outbound.text, reply_markup=outbound.reply_markup)

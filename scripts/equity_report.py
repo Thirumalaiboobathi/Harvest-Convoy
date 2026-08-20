@@ -35,7 +35,7 @@ from harvest_convoy.reporting.provenance import Provenance, build_provenance, re
 from harvest_convoy.storage import get_storage
 from harvest_convoy.storage.fairness import operator_follow_through_rate
 from harvest_convoy.storage.interface import Storage
-from harvest_convoy.watcher import confirmation_status
+from harvest_convoy.watcher import confirmation_status, rollover_status
 
 CAVEAT = (
     "The seeded clusters (Kamatchipuram, Naducauvery) are simulated -- no "
@@ -72,6 +72,9 @@ class SeasonEquitySection:
     fairness_influenced_count: int
     fairness_applied_not_decisive_count: int
     fairness_not_applicable_count: int
+    rollover_confirmed_plot_ids: list[str]
+    rollover_declined_plot_ids: list[str]
+    rollover_unknown_plot_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,13 @@ class EquityReport:
 
 
 def _discover_season_ids(storage: Storage, farmers: list[Farmer], plots: list[Plot]) -> list[str]:
+    # Note: a season with only SeasonRolloverPrompt activity (rollover run,
+    # but no escalation and no decision record yet) is not discoverable
+    # here -- there is no "every season for this plot" rollover-prompt
+    # query, only per-(plot, season) and per-(cluster, season) lookups.
+    # In practice rollover always precedes real scheduling, so this is a
+    # narrow gap, not a load-bearing one; pass --season explicitly for
+    # such a season if you know its id.
     season_ids: set[str] = set()
     for f in farmers:
         for entry in storage.get_ledger_entries(f.farmer_id):
@@ -138,6 +148,22 @@ def _build_season_section(
     fairness_not_decisive = sum(1 for r in decision_records if r.fairness_decisive is False)
     fairness_na = sum(1 for r in decision_records if r.fairness_decisive is None)
 
+    # Season participation (ADR-011 Part 1): "declined" and "unknown"
+    # both exclude a plot from scheduling identically, but stay reported
+    # as separate lists here, never a single collapsed "excluded" count
+    # -- a farmer who said no and a farmer nobody could reach are
+    # different findings.
+    rollover_prompts = storage.get_season_rollover_prompts_for_cluster(cluster_id, season_id)
+    rollover_confirmed = sorted(
+        p.plot_id for p in rollover_prompts if rollover_status(p) == "confirmed"
+    )
+    rollover_declined = sorted(
+        p.plot_id for p in rollover_prompts if rollover_status(p) == "declined"
+    )
+    rollover_unknown = sorted(
+        p.plot_id for p in rollover_prompts if rollover_status(p) == "unknown"
+    )
+
     return SeasonEquitySection(
         season_id=season_id,
         served_plot_ids=sorted(served_plot_ids),
@@ -160,6 +186,9 @@ def _build_season_section(
         fairness_influenced_count=fairness_influenced,
         fairness_applied_not_decisive_count=fairness_not_decisive,
         fairness_not_applicable_count=fairness_na,
+        rollover_confirmed_plot_ids=rollover_confirmed,
+        rollover_declined_plot_ids=rollover_declined,
+        rollover_unknown_plot_ids=rollover_unknown,
     )
 
 
@@ -243,6 +272,25 @@ def _render_section_text(s: SeasonEquitySection) -> list[str]:
             f"fairness bonus changed the outcome in {s.fairness_influenced_count}, applied but "
             f"did not change the outcome in {s.fairness_applied_not_decisive_count}, not "
             f"applicable (concession/human-resolved/not contested) in {s.fairness_not_applicable_count}."
+        )
+    total_rollover = (
+        len(s.rollover_confirmed_plot_ids) + len(s.rollover_declined_plot_ids)
+        + len(s.rollover_unknown_plot_ids)
+    )
+    if total_rollover == 0:
+        lines.append(
+            "    Season participation: no rollover prompt was ever run for this "
+            "cluster/season (either it's the first season, or every plot registered "
+            "directly rather than via rollover)."
+        )
+    else:
+        lines.append(
+            f"    Season participation: {len(s.rollover_confirmed_plot_ids)} confirmed "
+            f"{s.rollover_confirmed_plot_ids}, {len(s.rollover_declined_plot_ids)} declined "
+            f"{s.rollover_declined_plot_ids}, {len(s.rollover_unknown_plot_ids)} unknown/never "
+            f"replied {s.rollover_unknown_plot_ids} -- declined and unknown are reported "
+            f"separately because they are different facts about a person, not one collapsed "
+            f"'excluded' state."
         )
     return lines
 

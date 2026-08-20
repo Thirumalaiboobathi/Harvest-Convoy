@@ -2,7 +2,7 @@ from datetime import date
 
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.storage.file_storage import FileStorage
-from harvest_convoy.storage.interface import DecisionRecord, LedgerEntry
+from harvest_convoy.storage.interface import DecisionRecord, LedgerEntry, SeasonRolloverPrompt
 
 
 def _cluster() -> Cluster:
@@ -358,3 +358,57 @@ def test_get_decision_records_for_cluster_filters_by_cluster_and_season(tmp_path
 def test_a_plot_with_no_decision_history_returns_an_empty_list(tmp_path) -> None:
     storage = FileStorage(tmp_path / "s.json")
     assert storage.get_decision_records_for_plot("never-decided") == []
+
+
+# --- Season rollover -- ADR-011 Part 1 ---
+
+def _rollover_prompt(plot_id: str, cluster_id: str = "c1", **overrides) -> SeasonRolloverPrompt:
+    base = dict(
+        plot_id=plot_id, farmer_id=f"farmer-{plot_id}", cluster_id=cluster_id,
+        old_season_id="2026-kuruvai", new_season_id="2026-samba",
+        asked_at="2026-10-01T00:00:00+00:00",
+    )
+    base.update(overrides)
+    return SeasonRolloverPrompt(**base)
+
+
+def test_season_rollover_prompt_round_trips(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    prompt = _rollover_prompt("p01", replied=True, replied_at="2026-10-02T00:00:00+00:00")
+    result = storage.put_season_rollover_prompt(prompt)
+
+    assert result.success
+    assert storage.get_season_rollover_prompt("p01", "2026-samba") == prompt
+
+
+def test_get_season_rollover_prompt_returns_none_when_not_found(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    assert storage.get_season_rollover_prompt("nope", "2026-samba") is None
+
+
+def test_declined_and_unresponsive_are_distinguishable_in_storage(tmp_path) -> None:
+    """The asymmetry ADR-011 Part 1 requires: replied=False (declined)
+    and replied=None (never answered) are different, separately
+    recoverable facts, not one collapsed value."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_season_rollover_prompt(_rollover_prompt(
+        "p-declined", replied=False, replied_at="2026-10-02T00:00:00+00:00",
+    ))
+    storage.put_season_rollover_prompt(_rollover_prompt("p-unresponsive"))  # replied stays None
+
+    declined = storage.get_season_rollover_prompt("p-declined", "2026-samba")
+    unresponsive = storage.get_season_rollover_prompt("p-unresponsive", "2026-samba")
+
+    assert declined.replied is False
+    assert declined.replied_at is not None
+    assert unresponsive.replied is None
+    assert unresponsive.replied_at is None
+
+
+def test_get_season_rollover_prompts_for_cluster_filters_correctly(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_season_rollover_prompt(_rollover_prompt("p01", cluster_id="c1"))
+    storage.put_season_rollover_prompt(_rollover_prompt("p02", cluster_id="c2"))
+
+    prompts = storage.get_season_rollover_prompts_for_cluster("c1", "2026-samba")
+    assert {p.plot_id for p in prompts} == {"p01"}

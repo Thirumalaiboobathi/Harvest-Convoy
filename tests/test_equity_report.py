@@ -10,7 +10,12 @@ from datetime import date
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.reporting.config import SMALLHOLDER_THRESHOLD_ACRES
 from harvest_convoy.storage.file_storage import FileStorage
-from harvest_convoy.storage.interface import DecisionRecord, HarvestConfirmation, LedgerEntry
+from harvest_convoy.storage.interface import (
+    DecisionRecord,
+    HarvestConfirmation,
+    LedgerEntry,
+    SeasonRolloverPrompt,
+)
 from scripts import equity_report
 
 SEASON = "2026-kuruvai"
@@ -261,6 +266,57 @@ def test_all_seasons_aggregates_across_discovered_seasons(tmp_path) -> None:
     season_ids = equity_report._discover_season_ids(storage, farmers, plots)
 
     assert season_ids == ["2025-kuruvai", "2026-kuruvai"]
+
+
+def test_season_participation_section_states_no_rollover_ever_run(tmp_path) -> None:
+    """A season with zero SeasonRolloverPrompt records (the common case
+    -- either the first season ever, or every plot registered directly)
+    must say so plainly, not render a bare, ambiguous 0/0/0."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_plot(_plot("p1", "f1", 1.0))
+
+    result = equity_report.build_result(storage, cluster_id="c1", season_ids=[SEASON])
+    section = result.sections[0]
+
+    assert section.rollover_confirmed_plot_ids == []
+    assert section.rollover_declined_plot_ids == []
+    assert section.rollover_unknown_plot_ids == []
+    text = equity_report.render_text(result)
+    assert "no rollover prompt was ever run" in text
+
+
+def test_season_participation_section_lists_confirmed_declined_unknown_separately(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    for pid in ("p-yes", "p-no", "p-silent"):
+        storage.put_farmer(_farmer(f"f-{pid}"))
+        storage.put_plot(_plot(pid, f"f-{pid}", 1.0))
+    storage.put_season_rollover_prompt(SeasonRolloverPrompt(
+        plot_id="p-yes", farmer_id="f-p-yes", cluster_id="c1",
+        old_season_id="2025-kuruvai", new_season_id=SEASON,
+        asked_at="2026-08-01T00:00:00+00:00", replied=True, replied_at="2026-08-02T00:00:00+00:00",
+    ))
+    storage.put_season_rollover_prompt(SeasonRolloverPrompt(
+        plot_id="p-no", farmer_id="f-p-no", cluster_id="c1",
+        old_season_id="2025-kuruvai", new_season_id=SEASON,
+        asked_at="2026-08-01T00:00:00+00:00", replied=False, replied_at="2026-08-02T00:00:00+00:00",
+    ))
+    storage.put_season_rollover_prompt(SeasonRolloverPrompt(
+        plot_id="p-silent", farmer_id="f-p-silent", cluster_id="c1",
+        old_season_id="2025-kuruvai", new_season_id=SEASON,
+        asked_at="2026-08-01T00:00:00+00:00",
+    ))
+
+    result = equity_report.build_result(storage, cluster_id="c1", season_ids=[SEASON])
+    section = result.sections[0]
+
+    assert section.rollover_confirmed_plot_ids == ["p-yes"]
+    assert section.rollover_declined_plot_ids == ["p-no"]
+    assert section.rollover_unknown_plot_ids == ["p-silent"]
+    text = equity_report.render_text(result)
+    assert "declined and unknown are reported separately" in text
 
 
 def test_empty_cluster_no_plots_at_all(tmp_path) -> None:

@@ -125,6 +125,33 @@ class DecisionRecord:
     resolved_at: str | None = None  # ISO timestamp of the FINAL resolution
 
 
+@dataclass(frozen=True)
+class SeasonRolloverPrompt:
+    """Whether a farmer confirmed participation in a new season after a
+    rollover prompt. replied=None (never answered) and replied=False
+    (explicit "no") both exclude the plot from the new season's
+    scheduling pool -- only replied=True includes it. Mirrors
+    HarvestConfirmation's confirmed: bool | None shape and the same
+    silence-is-not-consent discipline (ADR-009 Part 2), applied to the
+    opposite question (should this plot be scheduled at all this season,
+    not did the machine come). "Declined" (replied=False) and "did not
+    respond" (replied=None) are different facts about a person and must
+    stay distinguishable everywhere this record is read -- both exclude
+    a plot from scheduling identically, but never collapse into one
+    "excluded" state in storage or in any report built on top of it. See
+    ADR-011 Part 1.
+    """
+
+    plot_id: str
+    farmer_id: str
+    cluster_id: str
+    old_season_id: str
+    new_season_id: str
+    asked_at: str
+    replied: bool | None = None
+    replied_at: str | None = None
+
+
 class Storage(Protocol):
     def get_cluster(self, cluster_id: str) -> Cluster | None: ...
     def put_cluster(self, cluster: Cluster) -> StorageResult: ...
@@ -255,4 +282,28 @@ class Storage(Protocol):
     ) -> list[DecisionRecord]:
         """Every decision record for this cluster/season -- reporting's
         fairness-mechanism-activity aggregate reads this."""
+        ...
+
+    def put_season_rollover_prompt(self, prompt: SeasonRolloverPrompt) -> StorageResult:
+        """Overwrite semantics, like every put_* here except
+        put_ledger_entry -- a farmer's reply updates the same record the
+        prompt-send created, keyed by (plot_id, new_season_id). See
+        ADR-011 Part 1."""
+        ...
+
+    def get_season_rollover_prompt(
+        self, plot_id: str, season_id: str
+    ) -> SeasonRolloverPrompt | None:
+        """None if no rollover was ever run for this plot/season -- either
+        this plot is brand new this season (registered directly, nothing
+        to ask), or run_season_rollover() hasn't been triggered yet for
+        this cluster/season."""
+        ...
+
+    def get_season_rollover_prompts_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[SeasonRolloverPrompt]:
+        """Every rollover-prompt record for this cluster/season -- the
+        watcher's scheduling-exclusion filter and equity_report.py's
+        Season participation section both read this."""
         ...

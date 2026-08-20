@@ -30,7 +30,7 @@ from harvest_convoy.scheduling.capacity import (
 )
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome, resolve_maturity_gdd, solve
 from harvest_convoy.storage import Storage, get_storage
-from harvest_convoy.storage.interface import HarvestConfirmation
+from harvest_convoy.storage.interface import HarvestConfirmation, SeasonRolloverPrompt
 from harvest_convoy.telegram import notify, webhook
 from harvest_convoy.telegram.client import TelegramClient
 from harvest_convoy.weather.openmeteo import (
@@ -155,6 +155,23 @@ def _run_daily_watch_one(
         return {"cluster_id": cluster_id, "status": "error", "reason": "cluster_not_found"}
 
     plots = storage.get_plots_for_cluster(cluster_id)
+
+    # Season-participation exclusion (ADR-011 Part 1): a plot whose
+    # farmer declined a rollover prompt, or never replied to one, is
+    # excluded from this season's scheduling pool entirely -- not merely
+    # ranked last. A plot with no rollover-prompt record at all for this
+    # season_id is included by default (a brand-new registration, or a
+    # cluster/season run_season_rollover has never been triggered for).
+    rollover_prompts = storage.get_season_rollover_prompts_for_cluster(cluster_id, season_id)
+    excluded_by_rollover = {p.plot_id for p in rollover_prompts if p.replied is not True}
+    if excluded_by_rollover:
+        logger.info(
+            "watcher: cluster=%s excluding %d plot(s) not confirmed for "
+            "season %s (declined or no reply to the rollover prompt): %s",
+            cluster_id, len(excluded_by_rollover), season_id, sorted(excluded_by_rollover),
+        )
+        plots = [p for p in plots if p.plot_id not in excluded_by_rollover]
+
     if not plots:
         logger.warning("watcher: cluster %s has no plots, nothing to check", cluster_id)
         storage.set_watcher_last_run(cluster_id, today.isoformat())
@@ -489,4 +506,122 @@ def run_evening_confirmations(
         "asked": asked,
         "skipped_no_chat_id": skipped_no_chat_id,
         "already_asked": len(confirmations) - len(to_ask),
+    }
+
+
+def rollover_status(prompt: SeasonRolloverPrompt) -> str:
+    """One of "confirmed" (replied=True), "declined" (replied=False), or
+    "unknown" (replied=None -- never answered). Deliberately three
+    states, not four: unlike confirmation_status(), there is no
+    time-windowed "pending" distinction here -- the brief's instruction
+    was to record silence as unknown, not to model a reply-still-plausibly-
+    on-its-way state. "Declined" and "unknown" are different facts about
+    a person and must never be reported as a single collapsed "excluded"
+    value -- both exclude a plot from scheduling identically (see
+    _run_daily_watch_one's rollover exclusion filter), but this function
+    is what keeps them distinguishable in every report built on top of
+    it. See ADR-011 Part 1.
+    """
+    if prompt.replied is True:
+        return "confirmed"
+    if prompt.replied is False:
+        return "declined"
+    return "unknown"
+
+
+def run_season_rollover(
+    cluster_id: str,
+    old_season_id: str,
+    new_season_id: str,
+    *,
+    storage: Storage | None = None,
+    today: date | None = None,
+    telegram_client: TelegramClient | None = None,
+) -> dict:
+    """Code-only entrypoint, operator-triggered -- ADR-011 Part 1. Not
+    wired to any schedule, and deliberately so: there is no verified
+    Tamil-Nadu-wide season calendar this project could encode without
+    inventing one, so "when does a season roll over" stays a decision
+    for whoever runs the cluster, exactly the same way cluster_id/
+    season_id are already human-configured everywhere else in this
+    codebase (ADR-006's EventBridge payload, every script's CLI args).
+
+    Idempotent per plot: a plot that already has a SeasonRolloverPrompt
+    for new_season_id is skipped entirely -- re-running this after a
+    partial failure or an interrupted previous attempt resumes rather
+    than re-prompting a farmer who already has a record. Every write
+    (prompt sent -> record created) happens together; a send failure
+    leaves no record, so it's retried on the next invocation, the same
+    discipline run_evening_confirmations already uses.
+    """
+    storage = storage or get_storage()
+    today = today or date.today()
+    client = telegram_client or TelegramClient()
+
+    plots = storage.get_plots_for_cluster(cluster_id)
+    asked = 0
+    skipped_already_prompted = 0
+    skipped_no_chat_id = 0
+    skipped_no_farmer = 0
+
+    for plot in plots:
+        if storage.get_season_rollover_prompt(plot.plot_id, new_season_id) is not None:
+            skipped_already_prompted += 1
+            continue
+
+        farmer = storage.get_farmer(plot.farmer_id)
+        if farmer is None:
+            logger.error(
+                "run_season_rollover: no farmer found for plot=%s, cannot "
+                "send rollover prompt",
+                plot.plot_id,
+            )
+            skipped_no_farmer += 1
+            continue
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        if farmer.telegram_chat_id is None:
+            # Never gets a real send attempt -- the record still lands on
+            # storage (asked_at set) so this plot is correctly excluded
+            # via replied staying None, not silently defaulted to
+            # "included" for lack of any record at all. See ADR-011
+            # Part 1, Decision 2's no-record-means-include rule: that
+            # rule is for a plot nobody has ever asked about, not one we
+            # tried and couldn't reach.
+            storage.put_season_rollover_prompt(SeasonRolloverPrompt(
+                plot_id=plot.plot_id, farmer_id=farmer.farmer_id, cluster_id=cluster_id,
+                old_season_id=old_season_id, new_season_id=new_season_id, asked_at=now_iso,
+            ))
+            logger.info(
+                "run_season_rollover: farmer %s has no chat_id, cannot ask "
+                "about plot=%s -- recorded as unknown",
+                farmer.farmer_id, plot.plot_id,
+            )
+            skipped_no_chat_id += 1
+            continue
+
+        send_result = notify.send_season_rollover_prompt(client, farmer, plot, new_season_id)
+        if send_result.success:
+            storage.put_season_rollover_prompt(SeasonRolloverPrompt(
+                plot_id=plot.plot_id, farmer_id=farmer.farmer_id, cluster_id=cluster_id,
+                old_season_id=old_season_id, new_season_id=new_season_id, asked_at=now_iso,
+            ))
+            asked += 1
+        else:
+            logger.error(
+                "run_season_rollover: send failed for plot=%s: %s -- no "
+                "record written, will retry next invocation",
+                plot.plot_id, send_result.error,
+            )
+
+    return {
+        "cluster_id": cluster_id,
+        "old_season_id": old_season_id,
+        "new_season_id": new_season_id,
+        "date": today.isoformat(),
+        "asked": asked,
+        "skipped_no_chat_id": skipped_no_chat_id,
+        "skipped_no_farmer": skipped_no_farmer,
+        "skipped_already_prompted": skipped_already_prompted,
     }

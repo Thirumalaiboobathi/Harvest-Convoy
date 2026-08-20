@@ -268,6 +268,45 @@ def send_harvest_confirmation_prompt(
     )
 
 
+def build_season_rollover_keyboard(plot_id: str, new_season_id: str, *, language: str = "ta") -> dict:
+    """Same two-buttons-one-tap shape as build_confirmation_keyboard,
+    reusing the identical Yes/No labels -- callback_data carries
+    plot_id/new_season_id directly so a tap always resolves against the
+    exact rollover it was sent for. See ADR-011 Part 1."""
+    mod = _lang_module(language)
+
+    def callback_data(answer: str) -> str:
+        return f"rollover:{plot_id}:{new_season_id}:{answer}"
+
+    return {
+        "inline_keyboard": [
+            [
+                {"text": mod.CONFIRMATION_YES_LABEL, "callback_data": callback_data("yes")},
+                {"text": mod.CONFIRMATION_NO_LABEL, "callback_data": callback_data("no")},
+            ]
+        ]
+    }
+
+
+def build_season_rollover_prompt_text(*, language: str = "ta") -> str:
+    return _lang_module(language).season_rollover_prompt()
+
+
+def send_season_rollover_prompt(
+    client: TelegramClient, farmer: Farmer, plot: Plot, new_season_id: str
+) -> SendResult:
+    if farmer.telegram_chat_id is None:
+        logger.error("no chat_id for farmer %s, cannot ask about rollover", farmer.farmer_id)
+        return SendResult(success=False, error="farmer has no telegram_chat_id")
+    return client.send_message(
+        farmer.telegram_chat_id,
+        build_season_rollover_prompt_text(language=farmer.language),
+        reply_markup=build_season_rollover_keyboard(
+            plot.plot_id, new_season_id, language=farmer.language
+        ),
+    )
+
+
 def build_escalation_keyboard(
     cluster_id: str,
     plot_a_id: str, farmer_a: Farmer, plot_a: Plot,

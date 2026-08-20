@@ -25,6 +25,7 @@ from harvest_convoy.storage.interface import (
     DecisionRecord,
     HarvestConfirmation,
     LedgerEntry,
+    SeasonRolloverPrompt,
     StorageResult,
 )
 
@@ -392,6 +393,44 @@ class DynamoStorage:
         items = self._query_gsi1(cluster_id, f"DECISION#{season_id}#")
         return [
             DecisionRecord(**_decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK"))))
+            for i in items
+        ]
+
+    # --- Season rollover -- ADR-011 Part 1 ---
+
+    def put_season_rollover_prompt(self, prompt: SeasonRolloverPrompt) -> StorageResult:
+        item = {
+            "PK": f"PLOT#{prompt.plot_id}",
+            "SK": f"ROLLOVER#{prompt.new_season_id}",
+            "GSI1PK": f"CLUSTER#{prompt.cluster_id}",
+            "GSI1SK": f"ROLLOVER#{prompt.new_season_id}#{prompt.plot_id}",
+            **_encode(asdict(prompt)),
+        }
+        return self._put(item)
+
+    def get_season_rollover_prompt(
+        self, plot_id: str, season_id: str
+    ) -> SeasonRolloverPrompt | None:
+        try:
+            resp = self._table.get_item(
+                Key={"PK": f"PLOT#{plot_id}", "SK": f"ROLLOVER#{season_id}"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "get_season_rollover_prompt(%s, %s) failed: %s", plot_id, season_id, exc
+            )
+            return None
+        item = resp.get("Item")
+        if item is None:
+            return None
+        return SeasonRolloverPrompt(**_decode(_strip_keys(item, extra=("GSI1PK", "GSI1SK"))))
+
+    def get_season_rollover_prompts_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[SeasonRolloverPrompt]:
+        items = self._query_gsi1(cluster_id, f"ROLLOVER#{season_id}#")
+        return [
+            SeasonRolloverPrompt(**_decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK"))))
             for i in items
         ]
 

@@ -23,6 +23,7 @@ from harvest_convoy.storage.interface import (
     DecisionRecord,
     HarvestConfirmation,
     LedgerEntry,
+    SeasonRolloverPrompt,
     StorageResult,
 )
 
@@ -35,6 +36,7 @@ _EMPTY: dict = {
     "harvest": {},  # harvest[cluster_id][season_id][plot_id] = dispatched_at
     "confirmations": {},  # confirmations[plot_id][season_id] = HarvestConfirmation dict
     "decisions": {},  # decisions[plot_id][season_id][decision_date] = DecisionRecord dict
+    "rollover_prompts": {},  # rollover_prompts[plot_id][new_season_id] = SeasonRolloverPrompt dict
 }
 
 
@@ -213,4 +215,26 @@ class FileStorage:
             for raw in by_season.get(season_id, {}).values():
                 if raw["cluster_id"] == cluster_id:
                     result.append(DecisionRecord(**raw))
+        return result
+
+    # Season rollover -- ADR-011 Part 1
+    def put_season_rollover_prompt(self, prompt: SeasonRolloverPrompt) -> StorageResult:
+        by_season = self._data["rollover_prompts"].setdefault(prompt.plot_id, {})
+        by_season[prompt.new_season_id] = asdict(prompt)
+        return self._save()
+
+    def get_season_rollover_prompt(
+        self, plot_id: str, season_id: str
+    ) -> SeasonRolloverPrompt | None:
+        raw = self._data["rollover_prompts"].get(plot_id, {}).get(season_id)
+        return SeasonRolloverPrompt(**raw) if raw else None
+
+    def get_season_rollover_prompts_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[SeasonRolloverPrompt]:
+        result = []
+        for by_season in self._data["rollover_prompts"].values():
+            raw = by_season.get(season_id)
+            if raw and raw["cluster_id"] == cluster_id:
+                result.append(SeasonRolloverPrompt(**raw))
         return result

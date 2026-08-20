@@ -306,3 +306,25 @@ def confirmation_thanks() -> str:
 
 def confirmation_not_found() -> str:
     return "Couldn't find that confirmation -- it may be from an old message."
+
+
+# --- Season rollover (ADR-011 Part 1) ---
+# Two taps (yes/no, reusing CONFIRMATION_YES_LABEL/CONFIRMATION_NO_LABEL
+# above -- same buttons, same meaning) plus, only on "yes," one free-text
+# date reply. Never re-asks village, location, crop, or area -- those are
+# already on record.
+
+def season_rollover_prompt() -> str:
+    return "Transplanting again this season? Tap yes and tell me the date."
+
+
+def season_rollover_declined_ack() -> str:
+    return "Understood -- hope to see you next season."
+
+
+def season_rollover_date_prompt() -> str:
+    return "What date did you transplant?"
+
+
+def season_rollover_confirmed_ack() -> str:
+    return "Got it -- you're on the list for this season."

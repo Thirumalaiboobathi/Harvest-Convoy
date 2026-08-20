@@ -484,6 +484,32 @@ def confirmation_not_found() -> str:
     # "That confirmation wasn't found -- this may be an old message."
 
 
+# --- Season rollover (ADR-011 Part 1) ---
+# DRAFT, pending native-speaker review, same print_tamil_strings.py
+# dump-and-review discipline as every other string in this file. Two taps
+# (CONFIRMATION_YES_LABEL/CONFIRMATION_NO_LABEL above, reused as-is) plus,
+# only on "yes," one free-text date reply.
+
+def season_rollover_prompt() -> str:
+    return "இந்த பருவத்திலும் நடவு செய்தீர்களா? 'ஆம்' எனத் தட்டி தேதியைச் சொல்லுங்கள்."
+    # "Transplanting again this season? Tap yes and tell me the date."
+
+
+def season_rollover_declined_ack() -> str:
+    return "புரிந்தது -- அடுத்த பருவத்தில் உங்களைச் சந்திக்க ஆவலாக உள்ளோம்."
+    # "Understood -- hope to see you next season."
+
+
+def season_rollover_date_prompt() -> str:
+    return "எந்த தேதி நடவு செய்தீர்கள்?"
+    # "What date did you transplant?"
+
+
+def season_rollover_confirmed_ack() -> str:
+    return "பதிவு செய்யப்பட்டது -- இந்த பருவத்திற்கான பட்டியலில் நீங்கள் உள்ளீர்கள்."
+    # "Got it -- you're on the list for this season."
+
+
 # --- Advocate argument, templated (not LLM-generated) for Tamil ---
 #
 # Live-verified before this was written (ADR-008 Decision 14): Nova Pro,
