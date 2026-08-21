@@ -249,6 +249,13 @@ def main() -> None:
         msp=market_params.MSP_PADDY_COMMON_PER_QUINTAL,
     ))
 
+    _section("NEW (ADR-011 Part 4) -- advance harvest notice, ~1 week before projected maturity -- DRAFT, unreviewed")
+    print("advance_harvest_notice(2.5, 'acre', formatted_date):")
+    print(messages_ta.advance_harvest_notice(2.5, "acre", sample_date))
+    print()
+    print("advance_harvest_notice(0.5, 'cent', formatted_date):")
+    print(messages_ta.advance_harvest_notice(0.5, "cent", sample_date))
+
     print()
     print("=" * 70)
     print("End of Tamil string dump. See ADR-008 Decisions 14-16 for the")

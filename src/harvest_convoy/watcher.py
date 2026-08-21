@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from harvest_convoy.agents.contracts import TriggerContext
 from harvest_convoy.agents.coordinator import run_cluster, run_cluster_with_claims
+from harvest_convoy.agronomy.calibration import project_maturity_from_days
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.scheduling.capacity import (
     ForecastDay,
@@ -32,6 +33,7 @@ from harvest_convoy.scheduling.rain_event import classify_rain_event, rain_urgen
 from harvest_convoy.scheduling.solver import PlotDecision, PlotOutcome, resolve_maturity_gdd, solve
 from harvest_convoy.storage import Storage, get_storage
 from harvest_convoy.storage.interface import (
+    AdvanceNoticeRecord,
     BreakdownDisplacement,
     HarvestConfirmation,
     MachineStatus,
@@ -71,6 +73,14 @@ UNCONFIRMED_HARVEST_WINDOW_DAYS = 2
 # -- same status as UNCONFIRMED_HARVEST_WINDOW_DAYS: a stated constant,
 # not a sourced one.
 DRYING_WINDOW_DAYS = 4
+
+# Advance harvest notice (ADR-011 Part 4): how many days before projected
+# maturity the one-time "arrange transport, drying space" message goes
+# out. Unsourced judgment call, same status as UNCONFIRMED_HARVEST_
+# WINDOW_DAYS/DRYING_WINDOW_DAYS -- "roughly a week" as stated in the
+# brief, not independently derived. Change freely; nothing depends on the
+# exact number.
+ADVANCE_NOTICE_DAYS_BEFORE_MATURITY = 7
 
 
 def run_daily_watch(
@@ -225,6 +235,14 @@ def _run_daily_watch_one(
         # in the forecast this run already fetched. Same forecast, no
         # second weather call, no new data source.
         _check_drying_window_alerts(client, storage, cluster, season_id, forecast, today)
+
+        # Advance harvest notice (ADR-011 Part 4): same "runs every pass,
+        # unconditionally" placement as the drying-window check above --
+        # a plot entering its notice window doesn't need today's rain
+        # trigger to matter, only the plot_days already fetched.
+        _check_advance_harvest_notices(
+            client, storage, cluster, season_id, plots, plot_days, harvested_plot_ids, today,
+        )
 
         # Machine down indefinitely (ADR-011 Part 2): set by an
         # operator's breakdown follow-up tap, cleared only by a
@@ -455,6 +473,83 @@ def _check_drying_window_alerts(
             logger.error(
                 "drying-window alert send failed for plot=%s: %s",
                 confirmation.plot_id, send_result.error,
+            )
+
+
+def _check_advance_harvest_notices(
+    client: TelegramClient,
+    storage: Storage,
+    cluster: Cluster,
+    season_id: str,
+    plots: list[Plot],
+    plot_days: dict[str, list],
+    harvested_plot_ids: set[str],
+    today: date,
+) -> None:
+    """ADR-011 Part 4: for every plot not yet harvested this season and
+    not yet sent this notice, send one "arrange transport, drying space"
+    message once it's projected to mature within
+    ADVANCE_NOTICE_DAYS_BEFORE_MATURITY days. Runs every trigger pass,
+    unconditionally, same as _check_drying_window_alerts -- and reuses
+    `plot_days` the caller already fetched for the capacity/
+    classification pipeline (project_maturity_from_days takes
+    already-fetched data), so this adds zero new network calls.
+
+    Sent exactly once ever, per plot per season: an AdvanceNoticeRecord's
+    mere existence is the entire suppression check, regardless of what a
+    later, more accurate projection would say (Decision 17). A plot
+    whose projection is already at or past maturity the first time it's
+    checked (days_until <= 0) is excluded by the same `0 < days_until`
+    test below and never gets a record written -- but this is not a
+    special case needing its own bookkeeping: once real accumulated GDD
+    has crossed the maturity threshold, project_maturity_from_days pins
+    the projection at exactly `today` every subsequent call (remaining
+    GDD floors at 0), so days_until stays exactly 0 forever and this
+    plot is excluded on every future check too, with no extra state.
+    """
+    for plot in plots:
+        if plot.plot_id in harvested_plot_ids:
+            continue
+        if storage.get_advance_notice_record(plot.plot_id, season_id) is not None:
+            continue  # already sent this season -- never resent
+
+        days = plot_days.get(plot.plot_id)
+        if days is None:
+            continue  # not in this trigger's schedulable set
+
+        projected = date.fromisoformat(
+            project_maturity_from_days(days, plot.transplant_date, cluster, today=today)
+        )
+        days_until = (projected - today).days
+        if not (0 < days_until <= ADVANCE_NOTICE_DAYS_BEFORE_MATURITY):
+            continue
+
+        farmer = storage.get_farmer(plot.farmer_id)
+        if farmer is None or farmer.telegram_chat_id is None:
+            logger.info(
+                "advance harvest notice: no reachable farmer for plot=%s, skipping",
+                plot.plot_id,
+            )
+            continue
+
+        send_result = notify.send_advance_harvest_notice(client, farmer, plot, projected)
+        if send_result.success:
+            write_result = storage.put_advance_notice_record(AdvanceNoticeRecord(
+                plot_id=plot.plot_id, farmer_id=plot.farmer_id, cluster_id=cluster.cluster_id,
+                season_id=season_id, sent_at=datetime.now(timezone.utc).isoformat(),
+                projected_maturity_date=projected.isoformat(),
+            ))
+            if not write_result.success:
+                logger.error(
+                    "ADVANCE NOTICE RECORD WRITE FAILED: plot=%s cluster=%s "
+                    "season=%s -- this farmer may be re-notified on a later "
+                    "trigger day: %s",
+                    plot.plot_id, cluster.cluster_id, season_id, write_result.error,
+                )
+        else:
+            logger.error(
+                "advance harvest notice send failed for plot=%s: %s",
+                plot.plot_id, send_result.error,
             )
 
 

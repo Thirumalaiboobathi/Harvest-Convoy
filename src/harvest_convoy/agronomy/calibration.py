@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from harvest_convoy.agronomy import crop_params
-from harvest_convoy.agronomy.gdd import accumulate_gdd
+from harvest_convoy.agronomy.gdd import DailyTemperature, accumulate_gdd
 from harvest_convoy.models import Cluster, Plot
 from harvest_convoy.weather.openmeteo import get_daily_temperatures
 
@@ -84,6 +84,42 @@ def derive_cluster_maturity_gdd(
     return crop_params.ADT45_FIELD_DURATION_DAYS_ESTIMATED * rate
 
 
+def project_maturity_from_days(
+    days: list[DailyTemperature], transplant_date: date, cluster: Cluster, *, today: date,
+) -> str:
+    """Pure version of project_maturity_for_plot's projection math,
+    extracted (ADR-011 Part 4, Decision 15) so a caller that has already
+    fetched a plot's daily temperature series for another purpose --
+    watcher.py's `plot_days`, fetched once per trigger for the capacity/
+    classification pipeline -- can reuse it for the advance-notice check
+    without a second live Open-Meteo call for the same range.
+
+    `days` is ignored entirely when `transplant_date > today` (the plot
+    hasn't been transplanted yet, so there's nothing to have elapsed);
+    callers in that situation may pass an empty list. This mirrors
+    project_maturity_for_plot's original behavior exactly -- the refactor
+    changed nothing about the math, only where the network call happens.
+    """
+    maturity_gdd = cluster.maturity_gdd_override
+    if maturity_gdd is None:
+        maturity_gdd = crop_params.MATURITY_GDD_ESTIMATED
+    if cluster.maturity_gdd_override is not None:
+        rate = cluster.maturity_gdd_override / crop_params.ADT45_FIELD_DURATION_DAYS_ESTIMATED
+    else:
+        rate = crop_params.KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED
+
+    if transplant_date > today:
+        accumulated_so_far = 0.0
+        anchor = transplant_date
+    else:
+        accumulated_so_far = accumulate_gdd(days, crop_params.T_BASE_C)
+        anchor = today
+
+    remaining_gdd = max(0.0, maturity_gdd - accumulated_so_far)
+    days_remaining = round(remaining_gdd / rate)
+    return (anchor + timedelta(days=days_remaining)).isoformat()
+
+
 def project_maturity_for_plot(
     plot: Plot, cluster: Cluster, *, today: date | None = None
 ) -> str:
@@ -110,25 +146,16 @@ def project_maturity_for_plot(
     GDD to fetch at all -- no network call is made, and the projection
     runs purely off the rate, anchored at the transplant date itself
     rather than today.
+
+    Thin wrapper (ADR-011 Part 4, Decision 15) around
+    project_maturity_from_days: fetches, then delegates the actual math,
+    so this call site's behavior is unchanged.
     """
     today = today or date.today()
 
-    maturity_gdd = cluster.maturity_gdd_override
-    if maturity_gdd is None:
-        maturity_gdd = crop_params.MATURITY_GDD_ESTIMATED
-    if cluster.maturity_gdd_override is not None:
-        rate = cluster.maturity_gdd_override / crop_params.ADT45_FIELD_DURATION_DAYS_ESTIMATED
-    else:
-        rate = crop_params.KURUVAI_MEAN_GDD_PER_DAY_REFERENCE_ESTIMATED
-
     if plot.transplant_date > today:
-        accumulated_so_far = 0.0
-        anchor = plot.transplant_date
+        days = []
     else:
         days = get_daily_temperatures(plot.lat, plot.lon, plot.transplant_date, today)
-        accumulated_so_far = accumulate_gdd(days, crop_params.T_BASE_C)
-        anchor = today
 
-    remaining_gdd = max(0.0, maturity_gdd - accumulated_so_far)
-    days_remaining = round(remaining_gdd / rate)
-    return (anchor + timedelta(days=days_remaining)).isoformat()
+    return project_maturity_from_days(days, plot.transplant_date, cluster, today=today)

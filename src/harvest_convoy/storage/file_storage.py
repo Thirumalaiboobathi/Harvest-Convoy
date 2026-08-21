@@ -20,6 +20,7 @@ from pathlib import Path
 
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.storage.interface import (
+    AdvanceNoticeRecord,
     BreakdownDisplacement,
     DecisionRecord,
     HarvestConfirmation,
@@ -41,6 +42,7 @@ _EMPTY: dict = {
     "rollover_prompts": {},  # rollover_prompts[plot_id][new_season_id] = SeasonRolloverPrompt dict
     "breakdowns": {},  # breakdowns[cluster_id][season_id][plot_id+"#"+date] = BreakdownDisplacement dict
     "machine_status": {},  # machine_status[cluster_id] = MachineStatus dict
+    "advance_notices": {},  # advance_notices[plot_id][season_id] = AdvanceNoticeRecord dict
 }
 
 
@@ -277,3 +279,14 @@ class FileStorage:
     def clear_machine_status(self, cluster_id: str) -> StorageResult:
         self._data["machine_status"].pop(cluster_id, None)
         return self._save()
+
+    def put_advance_notice_record(self, record: AdvanceNoticeRecord) -> StorageResult:
+        by_season = self._data["advance_notices"].setdefault(record.plot_id, {})
+        by_season[record.season_id] = asdict(record)
+        return self._save()
+
+    def get_advance_notice_record(
+        self, plot_id: str, season_id: str
+    ) -> AdvanceNoticeRecord | None:
+        raw = self._data["advance_notices"].get(plot_id, {}).get(season_id)
+        return AdvanceNoticeRecord(**raw) if raw else None

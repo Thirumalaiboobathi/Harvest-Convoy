@@ -22,6 +22,7 @@ from botocore.exceptions import ClientError
 
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.storage.interface import (
+    AdvanceNoticeRecord,
     BreakdownDisplacement,
     DecisionRecord,
     HarvestConfirmation,
@@ -499,6 +500,33 @@ class DynamoStorage:
         except Exception as exc:  # noqa: BLE001
             logger.error("clear_machine_status(%s) failed: %s", cluster_id, exc)
             return StorageResult(success=False, error=str(exc))
+
+    # --- Advance harvest notice -- ADR-011 Part 4 ---
+
+    def put_advance_notice_record(self, record: AdvanceNoticeRecord) -> StorageResult:
+        item = {
+            "PK": f"PLOT#{record.plot_id}",
+            "SK": f"NOTICE#{record.season_id}",
+            **_encode(asdict(record)),
+        }
+        return self._put(item)
+
+    def get_advance_notice_record(
+        self, plot_id: str, season_id: str
+    ) -> AdvanceNoticeRecord | None:
+        try:
+            resp = self._table.get_item(
+                Key={"PK": f"PLOT#{plot_id}", "SK": f"NOTICE#{season_id}"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "get_advance_notice_record(%s, %s) failed: %s", plot_id, season_id, exc
+            )
+            return None
+        item = resp.get("Item")
+        if item is None:
+            return None
+        return AdvanceNoticeRecord(**_decode(_strip_keys(item)))
 
     # --- internals ---
 

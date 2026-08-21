@@ -295,6 +295,28 @@ def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
     return f"{line1}\n\n{line2}"
 
 
+def advance_harvest_notice(area_acres: float, area_unit: str, formatted_date: str) -> str:
+    # DRAFT, pending native-speaker review (ADR-011 Part 4). Sent exactly
+    # once per plot per season, roughly a week before projected maturity,
+    # so the farmer can start arranging transport, gunny bags, and drying
+    # space ahead of time. "எதிர்பார்க்கப்படுகிறது" (expected) / "அளவில்"
+    # (around) carry the non-guaranteed nature; "பதிலளிக்க வேண்டியதில்லை"
+    # (no need to reply) states plainly that this isn't a prompt. Never
+    # resent or corrected if a later projection shifts.
+    area = format_area(area_acres, area_unit)
+    return (
+        f"உங்கள் {area} வயல் {formatted_date} அளவில் தயாராக இருக்கும் "
+        "என எதிர்பார்க்கப்படுகிறது. அதற்கு அருகில் இயந்திரம் "
+        "திட்டமிடப்படும். பதிலளிக்க வேண்டியதில்லை -- இப்போதே "
+        "போக்குவரத்து, சாக்குப்பைகள், உலர்த்தும் இடம் ஆகியவற்றை "
+        "ஏற்பாடு செய்ய ஏற்ற நேரம்."
+    )
+    # "Your {area} plot is expected to be ready around {date}. The
+    #  machine will be scheduled close to then. No need to reply -- a
+    #  good time to start arranging transport, gunny bags, and drying
+    #  space."
+
+
 def harvest_confirmation_prompt(area_acres: float, area_unit: str) -> str:
     area = format_area(area_acres, area_unit)
     return (

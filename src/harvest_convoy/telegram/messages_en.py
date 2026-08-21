@@ -178,6 +178,23 @@ def drying_window_alert(*, moisture: int | None, msp: int | None) -> str:
     return f"{line1}\n\n{line2}"
 
 
+def advance_harvest_notice(area_acres: float, area_unit: str, formatted_date: str) -> str:
+    """Sent exactly once per plot per season, roughly a week before
+    projected maturity (ADR-011 Part 4) -- so the farmer can start
+    arranging transport, gunny bags, and drying space ahead of time.
+    "Expected"/"around" carries the non-guaranteed nature, same
+    discipline as projected_maturity_sentence(); "no need to reply"
+    states plainly that this isn't a prompt, matching the standing
+    no-new-farmer-initiated-surface rule. Never resent or corrected if a
+    later projection shifts -- see AdvanceNoticeRecord, Decision 17."""
+    return (
+        f"Your {format_area(area_acres, area_unit)} plot is expected to "
+        f"be ready around {formatted_date}. The machine will be "
+        f"scheduled close to then. No need to reply -- a good time to "
+        f"start arranging transport, gunny bags, and drying space."
+    )
+
+
 def harvest_confirmation_prompt(area_acres: float, area_unit: str) -> str:
     return (
         f"Did the machine come to your {format_area(area_acres, area_unit)} "

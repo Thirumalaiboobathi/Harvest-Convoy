@@ -213,6 +213,26 @@ class MachineStatus:
     reported_at: str
 
 
+@dataclass(frozen=True)
+class AdvanceNoticeRecord:
+    """Proof that the one-time "arrange transport, drying space" notice
+    (ADR-011 Part 4) was already sent for this plot this season. Its mere
+    existence, regardless of what `projected_maturity_date` it froze, is
+    the entire suppression check -- once sent, a later, more accurate
+    projection never triggers a second message. `projected_maturity_date`
+    is kept only for the audit trail (what was this farmer actually told,
+    and when), not to support a correction path that isn't built. See
+    Decision 17.
+    """
+
+    plot_id: str
+    farmer_id: str
+    cluster_id: str
+    season_id: str
+    sent_at: str
+    projected_maturity_date: str
+
+
 class Storage(Protocol):
     def get_cluster(self, cluster_id: str) -> Cluster | None: ...
     def put_cluster(self, cluster: Cluster) -> StorageResult: ...
@@ -407,4 +427,21 @@ class Storage(Protocol):
         """The symmetric "machine is back" action -- removes the down
         status. Safe on a cluster that was never marked down (a no-op
         success, not an error), same discipline as clear_plot_harvest."""
+        ...
+
+    def put_advance_notice_record(self, record: AdvanceNoticeRecord) -> StorageResult:
+        """Write-once in practice -- the caller checks
+        get_advance_notice_record first and only calls this when no
+        record exists yet. Overwrite semantics like every other put_*
+        here (except put_ledger_entry) purely for retry safety, not
+        because a second real send is ever intended. See ADR-011 Part 4,
+        Decision 17."""
+        ...
+
+    def get_advance_notice_record(
+        self, plot_id: str, season_id: str
+    ) -> AdvanceNoticeRecord | None:
+        """None means this plot has never been sent its advance notice
+        this season -- the only thing _check_advance_harvest_notices
+        needs to decide whether to send."""
         ...

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import date
 
 from harvest_convoy.agents.contracts import AdvocateClaim
 from harvest_convoy.agronomy import market_params
@@ -123,6 +124,31 @@ def send_drying_window_alert(client: TelegramClient, farmer: Farmer) -> SendResu
         return SendResult(success=False, error="farmer has no telegram_chat_id")
     return client.send_message(
         farmer.telegram_chat_id, build_drying_window_alert_text(language=farmer.language)
+    )
+
+
+def build_advance_harvest_notice_text(
+    plot: Plot, projected_maturity_date: date, *, language: str = "ta",
+) -> str:
+    mod = _lang_module(language)
+    return mod.advance_harvest_notice(
+        plot.area_acres, plot.area_unit, mod.format_date(projected_maturity_date),
+    )
+
+
+def send_advance_harvest_notice(
+    client: TelegramClient, farmer: Farmer, plot: Plot, projected_maturity_date: date,
+) -> SendResult:
+    if farmer.telegram_chat_id is None:
+        logger.error(
+            "no chat_id for farmer %s, cannot send advance harvest notice", farmer.farmer_id
+        )
+        return SendResult(success=False, error="farmer has no telegram_chat_id")
+    return client.send_message(
+        farmer.telegram_chat_id,
+        build_advance_harvest_notice_text(
+            plot, projected_maturity_date, language=farmer.language,
+        ),
     )
 
 
