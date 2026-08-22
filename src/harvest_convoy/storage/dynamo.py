@@ -28,6 +28,8 @@ from harvest_convoy.storage.interface import (
     HarvestConfirmation,
     LedgerEntry,
     MachineStatus,
+    OperatorAuditEvent,
+    OperatorEnrollmentCode,
     SeasonRolloverPrompt,
     StorageResult,
 )
@@ -527,6 +529,39 @@ class DynamoStorage:
         if item is None:
             return None
         return AdvanceNoticeRecord(**_decode(_strip_keys(item)))
+
+    # --- Operator enrollment and audit -- ADR-012 Part 2 ---
+
+    def put_operator_enrollment_code(self, record: OperatorEnrollmentCode) -> StorageResult:
+        item = {
+            "PK": f"OPCODE#{record.code}",
+            "SK": "OPCODE",
+            **_encode(asdict(record)),
+        }
+        return self._put(item)
+
+    def get_operator_enrollment_code(self, code: str) -> OperatorEnrollmentCode | None:
+        try:
+            resp = self._table.get_item(Key={"PK": f"OPCODE#{code}", "SK": "OPCODE"})
+        except Exception as exc:  # noqa: BLE001
+            logger.error("get_operator_enrollment_code(%s) failed: %s", code, exc)
+            return None
+        item = resp.get("Item")
+        if item is None:
+            return None
+        return OperatorEnrollmentCode(**_decode(_strip_keys(item)))
+
+    def put_operator_audit_event(self, event: OperatorAuditEvent) -> StorageResult:
+        item = {
+            "PK": f"CLUSTER#{event.cluster_id}",
+            "SK": f"OPAUDIT#{event.occurred_at}#{event.event_type}",
+            **_encode(asdict(event)),
+        }
+        return self._put(item)
+
+    def get_operator_audit_events_for_cluster(self, cluster_id: str) -> list[OperatorAuditEvent]:
+        items = self._query_pk_prefix(f"CLUSTER#{cluster_id}", "OPAUDIT#")
+        return [OperatorAuditEvent(**_decode(_strip_keys(i))) for i in items]
 
     # --- internals ---
 

@@ -233,6 +233,52 @@ class AdvanceNoticeRecord:
     projected_maturity_date: str
 
 
+@dataclass(frozen=True)
+class OperatorEnrollmentCode:
+    """A one-time code handed to a real operator out-of-band by whoever
+    provisions a cluster, so they can self-enroll (`/operator <code>`)
+    instead of having `Cluster.operator_chat_id` set by hand in a seed
+    script. See ADR-012 Part 2.
+
+    Looked up by `code` alone -- the operator only ever types the code,
+    never a cluster_id, so the code itself is what resolves the cluster.
+    Single-use (`used_at`) AND time-limited (`expires_at`) -- defense in
+    depth, not either/or. `expires_at`'s window is an unsourced judgment
+    call, same status as DRYING_WINDOW_DAYS/
+    ADVANCE_NOTICE_DAYS_BEFORE_MATURITY.
+    """
+
+    code: str
+    cluster_id: str
+    created_at: str
+    expires_at: str
+    used_at: str | None = None
+    used_by_chat_id: int | None = None
+
+
+@dataclass(frozen=True)
+class OperatorAuditEvent:
+    """An auditable record of who became a cluster's operator and when --
+    ADR-012 Part 2, Decision 2. Operator identity determines who can
+    report a machine breakdown or resolve a scheduling conflict for an
+    entire cluster, so a change of operator must be reconstructable
+    later, the same way every scheduling decision already is
+    (DecisionRecord, ADR-010 Part 0.5). `previous_operator_chat_id` is
+    None for a first enrollment (no prior operator existed to record);
+    set for a replacement, alongside the new one, so both halves of the
+    change are on one record rather than requiring a diff against
+    whatever `Cluster.operator_chat_id` happened to be before this write.
+    Append-only: nothing here is ever overwritten or deleted.
+    """
+
+    cluster_id: str
+    event_type: str  # "enrolled" | "replaced"
+    occurred_at: str
+    code_used: str
+    new_operator_chat_id: int
+    previous_operator_chat_id: int | None = None
+
+
 class Storage(Protocol):
     def get_cluster(self, cluster_id: str) -> Cluster | None: ...
     def put_cluster(self, cluster: Cluster) -> StorageResult: ...
@@ -444,4 +490,33 @@ class Storage(Protocol):
         """None means this plot has never been sent its advance notice
         this season -- the only thing _check_advance_harvest_notices
         needs to decide whether to send."""
+        ...
+
+    def put_operator_enrollment_code(self, record: OperatorEnrollmentCode) -> StorageResult:
+        """Overwrite semantics, keyed by `code` alone -- both the
+        generating write (generate_operator_code.py) and the
+        used_at/used_by_chat_id update on successful enrollment go
+        through this same method. See ADR-012 Part 2."""
+        ...
+
+    def get_operator_enrollment_code(self, code: str) -> OperatorEnrollmentCode | None:
+        """None if this code was never generated -- an invalid code, not
+        distinguished in the farmer-facing message from a reused or
+        expired one (see operator_enrollment.py), though the caller can
+        tell them apart from the fields on what this returns."""
+        ...
+
+    def put_operator_audit_event(self, event: OperatorAuditEvent) -> StorageResult:
+        """Append-only -- there is no update or delete for this entity.
+        A retried write after a successful one would just record the
+        same enrollment twice; operator_enrollment.py's flow only ever
+        calls this once per successful enrollment/replacement, gated by
+        the code's own used_at check."""
+        ...
+
+    def get_operator_audit_events_for_cluster(self, cluster_id: str) -> list[OperatorAuditEvent]:
+        """Every operator enrollment/replacement ever recorded for this
+        cluster, in whatever order the backend returns them --
+        explain_decision.py sorts by occurred_at itself when it needs
+        "who was operator as of this date"."""
         ...

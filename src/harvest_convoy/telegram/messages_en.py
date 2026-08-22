@@ -393,3 +393,41 @@ def season_rollover_date_prompt() -> str:
 
 def season_rollover_confirmed_ack() -> str:
     return "Got it -- you're on the list for this season."
+
+
+# --- Operator enrollment (ADR-012 Part 2) ---
+# Reuses CONFIRMATION_YES_LABEL/CONFIRMATION_NO_LABEL for the replacement
+# prompt's buttons -- same Yes/No meaning, no new label pair needed.
+
+def operator_command_usage() -> str:
+    return "Send /operator followed by your enrolment code."
+
+
+def operator_invalid_code() -> str:
+    return (
+        "That code isn't valid or has already been used. Ask your "
+        "cluster coordinator for a new one."
+    )
+
+
+def operator_expired_code() -> str:
+    return "That code has expired. Ask your cluster coordinator for a new one."
+
+
+def operator_language_prompt() -> str:
+    return "Enrolment code accepted. Please choose your language."
+
+
+def operator_replacement_prompt(cluster_name: str) -> str:
+    return f"{cluster_name} already has a registered operator. Replace them with you?"
+
+
+def operator_replacement_declined() -> str:
+    return "Understood -- the existing operator stays registered."
+
+
+def operator_enrolled(cluster_name: str) -> str:
+    return (
+        f"You're now registered as the operator for {cluster_name}. "
+        f"You'll get route summaries here and can tap buttons for machine status."
+    )

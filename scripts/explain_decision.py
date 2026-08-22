@@ -35,9 +35,23 @@ from datetime import date
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.reporting.provenance import Provenance, build_provenance, render_provenance_text
 from harvest_convoy.storage import get_storage
-from harvest_convoy.storage.interface import DecisionRecord, HarvestConfirmation, LedgerEntry, Storage
+from harvest_convoy.storage.interface import (
+    DecisionRecord,
+    HarvestConfirmation,
+    LedgerEntry,
+    OperatorAuditEvent,
+    Storage,
+)
 from harvest_convoy.telegram.messages_en import format_area, format_date
+from harvest_convoy.telegram.operator_enrollment import operator_as_of
 from harvest_convoy.watcher import confirmation_status
+
+# Resolutions/trigger reasons where an operator's own action produced
+# this decision -- see ADR-012 Decision 2. Operator identity is only
+# surfaced for these; showing it on every decision (most of which no
+# operator ever touched) would bury the cases where it actually matters.
+_OPERATOR_INVOLVED_RESOLUTIONS = {"escalated_won", "escalated_lost"}
+_OPERATOR_INVOLVED_TRIGGER_REASONS = {"breakdown_recompute"}
 
 # The standing categories of fact this project computes fresh on every
 # trigger day and never persisted before ADR-010 Part 0.5 -- see ADR-010's
@@ -86,6 +100,8 @@ class DecisionReplayResult:
     confirmation_status_label: str | None
     currently_harvested: bool | None
     data_gaps: list[str]
+    operator_at_decision: OperatorAuditEvent | None = None
+    operator_relevance_note: str | None = None
 
 
 def _resolve_season(
@@ -170,6 +186,32 @@ def build_result(
 
     data_gaps = list(_PRE_PART_0_5_GAPS) if decision_record is None else []
 
+    operator_at_decision = None
+    operator_relevance_note = None
+    if decision_record is not None and cluster is not None:
+        involved = (
+            decision_record.resolution in _OPERATOR_INVOLVED_RESOLUTIONS
+            or decision_record.trigger_reason in _OPERATOR_INVOLVED_TRIGGER_REASONS
+        )
+        if involved:
+            # End-of-day cutoff, not the bare date string -- an
+            # OperatorAuditEvent.occurred_at is a full ISO timestamp, and
+            # a naive string compare against just "YYYY-MM-DD" would
+            # wrongly exclude an operator who enrolled earlier the same
+            # day (a timestamp string sorts after the bare date prefix
+            # it starts with).
+            cutoff = f"{decision_record.decision_date}T23:59:59+00:00"
+            operator_at_decision = operator_as_of(storage, cluster.cluster_id, cutoff)
+            if operator_at_decision is None:
+                operator_relevance_note = (
+                    "This decision involved an operator action (resolution="
+                    f"{decision_record.resolution!r}, trigger_reason="
+                    f"{decision_record.trigger_reason!r}), but no OperatorAuditEvent "
+                    "exists for this cluster on or before this date -- the operator "
+                    "was set by hand (predates ADR-012) or their identity was never "
+                    "recorded through the enrollment flow."
+                )
+
     provenance = build_provenance(
         storage,
         cluster_ids=[cluster.cluster_id] if cluster is not None else [],
@@ -192,6 +234,8 @@ def build_result(
         confirmation_status_label=confirmation_status_label,
         currently_harvested=currently_harvested,
         data_gaps=data_gaps,
+        operator_at_decision=operator_at_decision,
+        operator_relevance_note=operator_relevance_note,
     )
 
 
@@ -289,6 +333,18 @@ def render_text(result: DecisionReplayResult) -> str:
 
         if result.currently_harvested is not None:
             lines.append(f"  Currently marked harvested (as of now): {result.currently_harvested}")
+
+        if result.operator_at_decision is not None:
+            e = result.operator_at_decision
+            lines.append(
+                f"  Operator in effect on this date (ADR-012): chat_id="
+                f"{e.new_operator_chat_id}, {e.event_type} at {e.occurred_at} "
+                f"(code {e.code_used}"
+                + (f", replaced chat_id={e.previous_operator_chat_id}" if e.previous_operator_chat_id else "")
+                + ")"
+            )
+        elif result.operator_relevance_note is not None:
+            lines.append(f"  {result.operator_relevance_note}")
 
         if result.data_gaps:
             lines.append("")

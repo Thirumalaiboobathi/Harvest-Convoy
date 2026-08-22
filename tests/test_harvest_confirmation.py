@@ -48,11 +48,16 @@ class _FakeClient:
         return SendResult(success=True)
 
 
-def _callback_query(plot_id: str, season_id: str, answer: str) -> dict:
+def _callback_query(plot_id: str, season_id: str, answer: str, *, tapper_id: int = 101) -> dict:
+    # ADR-012: the farmer-authorization check (_is_farmer, webhook.py)
+    # reads callback_query["from"]["id"], not message.chat.id -- every
+    # farmer in this file is seeded with telegram_chat_id=101, so the
+    # default here matches unless a test explicitly wants a mismatch.
     return {
         "id": "cbq1",
         "data": f"confirm:{plot_id}:{season_id}:{answer}",
         "message": {"chat": {"id": 101}, "message_id": 42},
+        "from": {"id": tapper_id},
     }
 
 

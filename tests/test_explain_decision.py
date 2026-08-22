@@ -12,7 +12,12 @@ import pytest
 
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.storage.file_storage import FileStorage
-from harvest_convoy.storage.interface import DecisionRecord, HarvestConfirmation, LedgerEntry
+from harvest_convoy.storage.interface import (
+    DecisionRecord,
+    HarvestConfirmation,
+    LedgerEntry,
+    OperatorAuditEvent,
+)
 from scripts import explain_decision
 
 SEASON = "2026-kuruvai"
@@ -322,3 +327,117 @@ def test_no_bedrock_calls_possible_in_this_script(tmp_path, monkeypatch) -> None
 
     exit_code = explain_decision.main(["--plot-id", "p03", "--date", "2026-09-09"])
     assert exit_code == 0
+
+
+# --- ADR-012 Decision 2: operator identity surfaced where it affects a decision ---
+
+def test_escalated_decision_surfaces_the_operator_in_effect_that_day(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_plot(_plot("p03", "f1"))
+    storage.put_decision_record(
+        _decision_record("p03", "f1", "c1", "2026-09-09", resolution="escalated_won")
+    )
+    storage.put_operator_audit_event(OperatorAuditEvent(
+        cluster_id="c1", event_type="enrolled", occurred_at="2026-09-01T10:00:00+00:00",
+        code_used="ABCD1234", new_operator_chat_id=555,
+    ))
+
+    result = explain_decision.build_result(
+        storage, plot_id="p03", requested_date="2026-09-09", season=None,
+    )
+
+    assert result.operator_at_decision is not None
+    assert result.operator_at_decision.new_operator_chat_id == 555
+    assert result.operator_relevance_note is None
+    text = explain_decision.render_text(result)
+    assert "555" in text
+    assert "ABCD1234" in text
+
+
+def test_breakdown_recompute_decision_surfaces_the_operator_too(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_plot(_plot("p03", "f1"))
+    storage.put_decision_record(
+        _decision_record("p03", "f1", "c1", "2026-09-09", trigger_reason="breakdown_recompute")
+    )
+    storage.put_operator_audit_event(OperatorAuditEvent(
+        cluster_id="c1", event_type="enrolled", occurred_at="2026-09-01T10:00:00+00:00",
+        code_used="ABCD1234", new_operator_chat_id=555,
+    ))
+
+    result = explain_decision.build_result(
+        storage, plot_id="p03", requested_date="2026-09-09", season=None,
+    )
+
+    assert result.operator_at_decision is not None
+    assert result.operator_at_decision.new_operator_chat_id == 555
+
+
+def test_operator_involved_decision_with_no_audit_event_gets_a_relevance_note(tmp_path) -> None:
+    """The operator was set by hand (predates ADR-012) -- no
+    OperatorAuditEvent exists, so this is stated plainly rather than
+    silently showing nothing."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_plot(_plot("p03", "f1"))
+    storage.put_decision_record(
+        _decision_record("p03", "f1", "c1", "2026-09-09", resolution="escalated_lost")
+    )
+
+    result = explain_decision.build_result(
+        storage, plot_id="p03", requested_date="2026-09-09", season=None,
+    )
+
+    assert result.operator_at_decision is None
+    assert result.operator_relevance_note is not None
+    assert "no OperatorAuditEvent exists" in result.operator_relevance_note
+    text = explain_decision.render_text(result)
+    assert "no OperatorAuditEvent exists" in text
+
+
+def test_operator_not_involved_decision_shows_nothing_about_operators(tmp_path) -> None:
+    """An ordinary FITS decision an operator never touched -- no clutter."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_plot(_plot("p03", "f1"))
+    storage.put_decision_record(_decision_record("p03", "f1", "c1", "2026-09-09", outcome="fits"))
+
+    result = explain_decision.build_result(
+        storage, plot_id="p03", requested_date="2026-09-09", season=None,
+    )
+
+    assert result.operator_at_decision is None
+    assert result.operator_relevance_note is None
+    text = explain_decision.render_text(result)
+    assert "operator" not in text.lower()
+
+
+def test_operator_active_before_the_decision_date_is_correctly_found_same_day(tmp_path) -> None:
+    """An operator enrolled earlier the SAME day as the decision --
+    proves the end-of-day cutoff handles a bare decision_date against a
+    full ISO timestamp correctly (a naive string compare would wrongly
+    exclude this)."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_plot(_plot("p03", "f1"))
+    storage.put_decision_record(
+        _decision_record("p03", "f1", "c1", "2026-09-09", resolution="escalated_won")
+    )
+    storage.put_operator_audit_event(OperatorAuditEvent(
+        cluster_id="c1", event_type="enrolled", occurred_at="2026-09-09T06:00:00+00:00",
+        code_used="ABCD1234", new_operator_chat_id=555,
+    ))
+
+    result = explain_decision.build_result(
+        storage, plot_id="p03", requested_date="2026-09-09", season=None,
+    )
+
+    assert result.operator_at_decision is not None
+    assert result.operator_at_decision.new_operator_chat_id == 555

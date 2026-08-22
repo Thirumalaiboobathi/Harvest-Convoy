@@ -30,7 +30,7 @@ from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.storage import Storage
 from harvest_convoy.storage.fairness import record_bump
 from harvest_convoy.storage.interface import HarvestConfirmation
-from harvest_convoy.telegram import notify, registration, rollover
+from harvest_convoy.telegram import notify, operator_enrollment, registration, rollover
 from harvest_convoy.telegram.client import TelegramClient
 from harvest_convoy.telegram.registration import IncomingMessage
 
@@ -177,6 +177,20 @@ def handle_confirmation_callback(
     language = farmer.language if farmer is not None else "ta"
     mod = notify._lang_module(language)
 
+    if not _is_farmer(callback_query, farmer):
+        # ADR-012: a confirmation reversal both frees the plot for
+        # rescheduling and credits the fairness ledger -- a stranger
+        # tapping this on another farmer's behalf could manufacture a
+        # bump for them, or falsely corroborate a harvest that never
+        # happened. Checked before any write below.
+        logger.warning(
+            "confirmation callback for plot=%s season=%s from a chat_id "
+            "that doesn't match the registered farmer -- refused",
+            plot_id, season_id,
+        )
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
     updated = replace(
         confirmation, confirmed=answer, confirmed_at=datetime.now(timezone.utc).isoformat()
     )
@@ -282,6 +296,22 @@ def handle_rollover_callback(
     language = farmer.language if farmer is not None else "ta"
     mod = notify._lang_module(language)
 
+    if not _is_farmer(callback_query, farmer):
+        # ADR-012: without this, a "no" tap from anyone excludes this
+        # farmer from next season's scheduling pool, and a "yes" tap
+        # from anyone starts THEM (not the actual farmer) receiving the
+        # follow-up date prompt and being able to set this farmer's new
+        # transplant_date -- both are the same class of bug as an
+        # unauthorized escalation resolution, just farmer-owned instead
+        # of operator-owned state.
+        logger.warning(
+            "rollover callback for plot=%s season=%s from a chat_id that "
+            "doesn't match the registered farmer -- refused",
+            plot_id, new_season_id,
+        )
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
     message = callback_query.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
     message_id = message.get("message_id")
@@ -315,6 +345,25 @@ def _is_operator(callback_query: dict, cluster) -> bool:
     operator's own tap on a machine-status action is honored."""
     tapper_id = (callback_query.get("from") or {}).get("id")
     return cluster is not None and tapper_id is not None and tapper_id == cluster.operator_chat_id
+
+
+def _is_farmer(callback_query: dict, farmer) -> bool:
+    """Same discipline as _is_operator, extended to callbacks that act on
+    behalf of a specific farmer (confirmation, rollover) -- ADR-012. The
+    tapping user's own Telegram identity must match the farmer who owns
+    this plot; a stranger (or another farmer) tapping a callback_data
+    string that references someone else's plot_id/season_id must not be
+    able to record a confirmation or rollover reply on that farmer's
+    behalf. farmer=None (no Farmer record resolvable) always refuses --
+    fails closed, never assumes authorization when identity can't be
+    established."""
+    tapper_id = (callback_query.get("from") or {}).get("id")
+    return (
+        farmer is not None
+        and tapper_id is not None
+        and farmer.telegram_chat_id is not None
+        and tapper_id == farmer.telegram_chat_id
+    )
 
 
 def parse_breakdown_callback_data(data: str) -> tuple[str, str, str] | None:
@@ -528,6 +577,188 @@ def handle_machine_back_callback(
         client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
 
 
+def parse_operator_lang_callback_data(data: str) -> tuple[str, str, str] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "operator_lang":
+        return None
+    _, cluster_id, code, language = parts
+    if language not in ("ta", "en"):
+        return None
+    return cluster_id, code, language
+
+
+def handle_operator_lang_callback(
+    client: TelegramClient,
+    callback_query: dict,
+    storage: Storage,
+) -> None:
+    """ADR-012 Part 2: the language-choice tap that follows a valid
+    /operator <code> command. Re-validates the code's freshness (closes
+    the race where two chats both hold a valid code and the first tap
+    consumes it) and, critically, checks operator_enrollment.matches_pending
+    -- this tap must come from the exact chat_id that sent the original
+    command, not just carry well-formed callback_data (Decision 1)."""
+    callback_query_id = callback_query.get("id", "")
+    data = callback_query.get("data", "")
+    parsed = parse_operator_lang_callback_data(data)
+
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+
+    cluster_id, code, language = parsed
+    tapper_id = (callback_query.get("from") or {}).get("id")
+    mod = notify._lang_module(language)
+
+    if tapper_id is None or not operator_enrollment.matches_pending(tapper_id, cluster_id, code):
+        logger.warning(
+            "operator_lang callback for cluster=%s code=%s from a chat_id "
+            "with no matching pending enrollment -- refused",
+            cluster_id, code,
+        )
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    record, status = operator_enrollment.validate_code(storage, code)
+    if status != "valid":
+        logger.info(
+            "operator_lang callback: code=%s status=%s at the language step "
+            "-- refused (consumed by a concurrent tap, or expired mid-flow)",
+            code, status,
+        )
+        operator_enrollment.clear_state(tapper_id)
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    cluster = storage.get_cluster(cluster_id)
+    if cluster is None:
+        logger.error(
+            "operator_lang callback: cluster=%s no longer exists -- refused",
+            cluster_id,
+        )
+        operator_enrollment.clear_state(tapper_id)
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    operator_enrollment.set_language(tapper_id, language)
+
+    message = callback_query.get("message") or {}
+    msg_chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if msg_chat_id is not None and message_id is not None:
+        client.edit_message_reply_markup(msg_chat_id, message_id, reply_markup=None)
+
+    if cluster.operator_chat_id is not None:
+        # Existing operator already set -- require explicit replacement,
+        # never a silent overwrite. Still just a button tap, not new free
+        # text (Decision 6 of ADR-011 Part 2's spirit, extended here).
+        client.answer_callback_query(callback_query_id, mod.LANGUAGE_ACK)
+        client.send_message(
+            tapper_id, mod.operator_replacement_prompt(cluster.name),
+            reply_markup=operator_enrollment.build_operator_replace_keyboard(
+                cluster_id, code, language
+            ),
+        )
+        return
+
+    event = operator_enrollment.complete_enrollment(
+        storage, cluster, code, tapper_id, language, previous_chat_id=None,
+    )
+    operator_enrollment.clear_state(tapper_id)
+    if event is None:
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+    client.answer_callback_query(callback_query_id, mod.LANGUAGE_ACK)
+    client.send_message(tapper_id, mod.operator_enrolled(cluster.name))
+
+
+def parse_operator_replace_callback_data(data: str) -> tuple[str, str, str, bool] | None:
+    parts = data.split(":")
+    if len(parts) != 5 or parts[0] != "operator_replace":
+        return None
+    _, cluster_id, code, language, answer = parts
+    if language not in ("ta", "en") or answer not in ("yes", "no"):
+        return None
+    return cluster_id, code, language, answer == "yes"
+
+
+def handle_operator_replace_callback(
+    client: TelegramClient,
+    callback_query: dict,
+    storage: Storage,
+) -> None:
+    """ADR-012 Part 2: the Yes/No reply to "this cluster already has an
+    operator, replace them?". Same chat_id-binding check as the language
+    step -- a stray tap on this callback_data must be refused even if
+    the code it references is still genuinely valid."""
+    callback_query_id = callback_query.get("id", "")
+    data = callback_query.get("data", "")
+    parsed = parse_operator_replace_callback_data(data)
+
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+
+    cluster_id, code, language, answer = parsed
+    tapper_id = (callback_query.get("from") or {}).get("id")
+    mod = notify._lang_module(language)
+
+    if tapper_id is None or not operator_enrollment.matches_pending(tapper_id, cluster_id, code):
+        logger.warning(
+            "operator_replace callback for cluster=%s code=%s from a chat_id "
+            "with no matching pending enrollment -- refused",
+            cluster_id, code,
+        )
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    message = callback_query.get("message") or {}
+    msg_chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if msg_chat_id is not None and message_id is not None:
+        client.edit_message_reply_markup(msg_chat_id, message_id, reply_markup=None)
+
+    if not answer:
+        operator_enrollment.clear_state(tapper_id)
+        client.answer_callback_query(callback_query_id, mod.operator_replacement_declined())
+        return
+
+    record, status = operator_enrollment.validate_code(storage, code)
+    if status != "valid":
+        logger.info(
+            "operator_replace callback: code=%s status=%s at the replace "
+            "step -- refused",
+            code, status,
+        )
+        operator_enrollment.clear_state(tapper_id)
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    cluster = storage.get_cluster(cluster_id)
+    if cluster is None:
+        logger.error(
+            "operator_replace callback: cluster=%s no longer exists -- refused",
+            cluster_id,
+        )
+        operator_enrollment.clear_state(tapper_id)
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    event = operator_enrollment.complete_enrollment(
+        storage, cluster, code, tapper_id, language,
+        previous_chat_id=cluster.operator_chat_id,
+    )
+    operator_enrollment.clear_state(tapper_id)
+    if event is None:
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+    client.answer_callback_query(callback_query_id, mod.operator_enrolled(cluster.name))
+
+
 def handle_callback_query(
     client: TelegramClient,
     callback_query: dict,
@@ -555,6 +786,19 @@ def handle_callback_query(
     cluster = storage.get_cluster(cluster_id)
     operator_language = cluster.operator_language if cluster is not None else "ta"
     mod = notify._lang_module(operator_language)
+
+    if not _is_operator(callback_query, cluster):
+        # ADR-012: an escalation message resolves a scheduling conflict
+        # and writes a real fairness-ledger entry -- anyone who obtained
+        # or was forwarded it (not just the operator it was sent to)
+        # could otherwise tap it. Same check, same refusal wording, as
+        # the breakdown/machine_back callbacks (ADR-011 Part 2,
+        # Decision 6) -- checked before any lookup or ledger write below.
+        logger.warning(
+            "escalation %s callback from a non-operator tapper -- refused", key,
+        )
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
 
     if key in _RESOLVED_ESCALATIONS:
         client.answer_callback_query(
@@ -710,7 +954,7 @@ def handle_update(
     uses them -- keeps the signature uniform rather than branching on
     which fields are needed for which update type.
 
-    Seven distinct callback_query shapes: a "lang:ta"/"lang:en"
+    Nine distinct callback_query shapes: a "lang:ta"/"lang:en"
     registration-language tap routes to
     registration.handle_language_callback (ADR-008 Decision 7); a
     "confirm:{plot_id}:{season_id}:{yes|no}" tap routes to
@@ -718,8 +962,10 @@ def handle_update(
     "rollover:{plot_id}:{new_season_id}:{yes|no}" tap routes to
     handle_rollover_callback (ADR-011 Part 1); "breakdown:...",
     "breakdown_followup:...", and "machine_back:..." route to their
-    matching handlers (ADR-011 Part 2); anything else goes through the
-    existing handle_callback_query escalation flow.
+    matching handlers (ADR-011 Part 2); "operator_lang:..." and
+    "operator_replace:..." route to the operator-enrollment handlers
+    (ADR-012 Part 2); anything else goes through the existing
+    handle_callback_query escalation flow.
     """
     if "callback_query" in update:
         callback_query = update["callback_query"]
@@ -742,6 +988,12 @@ def handle_update(
         if data.startswith("machine_back:"):
             handle_machine_back_callback(client, callback_query, storage)
             return
+        if data.startswith("operator_lang:"):
+            handle_operator_lang_callback(client, callback_query, storage)
+            return
+        if data.startswith("operator_replace:"):
+            handle_operator_replace_callback(client, callback_query, storage)
+            return
         handle_callback_query(
             client, callback_query, storage, season_id, lookup_farmer_for_plot
         )
@@ -758,6 +1010,17 @@ def handle_update(
         return
 
     incoming = parse_incoming_message(message)
+
+    # A one-time "/operator <code>" enrollment command -- checked before
+    # anything else so it's never parsed as farmer registration text or
+    # a rollover date reply. Matched on the bare command word (not just
+    # parse_operator_command's success) so a malformed "/operator" with
+    # no code still gets the usage message instead of falling through.
+    # See ADR-012 Part 2.
+    if (incoming.text or "").strip().lower().startswith(operator_enrollment.COMMAND):
+        outbound = operator_enrollment.handle_operator_command(chat_id, incoming.text, storage)
+        client.send_message(chat_id, outbound.text, reply_markup=outbound.reply_markup)
+        return
 
     # A farmer mid-reply to a "yes, tap and tell me the date" rollover
     # prompt is routed here, not into registration.handle_incoming --

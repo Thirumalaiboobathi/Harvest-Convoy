@@ -595,6 +595,63 @@ def season_rollover_confirmed_ack() -> str:
     # "Got it -- you're on the list for this season."
 
 
+# --- Operator enrollment (ADR-012 Part 2) -- DRAFT, pending
+# native-speaker review, same status as every other string in this file
+# when first written. Reuses CONFIRMATION_YES_LABEL/CONFIRMATION_NO_LABEL
+# for the replacement prompt's buttons.
+
+def operator_command_usage() -> str:
+    return "/operator என்று தட்டச்சு செய்து, அதற்குப் பின் உங்கள் குறியீட்டைச் சேர்க்கவும்."
+    # "Send /operator followed by your enrolment code."
+
+
+def operator_invalid_code() -> str:
+    return (
+        "இந்தக் குறியீடு செல்லுபடியாகாது அல்லது ஏற்கனவே "
+        "பயன்படுத்தப்பட்டுவிட்டது. புதிய குறியீட்டிற்கு உங்கள் "
+        "கிளஸ்டர் ஒருங்கிணைப்பாளரிடம் கேளுங்கள்."
+    )
+    # "That code isn't valid or has already been used. Ask your cluster
+    #  coordinator for a new one."
+
+
+def operator_expired_code() -> str:
+    return (
+        "இந்தக் குறியீட்டின் காலம் முடிந்துவிட்டது. புதிய "
+        "குறியீட்டிற்கு உங்கள் கிளஸ்டர் ஒருங்கிணைப்பாளரிடம் கேளுங்கள்."
+    )
+    # "That code has expired. Ask your cluster coordinator for a new one."
+
+
+def operator_language_prompt() -> str:
+    return "குறியீடு ஏற்கப்பட்டது. உங்கள் மொழியைத் தேர்ந்தெடுக்கவும்."
+    # "Enrolment code accepted. Please choose your language."
+
+
+def operator_replacement_prompt(cluster_name: str) -> str:
+    return (
+        f"{cluster_name}-க்கு ஏற்கனவே ஒரு ஆபரேட்டர் பதிவு "
+        "செய்யப்பட்டுள்ளார். அவரை நீங்கள் மாற்ற விரும்புகிறீர்களா?"
+    )
+    # "{cluster_name} already has a registered operator. Replace them
+    #  with you?"
+
+
+def operator_replacement_declined() -> str:
+    return "புரிந்தது -- தற்போதைய ஆபரேட்டரே தொடர்வார்."
+    # "Understood -- the existing operator stays registered."
+
+
+def operator_enrolled(cluster_name: str) -> str:
+    return (
+        f"நீங்கள் இப்போது {cluster_name}-க்கான ஆபரேட்டராகப் பதிவு "
+        "செய்யப்பட்டுள்ளீர்கள். இங்கு பாதைச் சுருக்கங்களைப் "
+        "பெறுவீர்கள், இயந்திர நிலைக்கான பட்டன்களைத் தட்டலாம்."
+    )
+    # "You're now registered as the operator for {cluster_name}. You'll
+    #  get route summaries here and can tap buttons for machine status."
+
+
 # --- Advocate argument, templated (not LLM-generated) for Tamil ---
 #
 # Live-verified before this was written (ADR-008 Decision 14): Nova Pro,

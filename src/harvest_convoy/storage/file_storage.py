@@ -26,6 +26,8 @@ from harvest_convoy.storage.interface import (
     HarvestConfirmation,
     LedgerEntry,
     MachineStatus,
+    OperatorAuditEvent,
+    OperatorEnrollmentCode,
     SeasonRolloverPrompt,
     StorageResult,
 )
@@ -43,6 +45,8 @@ _EMPTY: dict = {
     "breakdowns": {},  # breakdowns[cluster_id][season_id][plot_id+"#"+date] = BreakdownDisplacement dict
     "machine_status": {},  # machine_status[cluster_id] = MachineStatus dict
     "advance_notices": {},  # advance_notices[plot_id][season_id] = AdvanceNoticeRecord dict
+    "operator_codes": {},  # operator_codes[code] = OperatorEnrollmentCode dict
+    "operator_audit": {},  # operator_audit[cluster_id] = [OperatorAuditEvent dict, ...] (append-only)
 }
 
 
@@ -290,3 +294,20 @@ class FileStorage:
     ) -> AdvanceNoticeRecord | None:
         raw = self._data["advance_notices"].get(plot_id, {}).get(season_id)
         return AdvanceNoticeRecord(**raw) if raw else None
+
+    def put_operator_enrollment_code(self, record: OperatorEnrollmentCode) -> StorageResult:
+        self._data["operator_codes"][record.code] = asdict(record)
+        return self._save()
+
+    def get_operator_enrollment_code(self, code: str) -> OperatorEnrollmentCode | None:
+        raw = self._data["operator_codes"].get(code)
+        return OperatorEnrollmentCode(**raw) if raw else None
+
+    def put_operator_audit_event(self, event: OperatorAuditEvent) -> StorageResult:
+        events = self._data["operator_audit"].setdefault(event.cluster_id, [])
+        events.append(asdict(event))
+        return self._save()
+
+    def get_operator_audit_events_for_cluster(self, cluster_id: str) -> list[OperatorAuditEvent]:
+        raw = self._data["operator_audit"].get(cluster_id, [])
+        return [OperatorAuditEvent(**v) for v in raw]

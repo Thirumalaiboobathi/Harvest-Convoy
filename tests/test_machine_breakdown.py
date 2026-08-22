@@ -321,13 +321,16 @@ def test_down_indefinitely_suppresses_capacity_until_machine_is_back(tmp_path, m
     assert storage.get_harvested_plot_ids("c1", SEASON) == {"p1"}
 
 
-def _resolve_escalation(client, storage, cluster_id, winner_plot_id, loser_plot_id, plots_by_id, farmers_by_id) -> None:
+def _resolve_escalation(
+    client, storage, cluster_id, winner_plot_id, loser_plot_id, plots_by_id, farmers_by_id,
+    *, operator_chat_id: int = 999,
+) -> None:
     update = {
         "callback_query": {
             "id": "cbq-resolve",
             "data": f"resolve:{cluster_id}:{winner_plot_id}:{loser_plot_id}:{winner_plot_id}",
-            "message": {"chat": {"id": 999}, "message_id": 1},
-            "from": {"id": 999},
+            "message": {"chat": {"id": operator_chat_id}, "message_id": 1},
+            "from": {"id": operator_chat_id},
         }
     }
 
@@ -421,6 +424,7 @@ def test_breakdown_displacement_produces_zero_change_in_next_seasons_weighted_bu
         client, storage, "c2", "p-winner", "p-bumped",
         {"p-winner": plot_winner, "p-bumped": plot_bumped},
         {"f-winner": farmer_winner, "f-bumped": farmer_bumped},
+        operator_chat_id=998,  # c2's own operator, not c1's (999)
     )
     assert len(storage.get_ledger_entries("f-bumped")) == 1
 

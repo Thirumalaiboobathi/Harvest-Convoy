@@ -1,7 +1,7 @@
 from datetime import date
 
 from harvest_convoy.agents.contracts import AdvocateClaim, EscalationPayload
-from harvest_convoy.models import Farmer, Plot
+from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.storage.fairness import get_ledger_history
 from harvest_convoy.storage.file_storage import FileStorage
 from harvest_convoy.storage.interface import DecisionRecord
@@ -10,6 +10,23 @@ from harvest_convoy.telegram.client import SendResult
 from harvest_convoy.telegram.registration import RegistrationState, save_state
 
 SEASON = "2026-kuruvai"
+
+# ADR-012: an escalation "resolve:" tap is now checked against the
+# cluster's registered operator_chat_id (see _is_operator, webhook.py),
+# the same authorization already required for breakdown/machine_back
+# taps -- see test_operator_authorization.py for the dedicated refusal
+# tests. Every escalation-resolution test below must register a real
+# Cluster with this chat_id and tap from it, or the resolution is
+# refused before it ever reaches the code being tested.
+OPERATOR_CHAT_ID = 900
+
+
+def _operator_cluster(cluster_id: str, *, operator_language: str = "ta") -> Cluster:
+    return Cluster(
+        cluster_id=cluster_id, name="Test", machine_capacity_acres_per_day=3.5,
+        machine_start_lat=10.0, machine_start_lon=77.5,
+        operator_language=operator_language, operator_chat_id=OPERATOR_CHAT_ID,
+    )
 
 
 class _FakeClient:
@@ -88,14 +105,10 @@ def test_escalation_toast_text_follows_cluster_operator_language(tmp_path) -> No
     "Machine assigned to ..." toast, not the Tamil default -- proves the
     dispatch is real, not just a hardcoded fallback that happens to look
     like the right thing."""
-    from harvest_convoy.models import Cluster
     from harvest_convoy.telegram import messages_en
 
     storage = FileStorage(tmp_path / "storage.json")
-    storage.put_cluster(Cluster(
-        cluster_id="en-op-test", name="Test", machine_capacity_acres_per_day=3.5,
-        machine_start_lat=10.0, machine_start_lon=77.5, operator_language="en",
-    ))
+    storage.put_cluster(_operator_cluster("en-op-test", operator_language="en"))
     client = _FakeClient()
     farmer_a = _farmer("e1", 111, name="Kannan Raja")
     farmer_b = _farmer("e2", 222, name="Meena Subramani")
@@ -105,6 +118,7 @@ def test_escalation_toast_text_follows_cluster_operator_language(tmp_path) -> No
             "id": "cbq-en",
             "data": "resolve:en-op-test:e1:e2:e1",
             "message": {"chat": {"id": 999}, "message_id": 1},
+            "from": {"id": OPERATOR_CHAT_ID},
         }
     }
 
@@ -146,6 +160,7 @@ def _claim(plot_id: str, days_past_maturity: int, bumped: bool = False) -> Advoc
 
 def test_callback_resolves_and_notifies_both_farmers(tmp_path) -> None:
     storage = FileStorage(tmp_path / "storage.json")
+    storage.put_cluster(_operator_cluster("kamatchipuram-test"))
     client = _FakeClient()
     farmer_a = _farmer("p03", 111, name="Kannan Raja")
     farmer_b = _farmer("p04", 222, name="Meena Subramani")
@@ -156,6 +171,7 @@ def test_callback_resolves_and_notifies_both_farmers(tmp_path) -> None:
             "id": "cbq1",
             "data": "resolve:kamatchipuram-test:p03:p04:p03",
             "message": {"chat": {"id": 999}, "message_id": 55},
+            "from": {"id": OPERATOR_CHAT_ID},
         }
     }
 
@@ -175,6 +191,7 @@ def test_callback_resolves_and_notifies_both_farmers(tmp_path) -> None:
 
 def test_callback_resolution_writes_a_real_ledger_entry(tmp_path) -> None:
     storage = FileStorage(tmp_path / "storage.json")
+    storage.put_cluster(_operator_cluster("ledger-test"))
     client = _FakeClient()
     farmer_a = _farmer("p03", 111, name="Kannan Raja")
     farmer_b = _farmer("p04", 222, name="Meena Subramani")
@@ -185,6 +202,7 @@ def test_callback_resolution_writes_a_real_ledger_entry(tmp_path) -> None:
             "id": "cbq-ledger",
             "data": "resolve:ledger-test:p03:p04:p03",
             "message": {"chat": {"id": 999}, "message_id": 1},
+            "from": {"id": OPERATOR_CHAT_ID},
         }
     }
     webhook.handle_update(
@@ -223,6 +241,7 @@ def test_callback_resolution_updates_the_decision_record_to_the_human_outcome(tm
     record fairness_decisive as True/False, since a human tap is not a
     score comparison."""
     storage = FileStorage(tmp_path / "storage.json")
+    storage.put_cluster(_operator_cluster("decision-test"))
     client = _FakeClient()
     farmer_a = _farmer("p03", 111, name="Kannan Raja")
     farmer_b = _farmer("p04", 222, name="Meena Subramani")
@@ -245,6 +264,7 @@ def test_callback_resolution_updates_the_decision_record_to_the_human_outcome(tm
             "id": "cbq-decision",
             "data": "resolve:decision-test:p03:p04:p03",
             "message": {"chat": {"id": 999}, "message_id": 1},
+            "from": {"id": OPERATOR_CHAT_ID},
         }
     }
     webhook.handle_update(
@@ -267,6 +287,7 @@ def test_callback_resolution_without_a_decision_date_does_not_crash(tmp_path) ->
     resolve and notify both farmers normally -- it just can't update a
     DecisionRecord it has no key for."""
     storage = FileStorage(tmp_path / "storage.json")
+    storage.put_cluster(_operator_cluster("no-date-test"))
     client = _FakeClient()
     farmer_a = _farmer("p03", 111, name="Kannan Raja")
     farmer_b = _farmer("p04", 222, name="Meena Subramani")
@@ -285,6 +306,7 @@ def test_callback_resolution_without_a_decision_date_does_not_crash(tmp_path) ->
             "id": "cbq-no-date",
             "data": "resolve:no-date-test:p03:p04:p03",
             "message": {"chat": {"id": 999}, "message_id": 1},
+            "from": {"id": OPERATOR_CHAT_ID},
         }
     }
     webhook.handle_update(
@@ -296,6 +318,7 @@ def test_callback_resolution_without_a_decision_date_does_not_crash(tmp_path) ->
 
 def test_registered_escalation_gives_loser_a_specific_reason(tmp_path) -> None:
     storage = FileStorage(tmp_path / "storage.json")
+    storage.put_cluster(_operator_cluster("reason-test"))
     client = _FakeClient()
     farmer_a = _farmer("p03", 111, name="Kannan Raja")
     farmer_b = _farmer("p04", 222, name="Meena Subramani")
@@ -314,6 +337,7 @@ def test_registered_escalation_gives_loser_a_specific_reason(tmp_path) -> None:
             "id": "cbq-reason",
             "data": "resolve:reason-test:p03:p04:p03",
             "message": {"chat": {"id": 999}, "message_id": 1},
+            "from": {"id": OPERATOR_CHAT_ID},
         }
     }
     webhook.handle_update(
@@ -335,6 +359,7 @@ def test_registered_escalation_gives_a_tamil_registered_loser_a_tamil_reason(tmp
     _resolution_reason was hand-authored English with no language
     awareness at all. See ADR-008 Part 2."""
     storage = FileStorage(tmp_path / "storage.json")
+    storage.put_cluster(_operator_cluster("reason-test-ta"))
     client = _FakeClient()
     farmer_a = _farmer("p03", 111, name="Kannan Raja", language="en")
     farmer_b = _farmer("p04", 222, name="Meena Subramani", language="ta")
@@ -353,6 +378,7 @@ def test_registered_escalation_gives_a_tamil_registered_loser_a_tamil_reason(tmp
             "id": "cbq-reason-ta",
             "data": "resolve:reason-test-ta:p03:p04:p03",
             "message": {"chat": {"id": 999}, "message_id": 1},
+            "from": {"id": OPERATOR_CHAT_ID},
         }
     }
     webhook.handle_update(
@@ -368,6 +394,7 @@ def test_registered_escalation_gives_a_tamil_registered_loser_a_tamil_reason(tmp
 
 def test_double_tap_on_resolved_escalation_does_not_renotify(tmp_path) -> None:
     storage = FileStorage(tmp_path / "storage.json")
+    storage.put_cluster(_operator_cluster("double-tap-test"))
     client = _FakeClient()
     plots = {"a1": (_farmer("a1", 1), _plot("a1")), "a2": (_farmer("a2", 2), _plot("a2"))}
     update = {
@@ -375,6 +402,7 @@ def test_double_tap_on_resolved_escalation_does_not_renotify(tmp_path) -> None:
             "id": "cbq-first",
             "data": "resolve:double-tap-test:a1:a2:a1",
             "message": {"chat": {"id": 9}, "message_id": 1},
+            "from": {"id": OPERATOR_CHAT_ID},
         }
     }
     webhook.handle_update(
@@ -404,12 +432,14 @@ def test_double_tap_survives_a_process_restart_via_the_ledger_write(tmp_path) ->
     because the entry already exists.
     """
     storage = FileStorage(tmp_path / "storage.json")
+    storage.put_cluster(_operator_cluster("restart-test"))
     plots = {"b1": (_farmer("b1", 1), _plot("b1")), "b2": (_farmer("b2", 2), _plot("b2"))}
     update = {
         "callback_query": {
             "id": "cbq-restart-1",
             "data": "resolve:restart-test:b1:b2:b1",
             "message": {"chat": {"id": 9}, "message_id": 1},
+            "from": {"id": OPERATOR_CHAT_ID},
         }
     }
 
@@ -436,12 +466,14 @@ def test_double_tap_survives_a_process_restart_via_the_ledger_write(tmp_path) ->
 
 def test_missing_farmer_lookup_degrades_without_crashing(tmp_path) -> None:
     storage = FileStorage(tmp_path / "storage.json")
+    storage.put_cluster(_operator_cluster("missing-lookup-test"))
     client = _FakeClient()
     update = {
         "callback_query": {
             "id": "cbq-missing",
             "data": "resolve:missing-lookup-test:x1:x2:x1",
             "message": {"chat": {"id": 9}, "message_id": 1},
+            "from": {"id": OPERATOR_CHAT_ID},
         }
     }
     # default lookup (unset) returns None for everything -- must not raise.
