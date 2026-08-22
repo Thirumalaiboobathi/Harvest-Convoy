@@ -385,6 +385,38 @@ def test_operator_audit_event_round_trips_through_file_storage(tmp_path) -> None
     assert storage.get_operator_audit_events_for_cluster("other-cluster") == []
 
 
+def test_operator_audit_events_are_never_pruned_by_unrelated_storage_operations(tmp_path) -> None:
+    """OperatorAuditEvent exists so operator authority can be
+    reconstructed months later -- nothing may ever delete or overwrite
+    one. There is deliberately no delete method for this entity in any
+    storage backend; this test proves the operations most likely to
+    someday grow one (a cluster update at season rollover, clearing a
+    machine's status, clearing a plot's harvest record) leave every
+    prior audit event for the cluster untouched."""
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster(operator_chat_id=OLD_OPERATOR_CHAT_ID))
+    first = OperatorAuditEvent(
+        cluster_id=CLUSTER_ID, event_type="enrolled", occurred_at="2026-01-01T00:00:00+00:00",
+        code_used="C1", new_operator_chat_id=OLD_OPERATOR_CHAT_ID,
+    )
+    second = OperatorAuditEvent(
+        cluster_id=CLUSTER_ID, event_type="replaced", occurred_at="2026-06-01T00:00:00+00:00",
+        code_used="C2", new_operator_chat_id=REAL_OPERATOR_CHAT_ID,
+        previous_operator_chat_id=OLD_OPERATOR_CHAT_ID,
+    )
+    storage.put_operator_audit_event(first)
+    storage.put_operator_audit_event(second)
+
+    # Operations that mutate other state for the same cluster, none of
+    # which should touch operator_audit at all.
+    storage.put_cluster(_cluster(operator_chat_id=REAL_OPERATOR_CHAT_ID))  # e.g. season rollover
+    storage.clear_machine_status(CLUSTER_ID)
+    storage.clear_plot_harvest("some-plot", CLUSTER_ID, "s1")
+
+    events = storage.get_operator_audit_events_for_cluster(CLUSTER_ID)
+    assert events == [first, second]
+
+
 def test_generate_code_produces_8_char_uppercase_hex() -> None:
     code = operator_enrollment.generate_code()
     assert len(code) == 8

@@ -603,6 +603,50 @@ before.
 Full writeup, including the other-field-corruption comparison table:
 ADR-008, Decision 14 (the finding) and Decision 15 (the fix).
 
+## Verification finds what tests don't
+
+Seven separate defects turned up across this project's history, none of
+them caught by the test suite going red:
+
+1. **Registration never persisted a `Farmer`/`Plot` to storage at all.**
+   Found while designing harvest confirmation (ADR-009), by reading
+   every call site of `put_farmer`/`put_plot` in the repo and finding
+   none in the registration path.
+2. **The scheduler forgot harvested plots**, so a plot that fit early
+   kept re-competing for capacity for the rest of the season
+   (FITS→CONTESTED regression, ADR-009 Part 1.5). Found by running a
+   ~170-day backtest against a real, completed season — invisible to
+   the single-day, 8-plot demos the test suite already covered.
+3. **Scheduling decisions were never recorded anywhere** — negotiation
+   claims, arguments, round counts, which maturity threshold applied.
+   Found while attempting to build a decision-replay report (ADR-010)
+   and discovering there was nothing left to replay by the time it ran.
+4. **The season-rollover prompt had no exclusion filter behind it.**
+   Found while tracing what actually reads a `SeasonRolloverPrompt` and
+   discovering `watcher.py` didn't (ADR-011 Part 1) — a farmer could
+   answer "no" and be scheduled anyway.
+5. **The escalation-resolve tap had no authorization check.** Found by
+   grepping for every call site of `_is_operator` and finding the
+   escalation handler wasn't one of them (ADR-012).
+6. **The harvest-confirmation callback had no farmer-identity check.**
+   Found in the same audit, by asking *whose* authorization each
+   callback requires rather than whether it had any (ADR-012).
+7. **The rollover callback had no farmer-identity check** — the more
+   dangerous of the two, since an unauthorized "yes" could redirect
+   another farmer's date-reply flow to the imposter's own chat. Same
+   audit, same question (ADR-012).
+
+Every test touching these paths was green the whole time, because a
+test only exercises what someone already thought to check when they
+wrote it. None of these seven were found that way. What found them
+instead was the same method each time, repeated across four ADRs: run
+the system against something real instead of a demo, try to build the
+thing that reads data the system is supposed to be producing and see
+what's actually there, or read every call site of a function that's
+supposed to matter and confirm it's called from where it needs to be.
+Tests confirm what you thought to check. Verification — actually using,
+replaying, or auditing the system end-to-end — finds what you didn't.
+
 ## Cost
 
 Measured, not estimated, on the real 8-plot Kamatchipuram scenario

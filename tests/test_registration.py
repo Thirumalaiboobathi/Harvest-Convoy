@@ -50,6 +50,7 @@ def test_language_button_tap_sets_language_without_a_chat_message() -> None:
     callback_query = {
         "id": "cb1", "data": "lang:en",
         "message": {"chat": {"id": 42}},
+        "from": {"id": 42},
     }
 
     registration.handle_language_callback(client, callback_query)
@@ -58,6 +59,53 @@ def test_language_button_tap_sets_language_without_a_chat_message() -> None:
     assert state.language == "en"
     assert state.greeted is True
     assert client.acks == [("cb1", "English selected.", False)]
+
+
+def test_language_tap_from_a_different_chat_is_refused_and_does_not_set_language() -> None:
+    """ADR-012: a lang: tap must come from the same identity the keyboard
+    was sent to. A stray tap in a group chat, or a forwarded keyboard,
+    must not let a second person set this chat's language."""
+    class _FakeClient:
+        def __init__(self):
+            self.acks = []
+
+        def answer_callback_query(self, callback_query_id, text=None, show_alert=False):
+            self.acks.append((callback_query_id, text, show_alert))
+
+    save_state(RegistrationState(chat_id=43))
+    client = _FakeClient()
+    callback_query = {
+        "id": "cb2", "data": "lang:en",
+        "message": {"chat": {"id": 43}},
+        "from": {"id": 99999},
+    }
+
+    registration.handle_language_callback(client, callback_query)
+
+    state = get_or_create_state(43)
+    assert state.language == "ta"  # unchanged default -- the "en" tap must not apply
+    assert state.greeted is False
+
+
+def test_language_tap_with_no_from_field_is_refused() -> None:
+    class _FakeClient:
+        def __init__(self):
+            self.acks = []
+
+        def answer_callback_query(self, callback_query_id, text=None, show_alert=False):
+            self.acks.append((callback_query_id, text, show_alert))
+
+    save_state(RegistrationState(chat_id=44))
+    client = _FakeClient()
+    callback_query = {
+        "id": "cb3", "data": "lang:en",
+        "message": {"chat": {"id": 44}},
+    }
+
+    registration.handle_language_callback(client, callback_query)
+
+    state = get_or_create_state(44)
+    assert state.language == "ta"  # unchanged default -- no from field means refused
 
 
 def test_full_happy_path_reaches_complete() -> None:

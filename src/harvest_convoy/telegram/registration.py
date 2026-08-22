@@ -456,19 +456,31 @@ def handle_language_callback(client: TelegramClient, callback_query: dict) -> No
     keyboard. This is a callback_query (a toast/alert), not a sent chat
     message -- it never counts against the four-message budget. Sets the
     farmer's language explicitly; does not re-send the greeting (already
-    shown bilingually) or advance the registration step."""
+    shown bilingually) or advance the registration step.
+
+    Requires the tap to come from the same identity the message was sent
+    to (from.id == chat.id), not just any tap on this chat's keyboard --
+    consistency with every other callback handler audited under ADR-012.
+    A group chat or a forwarded keyboard could otherwise let a second
+    person set this farmer's language to one they can't read, which
+    turns into a harvest message arriving unreadable."""
     callback_query_id = callback_query.get("id", "")
     data = callback_query.get("data", "")
     message = callback_query.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
+    tapper_id = (callback_query.get("from") or {}).get("id")
 
     _, _, code = data.partition(":")
-    if chat_id is None or code not in _LANGUAGE_MODULES:
-        # An unrecognized code means no language was ever established for
-        # this tap -- defaults to Tamil, same as the product-wide default
-        # everywhere else a language isn't yet resolvable. Was hardcoded
-        # English regardless, same bug class as webhook.py's identically-
-        # named toast; caught in the same audit pass. See ADR-008 follow-up.
+    if (
+        chat_id is None
+        or code not in _LANGUAGE_MODULES
+        or tapper_id is None
+        or tapper_id != chat_id
+    ):
+        # An unrecognized code, a missing/mismatched tapper identity, or
+        # no chat_id at all -- one refusal path for all of them, same
+        # default-to-Tamil toast used everywhere else a language isn't
+        # yet resolvable. See ADR-008 follow-up and ADR-012.
         client.answer_callback_query(
             callback_query_id, _lang_module("ta").unrecognized_action(), show_alert=True
         )

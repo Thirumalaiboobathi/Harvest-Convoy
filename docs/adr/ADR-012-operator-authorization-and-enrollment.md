@@ -51,7 +51,7 @@ what authorizes each one:
 
 | Prefix | Handler | Authorized against | Status before this ADR | Status now |
 |---|---|---|---|---|
-| `lang:` | `registration.handle_language_callback` | Whichever chat the message lives in (`message.chat.id`) — sets *that chat's own* language preference, doesn't act on behalf of an already-identified other party | Uses `message.chat.id`, not `from.id` | **Unchanged, and judged acceptable** — see note below |
+| `lang:` | `registration.handle_language_callback` | Now: `from.id == message.chat.id` — the tap must come from the same identity the keyboard was sent to | Used only `message.chat.id`, not `from.id` | **Fixed** |
 | `confirm:` | `handle_confirmation_callback` | Now: the confirmation's farmer (`Farmer.telegram_chat_id`) via `_is_farmer` | **No check at all** | **Fixed** |
 | `rollover:` | `handle_rollover_callback` | Now: the prompt's farmer, via `_is_farmer` | **No check at all** | **Fixed** |
 | `breakdown:` | `handle_breakdown_callback` | `Cluster.operator_chat_id` via `_is_operator` | Checked | Unchanged |
@@ -61,15 +61,24 @@ what authorizes each one:
 | `operator_replace:` | `handle_operator_replace_callback` (new) | Same as above | New | Checked from the start |
 | `resolve:` (anything unmatched) | `handle_callback_query` | Now: `Cluster.operator_chat_id` via `_is_operator` | **No check at all** | **Fixed** |
 
-**On `lang:` staying as `message.chat.id`**: this callback doesn't act
-on behalf of any already-identified party — it just sets the language
-preference for whichever chat the tap happened in, before that chat's
-farmer identity even exists (`RegistrationState` is being created, not
-looked up). The forwarded-keyboard risk this ADR treats as unverified
-for every *other* callback (Decision 1) doesn't create the same
-exposure here: even in the worst case, a stray tap only sets *its own
-chat's* language, never someone else's. Left as-is; noted here so it
-was a considered decision, not a gap that wasn't checked.
+**`lang:` was reconsidered and fixed, not left as a documented
+exception.** The original reasoning — this callback doesn't act on
+behalf of an already-identified other party, so a stray tap only ever
+sets *its own chat's* language — was sound as far as it went, but it
+missed the concrete case: in a group chat, or if the keyboard reached a
+second person, that second person could set *the farmer's* language to
+one the farmer can't read. The harm is low-probability but real — a
+harvest message arriving in a language the farmer can't read is a
+missed harvest, the same failure mode the rest of this ADR exists to
+prevent. `from.id` is available on this callback exactly like every
+other one, so there was no reason to special-case it: doing so would
+have left a reader auditing the table one exception to reason about
+instead of one uniform rule (`from.id` must match the identity the
+message concerns). Fixed the same way as `confirm:`/`rollover:` — a tap
+whose `from.id` doesn't match `message.chat.id` is refused before the
+language is set. See `test_language_tap_from_a_different_chat_is_
+refused_and_does_not_set_language` and `test_language_tap_with_no_
+from_field_is_refused` in `tests/test_registration.py`.
 
 **New test coverage for the audit**: `tests/test_operator_authorization.py`
 (escalation-resolve: non-operator refused with no state mutation, no
@@ -294,3 +303,18 @@ broader audit that found and fixed the same bug class in
 (the audit trail) was not in the original draft at all — added per
 explicit instruction that operator changes must be reconstructable
 later.
+
+A second review round, after the initial implementation, found one more
+gap: `lang:` had been deliberately left checking only `message.chat.id`
+with reasoning recorded in this document. On review, that reasoning
+didn't hold up against the concrete case (a second person in a group
+chat, or a forwarded keyboard, setting a farmer's language to one they
+can't read) and the exception was worse for a reader than the risk it
+avoided. Fixed to match every other handler — see the audit table and
+note above. `OperatorAuditEvent` pruning was also checked at this point:
+no code anywhere calls anything that deletes or overwrites an audit
+event — there is no delete method for the entity in any storage backend,
+season rollover and cluster updates never touch `operator_audit` — and
+`test_operator_audit_events_are_never_pruned_by_unrelated_storage_
+operations` (`tests/test_operator_enrollment.py`) now asserts this
+directly rather than leaving it as an unverified property of the code.
