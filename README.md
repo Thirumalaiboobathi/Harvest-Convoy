@@ -255,6 +255,27 @@ and — most importantly — actual ADT45 GDD-to-maturity ground truth from
 an agronomist or a season of paired measurements, replacing the derived
 estimate below.
 
+**Farmer and operator onboarding are deliberately asymmetric, not an
+oversight.** A farmer self-onboards entirely by messaging the bot
+(`telegram/registration.py`) — no code, no external step. The operator
+does not: they enroll with a one-time code (`/operator <code>`,
+`telegram/operator_enrollment.py`) that a human — whoever provisions the
+cluster — generates and hands them out-of-band (phone call, WhatsApp,
+paper slip), the same way `Cluster.operator_chat_id` used to be set by
+hand in `seed_cluster.py` before this existed. That asymmetry is by
+design: an operator controls a whole cluster's route and can report a
+machine breakdown or resolve a scheduling conflict, so letting anyone
+self-onboard into that role the way a farmer does would hand out real
+authority to whoever happened to message the bot first. A real
+deployment would still need two things this project doesn't provide: an
+actual secure process for a provisioner to generate and deliver codes at
+more than a handful of clusters (this project has no opinion on SMS vs.
+WhatsApp vs. paper vs. anything else), and a real answer for operator
+turnover beyond what's here — a departing operator's replacement today
+needs either a fresh code from the provisioner or the in-chat
+replacement-confirmation flow (`/operator <code>` again, then a Yes/No
+tap) that guards against a silent takeover.
+
 **`MATURITY_GDD_ESTIMATED` is derived, not sourced — the derivation is
 shown in code, not hidden.** No published thermal-time (GDD) requirement
 for the ADT45 variety was found despite targeted searches. What the code
@@ -322,6 +343,12 @@ replays both seeded clusters' exact plots (same coordinates, same area,
 same month/day transplant dates) one year earlier, against real
 Open-Meteo Archive weather for the real 2025 season, walking day by day
 the way the real watcher does.
+
+2025 is used specifically because it's the most recently completed
+Kuruvai season — validating against real archived weather requires a
+season that has actually finished, which is why the transplant dates in
+the tables below are shifted one year earlier than `seed_cluster.py`'s
+own dates and the live system's actual 2026 dates.
 
 **What this does and does not prove — read this before the table below:**
 
