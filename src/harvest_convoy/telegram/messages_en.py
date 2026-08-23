@@ -278,7 +278,11 @@ def route_summary_empty(cluster_name: str) -> str:
 
 
 def route_summary_header(cluster_name: str) -> str:
-    return f"{cluster_name} route for today:"
+    # "Proposed", not a declarative "route for today" -- ADR-013: same
+    # content, different posture, so the message reads as a suggestion
+    # from a tool the operator can accept or change, not an instruction
+    # from a system he has already missed the chance to act on.
+    return f"Proposed route for {cluster_name} today:"
 
 
 def route_stop_line(index: int, label: str) -> str:
@@ -430,4 +434,64 @@ def operator_enrolled(cluster_name: str) -> str:
     return (
         f"You're now registered as the operator for {cluster_name}. "
         f"You'll get route summaries here and can tap buttons for machine status."
+    )
+
+
+# --- Route proposal and operator override (ADR-013) -- operator-only,
+# dispatched by Cluster.operator_language, same pattern as every other
+# operator-facing string in this module. "Silence is not a veto" -- the
+# proposed route stands with no message at all if the operator never
+# taps anything; every string below is what happens only if he does.
+
+ROUTE_ACCEPT_BUTTON_LABEL = "✅ Accept"
+ROUTE_MODIFY_BUTTON_LABEL = "✏️ Modify"
+ROUTE_DROP_BUTTON_LABEL = "✕"
+ROUTE_SWAP_UP_BUTTON_LABEL = "↑"
+ROUTE_DONE_BUTTON_LABEL = "✅ Done"
+ROUTE_DROP_CONFIRM_YES_LABEL = "✅ Confirm"
+ROUTE_DROP_CONFIRM_NO_LABEL = "❌ Cancel"
+
+
+def route_accept_ack() -> str:
+    return "✅ Accepted"
+
+
+def route_edit_header(cluster_name: str) -> str:
+    return f"{cluster_name} -- editing today's route:"
+
+
+def route_drop_confirm_prompt(farmer_name: str, *, is_last_plot: bool) -> str:
+    text = f"Drop {farmer_name}'s plot from today's route?"
+    if is_last_plot:
+        text += (
+            " This is the last plot on today's route -- confirming leaves "
+            "nobody scheduled today."
+        )
+    return text
+
+
+def route_done_ack() -> str:
+    return "Route updated."
+
+
+def route_already_confirmed() -> str:
+    return (
+        "This plot's harvest was already confirmed -- today's route "
+        "can't be changed for it."
+    )
+
+
+def route_stale(decision_date: str) -> str:
+    return f"This route is from {decision_date} and is no longer active."
+
+
+def route_dropped_notice(area_acres: float, area_unit: str) -> str:
+    # Deliberately doesn't name a reason (weather, another farmer, the
+    # operator's own arrangement) -- this system doesn't know which of
+    # those is true and shouldn't guess, same discipline as
+    # escalation_resolved_lost. See ADR-013 Decision 11.
+    return (
+        f"Today's route has changed -- the machine won't be coming to "
+        f"your {format_area(area_acres, area_unit)} plot today. You'll "
+        f"be reconsidered at the next opportunity."
     )

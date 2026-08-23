@@ -40,6 +40,7 @@ from harvest_convoy.storage.interface import (
     HarvestConfirmation,
     LedgerEntry,
     OperatorAuditEvent,
+    RouteOverride,
     Storage,
 )
 from harvest_convoy.telegram.messages_en import format_area, format_date
@@ -102,6 +103,8 @@ class DecisionReplayResult:
     data_gaps: list[str]
     operator_at_decision: OperatorAuditEvent | None = None
     operator_relevance_note: str | None = None
+    route_override: RouteOverride | None = None
+    route_override_note: str | None = None
 
 
 def _resolve_season(
@@ -149,6 +152,41 @@ def _resolve_season(
     )
 
 
+def _route_override_note(plot_id: str, override: RouteOverride) -> str | None:
+    """A plain-English note when an operator's route override touched
+    this specific plot on this date -- None if the plot was never on the
+    proposed route, or its position is unchanged. See ADR-013 Decision
+    10: RouteOverride is the single source of truth for override facts,
+    cross-referenced here rather than duplicated onto DecisionRecord.
+    """
+    if plot_id not in override.proposed_route:
+        return None
+    original_position = override.proposed_route.index(plot_id) + 1
+    when = f" at {override.last_modified_at}" if override.last_modified_at else ""
+
+    if plot_id not in override.current_route:
+        return (
+            f"This plot's route position was originally computed as "
+            f"#{original_position} by the deterministic scheduler. The "
+            f"operator removed it from today's route{when}. This is "
+            "recorded as an operator-decided fairness bump (LedgerEntry, "
+            "decided_by=operator_override), separate from any decision "
+            "the algorithm made."
+        )
+
+    new_position = override.current_route.index(plot_id) + 1
+    if new_position != original_position:
+        return (
+            f"This plot's route position was originally computed as "
+            f"#{original_position} by the deterministic scheduler. The "
+            f"operator modified today's route{when}, moving it to "
+            f"#{new_position}. This is a recorded reorder with no "
+            "fairness consequence -- every FITS plot is marked harvested "
+            "at dispatch regardless of route position."
+        )
+    return None
+
+
 def build_result(
     storage: Storage, *, plot_id: str, requested_date: str, season: str | None,
 ) -> DecisionReplayResult:
@@ -176,6 +214,18 @@ def build_result(
     if decision_record is None:
         decision_gap_note = _NEVER_RECORDED_NOTE
 
+    # Operator route override (ADR-013): looked up independently of the
+    # decision record -- RouteOverride is the single source of truth for
+    # override facts, cross-referenced here the same way ledger/
+    # confirmation sections already are alongside the decision record
+    # (ADR-010 Part 1's pattern, not a new one).
+    route_override = None
+    route_override_note = None
+    if season_id is not None and cluster is not None:
+        route_override = storage.get_route_override(cluster.cluster_id, season_id, requested_date)
+        if route_override is not None:
+            route_override_note = _route_override_note(plot_id, route_override)
+
     ledger_entries = []
     if farmer is not None:
         all_ledger = storage.get_ledger_entries(farmer.farmer_id)
@@ -188,28 +238,38 @@ def build_result(
 
     operator_at_decision = None
     operator_relevance_note = None
-    if decision_record is not None and cluster is not None:
-        involved = (
+    if cluster is not None:
+        involved_reason = None
+        if decision_record is not None and (
             decision_record.resolution in _OPERATOR_INVOLVED_RESOLUTIONS
             or decision_record.trigger_reason in _OPERATOR_INVOLVED_TRIGGER_REASONS
-        )
-        if involved:
+        ):
+            involved_reason = (
+                f"resolution={decision_record.resolution!r}, "
+                f"trigger_reason={decision_record.trigger_reason!r}"
+            )
+        elif route_override is not None and (
+            route_override.accepted_at is not None or route_override.last_modified_at is not None
+        ):
+            # ADR-013 Decision 10: an override is exactly the kind of
+            # operator-touched decision ADR-012 Decision 2's precedent
+            # already says belongs here.
+            involved_reason = "the operator accepted or modified today's proposed route"
+        if involved_reason is not None:
             # End-of-day cutoff, not the bare date string -- an
             # OperatorAuditEvent.occurred_at is a full ISO timestamp, and
             # a naive string compare against just "YYYY-MM-DD" would
             # wrongly exclude an operator who enrolled earlier the same
             # day (a timestamp string sorts after the bare date prefix
             # it starts with).
-            cutoff = f"{decision_record.decision_date}T23:59:59+00:00"
+            cutoff = f"{requested_date}T23:59:59+00:00"
             operator_at_decision = operator_as_of(storage, cluster.cluster_id, cutoff)
             if operator_at_decision is None:
                 operator_relevance_note = (
-                    "This decision involved an operator action (resolution="
-                    f"{decision_record.resolution!r}, trigger_reason="
-                    f"{decision_record.trigger_reason!r}), but no OperatorAuditEvent "
-                    "exists for this cluster on or before this date -- the operator "
-                    "was set by hand (predates ADR-012) or their identity was never "
-                    "recorded through the enrollment flow."
+                    f"This decision involved an operator action ({involved_reason}), "
+                    "but no OperatorAuditEvent exists for this cluster on or before "
+                    "this date -- the operator was set by hand (predates ADR-012) or "
+                    "their identity was never recorded through the enrollment flow."
                 )
 
     provenance = build_provenance(
@@ -236,6 +296,8 @@ def build_result(
         data_gaps=data_gaps,
         operator_at_decision=operator_at_decision,
         operator_relevance_note=operator_relevance_note,
+        route_override=route_override,
+        route_override_note=route_override_note,
     )
 
 
@@ -307,6 +369,10 @@ def render_text(result: DecisionReplayResult) -> str:
         else:
             lines.append(result.decision_gap_note or "")
 
+        if result.route_override_note is not None:
+            lines.append("")
+            lines.append(result.route_override_note)
+
         lines.append("")
         lines.append("-" * 72)
         lines.append("ON RECORD, SEPARATE FROM THE DECISION ITSELF")
@@ -318,7 +384,8 @@ def render_text(result: DecisionReplayResult) -> str:
             for e in result.ledger_entries:
                 lines.append(
                     f"  Ledger [{e.season_id}]: outcome={e.outcome}, days_bumped={e.days_bumped}, "
-                    f"opponent={e.opponent_plot_id or '(none)'}, resolved_at={e.resolved_at}"
+                    f"decided_by={e.decided_by}, opponent={e.opponent_plot_id or '(none)'}, "
+                    f"resolved_at={e.resolved_at}"
                 )
 
         if result.confirmation is None:

@@ -262,6 +262,32 @@ def test_operator_route_summary_order_matches_farmer_route_positions(tmp_path, m
         )
 
 
+def test_dispatching_a_fits_route_creates_a_route_override_record(tmp_path, monkeypatch) -> None:
+    """ADR-013: a proposal record is created every time a non-empty route
+    is dispatched, before it's sent -- proposed_route/current_route start
+    identical and in the same order farmers were actually told, using the
+    Prerequisite fix's corrected sort."""
+    storage = FileStorage(tmp_path / "s.json")
+    plots = [_plot("p1", "f1", 110), _plot("p2", "f2", 5)]
+    farmers = [_farmer("f1"), _farmer("f2")]
+    _seed(storage, plots, farmers)
+    _patch_weather(monkeypatch, [ForecastDay("d0", 0.0), ForecastDay("d1", 20.0)])
+
+    result = watcher_mod.run_daily_watch(
+        "c1", "season-1", storage=storage, today=TODAY, telegram_client=_FakeClient(),
+        get_claim=_truthful_claim,
+    )
+    assert result["status"] == "triggered"
+
+    override = storage.get_route_override("c1", "season-1", TODAY.isoformat())
+    assert override is not None
+    assert override.proposed_route == ["p1"]  # only p1 fits; p2 is too green
+    assert override.current_route == ["p1"]
+    assert override.accepted_at is None
+    assert override.last_modified_at is None
+    assert watcher_mod.route_override_status(override) == "no_response"
+
+
 def test_watcher_fired_twice_same_day_does_not_double_notify(tmp_path, monkeypatch) -> None:
     """The literal failure path: two real invocations of run_daily_watch
     for the same cluster on the same day (e.g. a duplicate EventBridge

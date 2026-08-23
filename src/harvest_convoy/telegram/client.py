@@ -111,3 +111,20 @@ class TelegramClient:
             "reply_markup": reply_markup or {"inline_keyboard": []},
         }
         return self._call_with_retry("editMessageReplyMarkup", payload)
+
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> SendResult:
+        """Added for ADR-013's route-proposal edit-in-place UI: swap/drop/
+        Done taps rewrite the same message's text and keyboard together
+        (Telegram's editMessageText accepts both in one call) rather than
+        sending a new message per edit."""
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._call_with_retry("editMessageText", payload)

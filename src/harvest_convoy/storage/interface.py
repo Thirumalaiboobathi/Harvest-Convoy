@@ -33,7 +33,25 @@ class LedgerEntry:
     resolved_at: str  # ISO 8601 timestamp
     cluster_id: str
     plot_id: str
-    opponent_plot_id: str
+    # WIDENED (ADR-013 Decision 6): None when no specific other farmer
+    # benefits from freed capacity -- an operator-override drop often has
+    # no nameable beneficiary, since this project builds no "add a plot
+    # in its place" mechanism. Every pre-ADR-013 caller passes a real
+    # string.
+    opponent_plot_id: str | None = None
+    # Who decided this outcome -- "agent" (reserved for a hypothetical
+    # future fully-automatic bump path; no such path exists in this
+    # codebase today), "operator_escalation" (a human resolved a genuine
+    # tie the deterministic solver could not separate on its own --
+    # ADR-003 Decision 4's escalation design), or "operator_override" (a
+    # human reversed a decision the solver was NOT ambiguous about --
+    # ADR-013). Answers the equity report's actual question -- "who
+    # decided how this village's machine was allocated?" -- for which a
+    # human choosing between two plots is a human decision either way;
+    # the escalation/override split is the nuance underneath that direct
+    # answer, not a replacement for it. See ADR-013 Decision 6 and
+    # "Resolved on review."
+    decided_by: str = "agent"
 
 
 @dataclass(frozen=True)
@@ -75,6 +93,18 @@ class HarvestConfirmation:
     # know what happened; cancelled means we know, and it wasn't the
     # farmer's or another farmer's doing.
     cancelled: bool = False
+    # Why `cancelled` is True -- "machine_breakdown" | "operator_override".
+    # The *operational* behavior of `cancelled` is correctly identical for
+    # both reasons (suppress the evening ask, refuse a late reply's ledger
+    # credit) and stays one shared code path; this field exists only so a
+    # reader of the raw confirmation record doesn't have to cross-reference
+    # BreakdownDisplacement/LedgerEntry to learn why, matching ADR-011 Part
+    # 2 Decision 8's "who lost to whom vs. what broke" distinction from the
+    # other direction. None for a pre-ADR-013 breakdown-cancelled record --
+    # read as "reason not recorded, predates this field," same disclosed-gap
+    # treatment as every other schema addition in this project. See ADR-013
+    # Decision 7.
+    cancellation_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -277,6 +307,41 @@ class OperatorAuditEvent:
     code_used: str
     new_operator_chat_id: int
     previous_operator_chat_id: int | None = None
+
+
+@dataclass(frozen=True)
+class RouteOverride:
+    """The day's proposed route and whatever the operator has done to it
+    so far. One record per (cluster_id, season_id, decision_date),
+    created the moment the route is proposed, updated in place by every
+    accept/swap/drop tap that follows. See ADR-013.
+
+    Status is deliberately not a stored field -- see
+    watcher.route_override_status(), the same "derived at read time"
+    pattern as confirmation_status()/rollover_status(): "modified" if
+    current_route differs from proposed_route (regardless of whether an
+    Accept tap ever happened), else "accepted" if accepted_at is set,
+    else "no_response" -- the silence case, not a failure state. There is
+    no sweep and no timeout that finalizes this; a route that nobody
+    touches simply reads as "no_response" for as long as nobody touches
+    it, which is the entire implementation of "silence is not a veto."
+    """
+
+    cluster_id: str
+    season_id: str
+    decision_date: str  # ISO date -- matches TriggerContext.decision_date
+    proposed_route: list[str]  # plot_ids, in order, exactly as first proposed -- never mutated
+    current_route: list[str]  # plot_ids, in order, reflecting every applied swap/drop so far
+    proposed_at: str  # ISO timestamp
+    accepted_at: str | None = None       # set only by an explicit Accept tap
+    last_modified_at: str | None = None  # set by any swap or confirmed drop
+    # The route farmers were last actually notified about -- None means
+    # "still just the original dispatch messages, nothing re-sent yet."
+    # route_done diffs this (or proposed_route if this is None) against
+    # current_route to decide who needs a position-change notification,
+    # then sets this to current_route -- so a second Done tap with no
+    # further changes re-notifies nobody. See ADR-013 Decision 5.
+    last_notified_route: list[str] | None = None
 
 
 class Storage(Protocol):
@@ -519,4 +584,26 @@ class Storage(Protocol):
         cluster, in whatever order the backend returns them --
         explain_decision.py sorts by occurred_at itself when it needs
         "who was operator as of this date"."""
+        ...
+
+    def put_route_override(self, override: RouteOverride) -> StorageResult:
+        """Overwrite semantics, like every put_* here except
+        put_ledger_entry -- keyed by (cluster_id, season_id,
+        decision_date). Every accept/swap/drop/done tap reads the current
+        record, applies its change, and writes the whole thing back. See
+        ADR-013."""
+        ...
+
+    def get_route_override(
+        self, cluster_id: str, season_id: str, decision_date: str
+    ) -> RouteOverride | None:
+        """None if no route was ever proposed for this exact key -- never
+        asked (no FITS plot that day), or this date predates ADR-013."""
+        ...
+
+    def get_route_overrides_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[RouteOverride]:
+        """Every proposed route for this cluster/season -- equity_report.py's
+        Operator route activity section reads this."""
         ...

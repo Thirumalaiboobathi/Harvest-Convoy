@@ -60,6 +60,12 @@ what authorizes each one:
 | `operator_lang:` | `handle_operator_lang_callback` (new) | The chat_id that sent the originating `/operator <code>` command, via `operator_enrollment.matches_pending` | New | Checked from the start |
 | `operator_replace:` | `handle_operator_replace_callback` (new) | Same as above | New | Checked from the start |
 | `resolve:` (anything unmatched) | `handle_callback_query` | Now: `Cluster.operator_chat_id` via `_is_operator` | **No check at all** | **Fixed** |
+| `route_accept:` | `handle_route_accept_callback` (new, ADR-013) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
+| `route_modify:` | `handle_route_modify_callback` (new, ADR-013) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
+| `route_swap:` | `handle_route_swap_callback` (new, ADR-013) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
+| `route_drop:` | `handle_route_drop_callback` (new, ADR-013) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
+| `route_drop_confirm:` | `handle_route_drop_confirm_callback` (new, ADR-013) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
+| `route_done:` | `handle_route_done_callback` (new, ADR-013) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
 
 **`lang:` was reconsidered and fixed, not left as a documented
 exception.** The original reasoning — this callback doesn't act on

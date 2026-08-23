@@ -30,6 +30,7 @@ from harvest_convoy.storage.interface import (
     MachineStatus,
     OperatorAuditEvent,
     OperatorEnrollmentCode,
+    RouteOverride,
     SeasonRolloverPrompt,
     StorageResult,
 )
@@ -562,6 +563,45 @@ class DynamoStorage:
     def get_operator_audit_events_for_cluster(self, cluster_id: str) -> list[OperatorAuditEvent]:
         items = self._query_pk_prefix(f"CLUSTER#{cluster_id}", "OPAUDIT#")
         return [OperatorAuditEvent(**_decode(_strip_keys(i))) for i in items]
+
+    # --- Route proposal and operator override -- ADR-013 ---
+
+    def put_route_override(self, override: RouteOverride) -> StorageResult:
+        item = {
+            "PK": f"CLUSTER#{override.cluster_id}",
+            "SK": f"ROUTE_OVERRIDE#{override.season_id}#{override.decision_date}",
+            **_encode(asdict(override)),
+        }
+        return self._put(item)
+
+    def get_route_override(
+        self, cluster_id: str, season_id: str, decision_date: str
+    ) -> RouteOverride | None:
+        try:
+            resp = self._table.get_item(
+                Key={
+                    "PK": f"CLUSTER#{cluster_id}",
+                    "SK": f"ROUTE_OVERRIDE#{season_id}#{decision_date}",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "get_route_override(%s, %s, %s) failed: %s",
+                cluster_id, season_id, decision_date, exc,
+            )
+            return None
+        item = resp.get("Item")
+        if item is None:
+            return None
+        return RouteOverride(**_decode(_strip_keys(item)))
+
+    def get_route_overrides_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[RouteOverride]:
+        items = self._query_pk_prefix(
+            f"CLUSTER#{cluster_id}", f"ROUTE_OVERRIDE#{season_id}#"
+        )
+        return [RouteOverride(**_decode(_strip_keys(i))) for i in items]
 
     # --- internals ---
 

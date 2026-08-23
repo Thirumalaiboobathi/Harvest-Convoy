@@ -28,6 +28,7 @@ from harvest_convoy.storage.interface import (
     MachineStatus,
     OperatorAuditEvent,
     OperatorEnrollmentCode,
+    RouteOverride,
     SeasonRolloverPrompt,
     StorageResult,
 )
@@ -47,6 +48,7 @@ _EMPTY: dict = {
     "advance_notices": {},  # advance_notices[plot_id][season_id] = AdvanceNoticeRecord dict
     "operator_codes": {},  # operator_codes[code] = OperatorEnrollmentCode dict
     "operator_audit": {},  # operator_audit[cluster_id] = [OperatorAuditEvent dict, ...] (append-only)
+    "route_overrides": {},  # route_overrides[cluster_id][season_id][decision_date] = RouteOverride dict
 }
 
 
@@ -311,3 +313,27 @@ class FileStorage:
     def get_operator_audit_events_for_cluster(self, cluster_id: str) -> list[OperatorAuditEvent]:
         raw = self._data["operator_audit"].get(cluster_id, [])
         return [OperatorAuditEvent(**v) for v in raw]
+
+    # Route proposal and operator override -- ADR-013
+    def put_route_override(self, override: RouteOverride) -> StorageResult:
+        by_season = self._data["route_overrides"].setdefault(override.cluster_id, {})
+        by_date = by_season.setdefault(override.season_id, {})
+        by_date[override.decision_date] = asdict(override)
+        return self._save()
+
+    def get_route_override(
+        self, cluster_id: str, season_id: str, decision_date: str
+    ) -> RouteOverride | None:
+        raw = (
+            self._data["route_overrides"]
+            .get(cluster_id, {})
+            .get(season_id, {})
+            .get(decision_date)
+        )
+        return RouteOverride(**raw) if raw else None
+
+    def get_route_overrides_for_cluster(
+        self, cluster_id: str, season_id: str
+    ) -> list[RouteOverride]:
+        by_date = self._data["route_overrides"].get(cluster_id, {}).get(season_id, {})
+        return [RouteOverride(**v) for v in by_date.values()]

@@ -29,7 +29,7 @@ from harvest_convoy.agents.contracts import EscalationPayload
 from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.storage import Storage
 from harvest_convoy.storage.fairness import record_bump
-from harvest_convoy.storage.interface import HarvestConfirmation
+from harvest_convoy.storage.interface import HarvestConfirmation, RouteOverride
 from harvest_convoy.telegram import notify, operator_enrollment, registration, rollover
 from harvest_convoy.telegram.client import TelegramClient
 from harvest_convoy.telegram.registration import IncomingMessage
@@ -577,6 +577,436 @@ def handle_machine_back_callback(
         client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
 
 
+def _resolve_route(storage: Storage, plot_ids: list[str]) -> list[tuple[Farmer, Plot]]:
+    """Plot_ids from a RouteOverride resolved back to (Farmer, Plot)
+    pairs via plain Storage lookups -- unlike escalation resolution,
+    which uses an injectable FarmerPlotLookup for historical reasons,
+    every route_* handler has Storage in scope already and needs no
+    special wiring. A missing plot/farmer is logged and skipped, not
+    raised -- a route.py rendering must never crash on a dangling id."""
+    route = []
+    for pid in plot_ids:
+        plot = storage.get_plot(pid)
+        if plot is None:
+            logger.error("route override references missing plot=%s", pid)
+            continue
+        farmer = storage.get_farmer(plot.farmer_id)
+        if farmer is None:
+            logger.error("route override references plot=%s with a missing farmer", pid)
+            continue
+        route.append((farmer, plot))
+    return route
+
+
+def _resolve_route_context(
+    client: TelegramClient,
+    callback_query: dict,
+    storage: Storage,
+    cluster_id: str,
+    season_id: str,
+    decision_date: str,
+    *,
+    today: date,
+):
+    """Shared authorization + staleness + existence checks for every
+    route_* callback (ADR-013 Decisions 8-9): cluster resolves, the
+    tapper is the cluster's operator, decision_date is today (a tap on a
+    still-visible prior day's message is refused, not silently applied
+    to today), and a RouteOverride actually exists for this exact key.
+    Returns (cluster, mod, override) on success; on any failure, the
+    callback has already been answered with a refusal and the caller
+    should return immediately without touching storage."""
+    callback_query_id = callback_query.get("id", "")
+    cluster = storage.get_cluster(cluster_id)
+    if cluster is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return None
+    mod = notify._lang_module(cluster.operator_language)
+
+    if not _is_operator(callback_query, cluster):
+        logger.warning(
+            "route callback for cluster=%s from a non-operator tapper -- refused", cluster_id,
+        )
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return None
+
+    if decision_date != today.isoformat():
+        client.answer_callback_query(callback_query_id, mod.route_stale(decision_date), show_alert=True)
+        return None
+
+    override = storage.get_route_override(cluster_id, season_id, decision_date)
+    if override is None:
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return None
+
+    return cluster, mod, override
+
+
+def _edit_message(client: TelegramClient, callback_query: dict, text: str, reply_markup: dict | None) -> None:
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if chat_id is not None and message_id is not None:
+        client.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
+
+
+def _parse_route_key_callback_data(data: str, prefix: str) -> tuple[str, str, str] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != prefix:
+        return None
+    _, cluster_id, season_id, decision_date = parts
+    return cluster_id, season_id, decision_date
+
+
+def parse_route_accept_callback_data(data: str) -> tuple[str, str, str] | None:
+    return _parse_route_key_callback_data(data, "route_accept")
+
+
+def parse_route_modify_callback_data(data: str) -> tuple[str, str, str] | None:
+    return _parse_route_key_callback_data(data, "route_modify")
+
+
+def parse_route_done_callback_data(data: str) -> tuple[str, str, str] | None:
+    return _parse_route_key_callback_data(data, "route_done")
+
+
+def parse_route_swap_callback_data(data: str) -> tuple[str, str, str, int] | None:
+    parts = data.split(":")
+    if len(parts) != 5 or parts[0] != "route_swap":
+        return None
+    _, cluster_id, season_id, decision_date, position_str = parts
+    try:
+        position = int(position_str)
+    except ValueError:
+        return None
+    if position < 2:
+        return None
+    return cluster_id, season_id, decision_date, position
+
+
+def parse_route_drop_callback_data(data: str) -> tuple[str, str, str, str] | None:
+    parts = data.split(":")
+    if len(parts) != 5 or parts[0] != "route_drop":
+        return None
+    _, cluster_id, season_id, decision_date, plot_id = parts
+    return cluster_id, season_id, decision_date, plot_id
+
+
+def parse_route_drop_confirm_callback_data(data: str) -> tuple[str, str, str, str, bool] | None:
+    parts = data.split(":")
+    if len(parts) != 6 or parts[0] != "route_drop_confirm":
+        return None
+    _, cluster_id, season_id, decision_date, plot_id, answer = parts
+    if answer not in ("yes", "no"):
+        return None
+    return cluster_id, season_id, decision_date, plot_id, answer == "yes"
+
+
+def handle_route_accept_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage, *, today: date | None = None,
+) -> None:
+    """ADR-013 Decision 3: records an explicit acceptance and changes
+    nothing else -- a route that already stands (silence is not a veto)
+    has no farmer-facing state left to touch."""
+    today = today or date.today()
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_route_accept_callback_data(callback_query.get("data", ""))
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    cluster_id, season_id, decision_date = parsed
+    ctx = _resolve_route_context(client, callback_query, storage, cluster_id, season_id, decision_date, today=today)
+    if ctx is None:
+        return
+    _cluster, mod, override = ctx
+
+    storage.put_route_override(
+        replace(override, accepted_at=datetime.now(timezone.utc).isoformat())
+    )
+    client.answer_callback_query(callback_query_id, mod.route_accept_ack())
+
+
+def handle_route_modify_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage, *, today: date | None = None,
+) -> None:
+    """ADR-013 Decision 4: edits the route-summary message in place into
+    the per-stop editing view. No mutation of its own -- opening the
+    editor changes nothing until a swap or a confirmed drop happens."""
+    today = today or date.today()
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_route_modify_callback_data(callback_query.get("data", ""))
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    cluster_id, season_id, decision_date = parsed
+    ctx = _resolve_route_context(client, callback_query, storage, cluster_id, season_id, decision_date, today=today)
+    if ctx is None:
+        return
+    cluster, mod, override = ctx
+
+    route = _resolve_route(storage, override.current_route)
+    client.answer_callback_query(callback_query_id)
+    _edit_message(
+        client, callback_query,
+        notify.build_route_edit_text(cluster, route, language=cluster.operator_language),
+        notify.build_route_edit_keyboard(
+            cluster_id, season_id, decision_date, route, language=cluster.operator_language
+        ),
+    )
+
+
+def handle_route_swap_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage, *, today: date | None = None,
+) -> None:
+    """ADR-013 Decision 4: swaps the stop at `position` with the one
+    above it. Low-stakes and self-correcting (tapping the row that moved
+    down undoes it) -- no confirmation step, unlike a drop. No farmer
+    notification here; position-change notices are batched to Done
+    (Decision 5)."""
+    today = today or date.today()
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_route_swap_callback_data(callback_query.get("data", ""))
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    cluster_id, season_id, decision_date, position = parsed
+    ctx = _resolve_route_context(client, callback_query, storage, cluster_id, season_id, decision_date, today=today)
+    if ctx is None:
+        return
+    cluster, mod, override = ctx
+
+    current = list(override.current_route)
+    if position > len(current):
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    # Failure path: a swap touching an already-confirmed plot is refused
+    # -- the machine already visited (or was told not to), so reordering
+    # around it can't mean anything (ADR-013 Decision 9, Case 1).
+    plot_a_id, plot_b_id = current[position - 2], current[position - 1]
+    for pid in (plot_a_id, plot_b_id):
+        confirmation = storage.get_harvest_confirmation(pid, season_id)
+        if confirmation is not None and confirmation.confirmed is not None:
+            client.answer_callback_query(callback_query_id, mod.route_already_confirmed(), show_alert=True)
+            return
+
+    current[position - 2], current[position - 1] = current[position - 1], current[position - 2]
+    storage.put_route_override(replace(
+        override, current_route=current, last_modified_at=datetime.now(timezone.utc).isoformat(),
+    ))
+
+    route = _resolve_route(storage, current)
+    client.answer_callback_query(callback_query_id)
+    _edit_message(
+        client, callback_query,
+        notify.build_route_edit_text(cluster, route, language=cluster.operator_language),
+        notify.build_route_edit_keyboard(
+            cluster_id, season_id, decision_date, route, language=cluster.operator_language
+        ),
+    )
+
+
+def handle_route_drop_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage, *, today: date | None = None,
+) -> None:
+    """ADR-013 Decision 4: the first tap of a drop -- shows a
+    confirmation prompt, mutates nothing yet. The real side effects only
+    happen on an explicit Confirm (handle_route_drop_confirm_callback)."""
+    today = today or date.today()
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_route_drop_callback_data(callback_query.get("data", ""))
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    cluster_id, season_id, decision_date, plot_id = parsed
+    ctx = _resolve_route_context(client, callback_query, storage, cluster_id, season_id, decision_date, today=today)
+    if ctx is None:
+        return
+    cluster, mod, override = ctx
+
+    if plot_id not in override.current_route:
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    confirmation = storage.get_harvest_confirmation(plot_id, season_id)
+    if confirmation is not None and confirmation.confirmed is not None:
+        client.answer_callback_query(callback_query_id, mod.route_already_confirmed(), show_alert=True)
+        return
+
+    plot = storage.get_plot(plot_id)
+    farmer = storage.get_farmer(plot.farmer_id) if plot is not None else None
+    farmer_name = farmer.name if farmer is not None else mod.DEFAULT_WINNER_LABEL
+    # Failure path: dropping the only remaining stop is allowed (the
+    # operator's prerogative), but the confirmation prompt gets an added
+    # warning line so it isn't one accidental tap away (ADR-013 Decision
+    # 9, Case 2).
+    is_last_plot = len(override.current_route) == 1
+
+    client.answer_callback_query(callback_query_id)
+    _edit_message(
+        client, callback_query,
+        mod.route_drop_confirm_prompt(farmer_name, is_last_plot=is_last_plot),
+        notify.build_route_drop_confirm_keyboard(
+            cluster_id, season_id, decision_date, plot_id, language=cluster.operator_language
+        ),
+    )
+
+
+def handle_route_drop_confirm_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage, *, today: date | None = None,
+) -> None:
+    """ADR-013 Decisions 6-7: on Confirm, un-harvests the plot (the exact
+    reversal hook ADR-009 Part 1.5 built and ADR-011 Part 2 first used),
+    cancels its HarvestConfirmation (reusing the same suppression
+    ADR-011 Part 2 built for breakdowns, tagged with a distinct
+    cancellation_reason so the two stay distinguishable), records a
+    decided_by="operator_override" fairness bump, and notifies the
+    dropped farmer immediately -- never batched, unlike a reorder. On
+    Cancel, returns to the edit view unchanged."""
+    today = today or date.today()
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_route_drop_confirm_callback_data(callback_query.get("data", ""))
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    cluster_id, season_id, decision_date, plot_id, answer = parsed
+    ctx = _resolve_route_context(client, callback_query, storage, cluster_id, season_id, decision_date, today=today)
+    if ctx is None:
+        return
+    cluster, mod, override = ctx
+
+    if not answer:
+        route = _resolve_route(storage, override.current_route)
+        client.answer_callback_query(callback_query_id)
+        _edit_message(
+            client, callback_query,
+            notify.build_route_edit_text(cluster, route, language=cluster.operator_language),
+            notify.build_route_edit_keyboard(
+                cluster_id, season_id, decision_date, route, language=cluster.operator_language
+            ),
+        )
+        return
+
+    if plot_id not in override.current_route:
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+
+    confirmation = storage.get_harvest_confirmation(plot_id, season_id)
+    if confirmation is not None and confirmation.confirmed is not None:
+        client.answer_callback_query(callback_query_id, mod.route_already_confirmed(), show_alert=True)
+        return
+
+    plot = storage.get_plot(plot_id)
+    farmer = storage.get_farmer(plot.farmer_id) if plot is not None else None
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    updated_route = [pid for pid in override.current_route if pid != plot_id]
+    storage.put_route_override(replace(override, current_route=updated_route, last_modified_at=now_iso))
+
+    storage.clear_plot_harvest(plot_id, cluster_id, season_id)
+    if confirmation is not None:
+        storage.put_harvest_confirmation(replace(
+            confirmation, cancelled=True, cancellation_reason="operator_override",
+        ))
+
+    if farmer is not None:
+        bump_result = record_bump(
+            farmer.farmer_id, season_id,
+            days_bumped=DEFAULT_DAYS_BUMPED, outcome="operator_override",
+            cluster_id=cluster_id, plot_id=plot_id,
+            opponent_plot_id=None, storage=storage,
+            decided_by="operator_override",
+        )
+        if not bump_result.success:
+            logger.info(
+                "route drop %s/%s: ledger write already exists (%s) -- not double-crediting",
+                plot_id, season_id, bump_result.error,
+            )
+        if plot is not None:
+            notify.send_route_dropped_notice(client, farmer, plot)
+    else:
+        logger.error(
+            "route drop: no farmer found for plot=%s -- cannot record a fairness bump "
+            "or notify anyone",
+            plot_id,
+        )
+
+    route = _resolve_route(storage, updated_route)
+    client.answer_callback_query(callback_query_id, mod.route_done_ack())
+    _edit_message(
+        client, callback_query,
+        notify.build_route_edit_text(cluster, route, language=cluster.operator_language),
+        notify.build_route_edit_keyboard(
+            cluster_id, season_id, decision_date, route, language=cluster.operator_language
+        ),
+    )
+
+
+def handle_route_done_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage, *, today: date | None = None,
+) -> None:
+    """ADR-013 Decision 5: finalizes any accumulated reorders, sending
+    each farmer whose position changed since the last notification an
+    updated harvest_scheduled -- reusing the existing message shape,
+    just called again with the new position. A plot dropped this session
+    is excluded by construction (it's no longer in current_route) since
+    it was already, separately, notified at drop-confirm time. Edits the
+    message back to the summary view."""
+    today = today or date.today()
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_route_done_callback_data(callback_query.get("data", ""))
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    cluster_id, season_id, decision_date = parsed
+    ctx = _resolve_route_context(client, callback_query, storage, cluster_id, season_id, decision_date, today=today)
+    if ctx is None:
+        return
+    cluster, mod, override = ctx
+
+    baseline = override.last_notified_route or override.proposed_route
+    baseline_position = {pid: i for i, pid in enumerate(baseline)}
+    for new_position, plot_id in enumerate(override.current_route):
+        if baseline_position.get(plot_id) == new_position:
+            continue
+        if plot_id not in baseline_position:
+            continue  # not in the baseline at all -- nothing built adds a plot back
+        plot = storage.get_plot(plot_id)
+        farmer = storage.get_farmer(plot.farmer_id) if plot is not None else None
+        if plot is None or farmer is None:
+            logger.error(
+                "route done: no plot/farmer for %s, position-change notice not sent", plot_id,
+            )
+            continue
+        notify.send_harvest_scheduled(client, farmer, plot, new_position)
+
+    storage.put_route_override(replace(override, last_notified_route=list(override.current_route)))
+
+    route = _resolve_route(storage, override.current_route)
+    client.answer_callback_query(callback_query_id, mod.route_done_ack())
+    _edit_message(
+        client, callback_query,
+        notify.build_operator_route_summary_text(cluster, route, language=cluster.operator_language),
+        notify.build_route_summary_keyboard(
+            cluster_id, season_id, decision_date, route, language=cluster.operator_language
+        ),
+    )
+
+
 def parse_operator_lang_callback_data(data: str) -> tuple[str, str, str] | None:
     parts = data.split(":")
     if len(parts) != 4 or parts[0] != "operator_lang":
@@ -822,6 +1252,12 @@ def handle_callback_query(
             days_bumped=DEFAULT_DAYS_BUMPED, outcome="bumped",
             cluster_id=cluster_id, plot_id=loser_plot_id,
             opponent_plot_id=chosen_plot_id, storage=storage,
+            # ADR-013 "Resolved on review": a human resolving an
+            # escalation is a human decision, same as an operator
+            # override, even though it resolves a tie the agent's own
+            # process asked for help on rather than reversing a confident
+            # one -- see storage/interface.py:LedgerEntry.decided_by.
+            decided_by="operator_escalation",
         )
         if not bump_result.success:
             logger.info(
@@ -848,6 +1284,7 @@ def handle_callback_query(
             days_bumped=0, outcome="won",
             cluster_id=cluster_id, plot_id=chosen_plot_id,
             opponent_plot_id=loser_plot_id, storage=storage,
+            decided_by="operator_escalation",
         )
         if not winner_bump.success:
             # Not fatal -- the loser's record is the one that matters for
@@ -962,10 +1399,12 @@ def handle_update(
     "rollover:{plot_id}:{new_season_id}:{yes|no}" tap routes to
     handle_rollover_callback (ADR-011 Part 1); "breakdown:...",
     "breakdown_followup:...", and "machine_back:..." route to their
-    matching handlers (ADR-011 Part 2); "operator_lang:..." and
-    "operator_replace:..." route to the operator-enrollment handlers
-    (ADR-012 Part 2); anything else goes through the existing
-    handle_callback_query escalation flow.
+    matching handlers (ADR-011 Part 2); "route_accept:...",
+    "route_modify:...", "route_swap:...", "route_drop_confirm:...",
+    "route_drop:...", and "route_done:..." route to the route-proposal
+    handlers (ADR-013); "operator_lang:..." and "operator_replace:..."
+    route to the operator-enrollment handlers (ADR-012 Part 2); anything
+    else goes through the existing handle_callback_query escalation flow.
     """
     if "callback_query" in update:
         callback_query = update["callback_query"]
@@ -987,6 +1426,24 @@ def handle_update(
             return
         if data.startswith("machine_back:"):
             handle_machine_back_callback(client, callback_query, storage)
+            return
+        if data.startswith("route_accept:"):
+            handle_route_accept_callback(client, callback_query, storage)
+            return
+        if data.startswith("route_modify:"):
+            handle_route_modify_callback(client, callback_query, storage)
+            return
+        if data.startswith("route_swap:"):
+            handle_route_swap_callback(client, callback_query, storage)
+            return
+        if data.startswith("route_drop_confirm:"):
+            handle_route_drop_confirm_callback(client, callback_query, storage)
+            return
+        if data.startswith("route_drop:"):
+            handle_route_drop_callback(client, callback_query, storage)
+            return
+        if data.startswith("route_done:"):
+            handle_route_done_callback(client, callback_query, storage)
             return
         if data.startswith("operator_lang:"):
             handle_operator_lang_callback(client, callback_query, storage)

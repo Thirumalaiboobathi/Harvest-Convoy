@@ -37,6 +37,7 @@ from harvest_convoy.storage.interface import (
     BreakdownDisplacement,
     HarvestConfirmation,
     MachineStatus,
+    RouteOverride,
     SeasonRolloverPrompt,
 )
 from harvest_convoy.telegram import notify, webhook
@@ -404,6 +405,26 @@ def _send_notifications(
     if fits_route:
         fits_route.sort(key=lambda item: item[0])
         ordered_route = [(farmer, plot) for _, farmer, plot in fits_route]
+        # The proposal record (ADR-013): created every time a non-empty
+        # route is dispatched, before it's sent, so the Accept/Modify
+        # buttons on the message that follows always have something real
+        # to act on. proposed_route/current_route start identical --
+        # "no_response" (silence) is the correct initial reading, per
+        # route_override_status() below.
+        override_result = storage.put_route_override(RouteOverride(
+            cluster_id=cluster.cluster_id, season_id=season_id,
+            decision_date=today.isoformat(),
+            proposed_route=[p.plot_id for _, p in ordered_route],
+            current_route=[p.plot_id for _, p in ordered_route],
+            proposed_at=datetime.now(timezone.utc).isoformat(),
+        ))
+        if not override_result.success:
+            logger.error(
+                "ROUTE OVERRIDE RECORD WRITE FAILED: cluster=%s season=%s "
+                "date=%s -- the operator's Accept/Modify taps will have "
+                "nothing to act on today: %s",
+                cluster.cluster_id, season_id, today.isoformat(), override_result.error,
+            )
         notify.send_operator_route_summary(
             client, cluster.operator_chat_id, cluster, ordered_route,
             season_id=season_id, report_date=today.isoformat(),
@@ -692,6 +713,23 @@ def rollover_status(prompt: SeasonRolloverPrompt) -> str:
     if prompt.replied is False:
         return "declined"
     return "unknown"
+
+
+def route_override_status(override: RouteOverride) -> str:
+    """One of "modified" (current_route differs from proposed_route,
+    regardless of whether an Accept tap ever happened), "accepted"
+    (unmodified, and an explicit Accept tap was recorded), or
+    "no_response" (unmodified, silence) -- derived at read time, the
+    same pattern as confirmation_status()/rollover_status(). There is no
+    sweep and no timeout that finalizes this: a route nobody touches
+    simply reads "no_response" for as long as nobody touches it, which
+    is the entire implementation of "silence is not a veto" (ADR-013).
+    """
+    if override.current_route != override.proposed_route:
+        return "modified"
+    if override.accepted_at is not None:
+        return "accepted"
+    return "no_response"
 
 
 def run_season_rollover(

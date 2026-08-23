@@ -34,8 +34,8 @@ from harvest_convoy.reporting.config import SMALLHOLDER_THRESHOLD_ACRES
 from harvest_convoy.reporting.provenance import Provenance, build_provenance, render_provenance_text
 from harvest_convoy.storage import get_storage
 from harvest_convoy.storage.fairness import operator_follow_through_rate
-from harvest_convoy.storage.interface import BreakdownDisplacement, Storage
-from harvest_convoy.watcher import confirmation_status, rollover_status
+from harvest_convoy.storage.interface import BreakdownDisplacement, RouteOverride, Storage
+from harvest_convoy.watcher import confirmation_status, rollover_status, route_override_status
 
 CAVEAT = (
     "The seeded clusters (Kamatchipuram, Naducauvery) are simulated -- no "
@@ -77,6 +77,27 @@ class SeasonEquitySection:
     rollover_declined_plot_ids: list[str]
     rollover_unknown_plot_ids: list[str]
     breakdown_displacements: list[BreakdownDisplacement]
+    # Operator route activity (ADR-013): how often a proposed route stood
+    # as computed (accepted explicitly or by silence -- the same outcome
+    # for the machine either way, kept as separate counts for the same
+    # reason ADR-011's declined/unknown split exists) versus was modified,
+    # and, within modified, how many involved at least one drop (the
+    # fairness-relevant action) versus reorder-only (no fairness
+    # consequence -- see LedgerEntry.decided_by below instead).
+    route_overrides_proposed: int
+    route_overrides_accepted: int
+    route_overrides_no_response: int
+    route_overrides_modified: int
+    route_overrides_modified_with_drop: int
+    route_override_acceptance_rate: float | None
+    # Who decided each of this season's fairness bumps (days_bumped > 0)
+    # -- "agent" (reserved, unused today), "operator_escalation" (a human
+    # broke a tie the agent asked for help on), "operator_override" (a
+    # human reversed a decision the agent was confident about). Answers
+    # "who decided how this village's machine was allocated" directly,
+    # with the escalation/override split as the nuance underneath it.
+    # See ADR-013 Decision 6/10.
+    bumps_by_decided_by: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -177,6 +198,31 @@ def _build_season_section(
         p.plot_id for p in rollover_prompts if rollover_status(p) == "unknown"
     )
 
+    # Operator route activity (ADR-013).
+    route_overrides = storage.get_route_overrides_for_cluster(cluster_id, season_id)
+    route_statuses = [route_override_status(o) for o in route_overrides]
+    route_accepted = route_statuses.count("accepted")
+    route_no_response = route_statuses.count("no_response")
+    route_modified = route_statuses.count("modified")
+    route_modified_with_drop = sum(
+        1 for o, s in zip(route_overrides, route_statuses)
+        if s == "modified" and set(o.proposed_route) - set(o.current_route)
+    )
+    route_total = len(route_overrides)
+    route_acceptance_rate = (
+        (route_accepted + route_no_response) / route_total if route_total else None
+    )
+
+    # Who decided this season's fairness bumps (ADR-013 Decision 6/10) --
+    # every LedgerEntry with days_bumped > 0 for a farmer currently on
+    # this cluster's roster (same current-roster caveat as every other
+    # per-season figure here -- Plot has no season dimension).
+    bumps_by_decided_by: dict[str, int] = {}
+    for farmer_id in {p.farmer_id for p in plots}:
+        for entry in storage.get_ledger_entries(farmer_id):
+            if entry.season_id == season_id and entry.days_bumped > 0:
+                bumps_by_decided_by[entry.decided_by] = bumps_by_decided_by.get(entry.decided_by, 0) + 1
+
     return SeasonEquitySection(
         season_id=season_id,
         served_plot_ids=sorted(served_plot_ids),
@@ -204,6 +250,13 @@ def _build_season_section(
         rollover_declined_plot_ids=rollover_declined,
         rollover_unknown_plot_ids=rollover_unknown,
         breakdown_displacements=breakdown_displacements,
+        route_overrides_proposed=route_total,
+        route_overrides_accepted=route_accepted,
+        route_overrides_no_response=route_no_response,
+        route_overrides_modified=route_modified,
+        route_overrides_modified_with_drop=route_modified_with_drop,
+        route_override_acceptance_rate=route_acceptance_rate,
+        bumps_by_decided_by=bumps_by_decided_by,
     )
 
 
@@ -318,6 +371,31 @@ def _render_section_text(s: SeasonEquitySection) -> list[str]:
         )
         for d in s.breakdown_displacements:
             lines.append(f"      {d.original_scheduled_date}: {d.plot_id} (farmer {d.farmer_id})")
+    if s.route_overrides_proposed == 0:
+        lines.append("    Operator route activity: no route was ever proposed this season.")
+    else:
+        acceptance_str = (
+            f"{s.route_override_acceptance_rate:.0%}"
+            if s.route_override_acceptance_rate is not None else "n/a"
+        )
+        lines.append(
+            f"    Operator route activity: {s.route_overrides_proposed} route(s) proposed -- "
+            f"{s.route_overrides_accepted} explicitly accepted, "
+            f"{s.route_overrides_no_response} stood without a response (silence is not a "
+            f"veto, not counted as disagreement), {s.route_overrides_modified} modified "
+            f"({s.route_overrides_modified_with_drop} involving at least one drop) -- "
+            f"acceptance rate (accepted + no-response over proposed): {acceptance_str}."
+        )
+    if not s.bumps_by_decided_by:
+        lines.append("    Who decided this season's fairness bumps: none recorded this season.")
+    else:
+        parts = ", ".join(f"{v} {k}" for k, v in sorted(s.bumps_by_decided_by.items()))
+        lines.append(
+            f"    Who decided this season's fairness bumps: {parts} -- 'agent' is a "
+            "hypothetical fully-automatic path (unused in this codebase today); "
+            "operator_escalation is a human breaking a tie the agent asked for help on; "
+            "operator_override is a human reversing a decision the agent was confident about."
+        )
     return lines
 
 

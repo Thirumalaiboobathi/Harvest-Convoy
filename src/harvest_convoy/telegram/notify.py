@@ -248,6 +248,25 @@ def send_escalation_resolved(
     )
 
 
+def build_route_dropped_notice_text(plot: Plot, *, language: str = "ta") -> str:
+    return _lang_module(language).route_dropped_notice(plot.area_acres, plot.area_unit)
+
+
+def send_route_dropped_notice(client: TelegramClient, farmer: Farmer, plot: Plot) -> SendResult:
+    """Sent immediately when a confirmed drop removes this plot from
+    today's route (ADR-013 Decision 5) -- the farmer's copy of a
+    harvest_scheduled message is now false, and the sooner he knows the
+    more time he has to adjust. Never batched behind a Done tap, unlike
+    a pure reorder's position-change notice."""
+    if farmer.telegram_chat_id is None:
+        logger.error("no chat_id for farmer %s, cannot notify of route drop", farmer.farmer_id)
+        return SendResult(success=False, error="farmer has no telegram_chat_id")
+    return client.send_message(
+        farmer.telegram_chat_id,
+        build_route_dropped_notice_text(plot, language=farmer.language),
+    )
+
+
 def build_breakdown_keyboard(cluster_id: str, season_id: str, report_date: str, *, language: str = "ta") -> dict:
     """One inline button on the operator's route summary, always present
     regardless of whether the route is empty -- a stale button from an
@@ -298,6 +317,116 @@ def build_machine_back_keyboard(cluster_id: str, *, language: str = "ta") -> dic
     }
 
 
+def build_route_proposal_keyboard(
+    cluster_id: str, season_id: str, report_date: str, *, language: str = "ta"
+) -> dict:
+    """Accept/Modify row -- ADR-013. Only ever attached when the route is
+    non-empty (nothing to accept or modify against an empty route); see
+    send_operator_route_summary below."""
+    mod = _lang_module(language)
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": mod.ROUTE_ACCEPT_BUTTON_LABEL,
+                    "callback_data": f"route_accept:{cluster_id}:{season_id}:{report_date}",
+                },
+                {
+                    "text": mod.ROUTE_MODIFY_BUTTON_LABEL,
+                    "callback_data": f"route_modify:{cluster_id}:{season_id}:{report_date}",
+                },
+            ]
+        ]
+    }
+
+
+def build_route_edit_keyboard(
+    cluster_id: str, season_id: str, report_date: str, route: list[tuple[Farmer, Plot]],
+    *, language: str = "ta",
+) -> dict:
+    """The per-stop editing view opened by a Modify tap -- one row per
+    stop (an up-swap button on every row but the first, a drop button on
+    every row), plus a trailing Done row. Each button carries the exact
+    key (cluster_id, season_id, report_date, plus a position or plot_id)
+    needed to apply one atomic mutation and re-render this same keyboard
+    -- no client-side state, the handler always reads the current
+    RouteOverride fresh. See ADR-013 Decision 4."""
+    mod = _lang_module(language)
+    rows = []
+    for i, (farmer, plot) in enumerate(route):
+        position = i + 1
+        row = []
+        if position > 1:
+            row.append({
+                "text": mod.ROUTE_SWAP_UP_BUTTON_LABEL,
+                "callback_data": f"route_swap:{cluster_id}:{season_id}:{report_date}:{position}",
+            })
+        row.append({
+            "text": f"{position}. {short_label(farmer, plot, language=language)} {mod.ROUTE_DROP_BUTTON_LABEL}",
+            "callback_data": f"route_drop:{cluster_id}:{season_id}:{report_date}:{plot.plot_id}",
+        })
+        rows.append(row)
+    rows.append([{
+        "text": mod.ROUTE_DONE_BUTTON_LABEL,
+        "callback_data": f"route_done:{cluster_id}:{season_id}:{report_date}",
+    }])
+    return {"inline_keyboard": rows}
+
+
+def build_route_drop_confirm_keyboard(
+    cluster_id: str, season_id: str, report_date: str, plot_id: str, *, language: str = "ta",
+) -> dict:
+    mod = _lang_module(language)
+
+    def callback_data(answer: str) -> str:
+        return f"route_drop_confirm:{cluster_id}:{season_id}:{report_date}:{plot_id}:{answer}"
+
+    return {
+        "inline_keyboard": [
+            [
+                {"text": mod.ROUTE_DROP_CONFIRM_YES_LABEL, "callback_data": callback_data("yes")},
+                {"text": mod.ROUTE_DROP_CONFIRM_NO_LABEL, "callback_data": callback_data("no")},
+            ]
+        ]
+    }
+
+
+def build_route_edit_text(
+    cluster: Cluster, route: list[tuple[Farmer, Plot]], *, language: str = "ta"
+) -> str:
+    mod = _lang_module(language)
+    stops = "\n".join(
+        mod.route_stop_line(i + 1, short_label(farmer, plot, language=language))
+        for i, (farmer, plot) in enumerate(route)
+    )
+    return f"{mod.route_edit_header(cluster.name)}\n{stops}"
+
+
+def build_route_summary_keyboard(
+    cluster_id: str, season_id: str, report_date: str, route: list[tuple[Farmer, Plot]],
+    *, language: str = "ta",
+) -> dict:
+    """The full keyboard for the summary-view state -- Accept/Modify
+    (only for a non-empty route) plus the "machine down today" button
+    (always present, per build_breakdown_keyboard's own docstring).
+    Shared by send_operator_route_summary (a fresh send) and
+    webhook.handle_route_done_callback (editing back from the per-stop
+    view), so the two states render identically either way."""
+    rows: list[list[dict]] = []
+    if route:
+        rows.extend(
+            build_route_proposal_keyboard(
+                cluster_id, season_id, report_date, language=language
+            )["inline_keyboard"]
+        )
+    rows.extend(
+        build_breakdown_keyboard(
+            cluster_id, season_id, report_date, language=language
+        )["inline_keyboard"]
+    )
+    return {"inline_keyboard": rows}
+
+
 def send_operator_route_summary(
     client: TelegramClient,
     operator_chat_id: int | None,
@@ -310,8 +439,9 @@ def send_operator_route_summary(
     """season_id/report_date are optional so every existing call site
     (and every existing test) keeps working unchanged -- when both are
     given, the message gets the "machine down today" button (ADR-011
-    Part 2); when either is omitted, it renders exactly as before, no
-    keyboard at all."""
+    Part 2) plus, for a non-empty route, Accept/Modify (ADR-013); when
+    either is omitted, it renders exactly as before, no keyboard at
+    all."""
     if operator_chat_id is None:
         logger.error(
             "cluster %s has no operator configured; route summary not sent",
@@ -320,8 +450,8 @@ def send_operator_route_summary(
         return SendResult(success=False, error="no operator configured for cluster")
     reply_markup = None
     if season_id is not None and report_date is not None:
-        reply_markup = build_breakdown_keyboard(
-            cluster.cluster_id, season_id, report_date, language=cluster.operator_language
+        reply_markup = build_route_summary_keyboard(
+            cluster.cluster_id, season_id, report_date, route, language=cluster.operator_language
         )
     return client.send_message(
         operator_chat_id,

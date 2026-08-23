@@ -460,11 +460,16 @@ def route_summary_empty(cluster_name: str) -> str:
 
 
 def route_summary_header(cluster_name: str) -> str:
-    return f"{cluster_name} -- இன்றைய பாதை (தூரங்கள் கிராம மையத்திலிருந்து):"
-    # "{cluster_name} route for today (distances from village center):" --
-    # states the village-center convention once here instead of on every
-    # stop line, now that location_hint() no longer repeats it. See
-    # location_hint()'s docstring for the density finding.
+    return f"{cluster_name} -- இன்றைய பரிந்துரைக்கப்பட்ட பாதை (தூரங்கள் கிராம மையத்திலிருந்து):"
+    # "{cluster_name} -- today's proposed route (distances from village
+    # center):" -- "பரிந்துரைக்கப்பட்ட" (proposed/recommended) added per
+    # ADR-013: same posture change as the English "Proposed route..."
+    # header, reusing the root already picked for the escalation argument
+    # label (ADR-008 Decision 15, "ஏஜென்ட்டின் பரிந்துரை" -- "agent's
+    # recommendation") rather than inventing a second word for the same
+    # posture. States the village-center convention once here instead of
+    # on every stop line, now that location_hint() no longer repeats it.
+    # See location_hint()'s docstring for the density finding.
 
 
 def route_stop_line(index: int, label: str) -> str:
@@ -692,6 +697,83 @@ def operator_enrolled(cluster_name: str) -> str:
     )
     # "You're now registered as the operator for {cluster_name}. You'll
     #  get route summaries here and can tap buttons for machine status."
+
+
+# --- Route proposal and operator override (ADR-013) -- operator-only.
+# DRAFT, pending native-speaker review, same print_tamil_strings.py
+# dump-and-review discipline as every other string in this file,
+# including a live-Telegram-receipt round given ADR-008 Decision 17's
+# finding that string-level review alone has missed real bugs before.
+
+ROUTE_ACCEPT_BUTTON_LABEL = "✅ ஏற்றுக்கொள்"
+# "✅ Accept"
+ROUTE_MODIFY_BUTTON_LABEL = "✏️ மாற்று"
+# "✏️ Modify"
+ROUTE_DROP_BUTTON_LABEL = "✕"
+# symbol only, same as English -- no translation needed for a single glyph
+ROUTE_SWAP_UP_BUTTON_LABEL = "↑"
+# symbol only, same as English
+ROUTE_DONE_BUTTON_LABEL = "✅ முடிந்தது"
+# "✅ Done"
+ROUTE_DROP_CONFIRM_YES_LABEL = "✅ உறுதி"
+# "✅ Confirm"
+ROUTE_DROP_CONFIRM_NO_LABEL = "❌ ரத்து"
+# "❌ Cancel"
+
+
+def route_accept_ack() -> str:
+    return "✅ ஏற்றுக்கொள்ளப்பட்டது"
+    # "✅ Accepted"
+
+
+def route_edit_header(cluster_name: str) -> str:
+    return f"{cluster_name} -- இன்றைய பாதையைத் திருத்துகிறீர்கள்:"
+    # "{cluster_name} -- editing today's route:"
+
+
+def route_drop_confirm_prompt(farmer_name: str, *, is_last_plot: bool) -> str:
+    text = f"{farmer_name}-ன் வயலை இன்றைய பாதையிலிருந்து நீக்கவா?"
+    # "Drop {farmer_name}'s plot from today's route?"
+    if is_last_plot:
+        text += (
+            " இது இன்றைய பாதையின் கடைசி வயல் -- உறுதிப்படுத்தினால் "
+            "இன்று யாருக்கும் இயந்திரம் வராது."
+        )
+        # " This is the last plot on today's route -- confirming leaves
+        #  nobody scheduled today."
+    return text
+
+
+def route_done_ack() -> str:
+    return "பாதை புதுப்பிக்கப்பட்டது."
+    # "Route updated."
+
+
+def route_already_confirmed() -> str:
+    return (
+        "இந்த வயலின் அறுவடை ஏற்கனவே உறுதிப்படுத்தப்பட்டது -- இன்றைய "
+        "பாதையை இதற்கு மாற்ற முடியாது."
+    )
+    # "This plot's harvest was already confirmed -- today's route can't
+    #  be changed for it."
+
+
+def route_stale(decision_date: str) -> str:
+    return f"இந்த பாதை {decision_date} தேதியிலிருந்தது, இப்போது செல்லுபடியாகாது."
+    # "This route is from {decision_date} and is no longer active."
+
+
+def route_dropped_notice(area_acres: float, area_unit: str) -> str:
+    # Deliberately doesn't name a reason -- same discipline as
+    # escalation_resolved_lost. See ADR-013 Decision 11.
+    area = format_area(area_acres, area_unit)
+    return (
+        f"இன்றைய பாதை மாறியுள்ளது -- இன்று உங்கள் {area} வயலுக்கு "
+        "இயந்திரம் வராது. அடுத்த வாய்ப்பில் மறு பரிசீலனை செய்யப்படும்."
+    )
+    # "Today's route has changed -- the machine won't be coming to your
+    #  {area} plot today. You'll be reconsidered at the next
+    #  opportunity."
 
 
 # --- Advocate argument, templated (not LLM-generated) for Tamil ---

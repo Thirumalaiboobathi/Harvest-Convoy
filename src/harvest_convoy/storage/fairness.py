@@ -85,13 +85,22 @@ def record_bump(
     outcome: str,
     cluster_id: str,
     plot_id: str,
-    opponent_plot_id: str,
+    opponent_plot_id: str | None,
     storage: Storage,
+    decided_by: str = "agent",
 ) -> StorageResult:
     """Record one season's outcome for a farmer. Idempotent per
     (farmer_id, season_id) -- see Storage.put_ledger_entry's contract; a
     duplicate call (e.g. a race on escalation resolution) fails cleanly
     rather than double-recording.
+
+    opponent_plot_id may be None when no specific other farmer benefits
+    from the freed capacity (e.g. an operator-override drop with no
+    "add a plot in its place" mechanism -- ADR-013 Decision 6).
+    decided_by defaults to "agent" (reserved for a hypothetical future
+    fully-automatic bump path); every real caller today passes
+    "operator_escalation" or "operator_override" explicitly -- see
+    ADR-013 Decision 6 and "Resolved on review."
     """
     entry = LedgerEntry(
         farmer_id=farmer_id,
@@ -102,5 +111,6 @@ def record_bump(
         cluster_id=cluster_id,
         plot_id=plot_id,
         opponent_plot_id=opponent_plot_id,
+        decided_by=decided_by,
     )
     return storage.put_ledger_entry(entry)

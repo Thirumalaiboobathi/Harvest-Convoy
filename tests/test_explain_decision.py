@@ -441,3 +441,69 @@ def test_operator_active_before_the_decision_date_is_correctly_found_same_day(tm
 
     assert result.operator_at_decision is not None
     assert result.operator_at_decision.new_operator_chat_id == 555
+
+
+def test_route_override_note_for_a_dropped_plot(tmp_path) -> None:
+    """ADR-013 Decision 10: a plot removed from today's route by an
+    operator override gets an explicit paragraph, distinct from the
+    decision record's own narrative, cross-referencing the fairness bump
+    it caused."""
+    from harvest_convoy.storage.interface import RouteOverride
+
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_plot(_plot("p03", "f1"))
+    storage.put_decision_record(_decision_record("p03", "f1", "c1", "2026-09-09"))
+    storage.put_route_override(RouteOverride(
+        cluster_id="c1", season_id=SEASON, decision_date="2026-09-09",
+        proposed_route=["p03", "p04"], current_route=["p04"],
+        proposed_at="2026-09-09T06:00:00+00:00", last_modified_at="2026-09-09T10:00:00+00:00",
+    ))
+
+    result = explain_decision.build_result(
+        storage, plot_id="p03", requested_date="2026-09-09", season=SEASON,
+    )
+
+    assert result.route_override_note is not None
+    assert "#1" in result.route_override_note
+    assert "removed it from today's route" in result.route_override_note
+    assert "decided_by=operator_override" in result.route_override_note
+
+
+def test_route_override_note_for_a_reordered_plot(tmp_path) -> None:
+    from harvest_convoy.storage.interface import RouteOverride
+
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_plot(_plot("p03", "f1"))
+    storage.put_decision_record(_decision_record("p03", "f1", "c1", "2026-09-09"))
+    storage.put_route_override(RouteOverride(
+        cluster_id="c1", season_id=SEASON, decision_date="2026-09-09",
+        proposed_route=["p03", "p04"], current_route=["p04", "p03"],
+        proposed_at="2026-09-09T06:00:00+00:00", last_modified_at="2026-09-09T10:00:00+00:00",
+    ))
+
+    result = explain_decision.build_result(
+        storage, plot_id="p03", requested_date="2026-09-09", season=SEASON,
+    )
+
+    assert result.route_override_note is not None
+    assert "#1" in result.route_override_note and "#2" in result.route_override_note
+    assert "no fairness consequence" in result.route_override_note
+
+
+def test_route_override_note_absent_when_no_override_exists(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_plot(_plot("p03", "f1"))
+    storage.put_decision_record(_decision_record("p03", "f1", "c1", "2026-09-09"))
+
+    result = explain_decision.build_result(
+        storage, plot_id="p03", requested_date="2026-09-09", season=SEASON,
+    )
+
+    assert result.route_override is None
+    assert result.route_override_note is None

@@ -407,3 +407,72 @@ def test_season_and_all_seasons_are_mutually_exclusive() -> None:
 
     with pytest.raises(SystemExit):
         equity_report.main(["--cluster", "c1", "--season", SEASON, "--all-seasons"])
+
+
+def test_route_activity_counts_accepted_no_response_and_modified(tmp_path) -> None:
+    """ADR-013 Decision 10: three RouteOverride records, one of each
+    status, plus one modified-with-a-drop -- proves the section
+    distinguishes all of them, not a single collapsed count."""
+    from harvest_convoy.storage.interface import RouteOverride
+
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_route_override(RouteOverride(
+        cluster_id="c1", season_id=SEASON, decision_date="2026-09-01",
+        proposed_route=["p1"], current_route=["p1"],
+        proposed_at="2026-09-01T06:00:00+00:00", accepted_at="2026-09-01T09:00:00+00:00",
+    ))
+    storage.put_route_override(RouteOverride(
+        cluster_id="c1", season_id=SEASON, decision_date="2026-09-02",
+        proposed_route=["p1"], current_route=["p1"],
+        proposed_at="2026-09-02T06:00:00+00:00",
+    ))
+    storage.put_route_override(RouteOverride(
+        cluster_id="c1", season_id=SEASON, decision_date="2026-09-03",
+        proposed_route=["p1", "p2"], current_route=["p2"],  # p1 dropped
+        proposed_at="2026-09-03T06:00:00+00:00", last_modified_at="2026-09-03T10:00:00+00:00",
+    ))
+
+    result = equity_report.build_result(storage, cluster_id="c1", season_ids=[SEASON])
+    section = result.sections[0]
+
+    assert section.route_overrides_proposed == 3
+    assert section.route_overrides_accepted == 1
+    assert section.route_overrides_no_response == 1
+    assert section.route_overrides_modified == 1
+    assert section.route_overrides_modified_with_drop == 1
+    assert section.route_override_acceptance_rate == 2 / 3
+
+
+def test_route_activity_reports_no_route_ever_proposed(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    result = equity_report.build_result(storage, cluster_id="c1", season_ids=[SEASON])
+    section = result.sections[0]
+    assert section.route_overrides_proposed == 0
+    assert section.route_override_acceptance_rate is None
+    assert "no route was ever proposed" in "\n".join(equity_report._render_section_text(section))
+
+
+def test_bumps_by_decided_by_distinguishes_escalation_from_override(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_farmer(_farmer("f2"))
+    storage.put_plot(_plot("p1", "f1", 2.0))
+    storage.put_plot(_plot("p2", "f2", 2.0))
+    storage.put_ledger_entry(LedgerEntry(
+        farmer_id="f1", season_id=SEASON, days_bumped=1, outcome="bumped",
+        resolved_at="2026-09-01T00:00:00+00:00", cluster_id="c1", plot_id="p1",
+        opponent_plot_id="px", decided_by="operator_escalation",
+    ))
+    storage.put_ledger_entry(LedgerEntry(
+        farmer_id="f2", season_id=SEASON, days_bumped=1, outcome="operator_override",
+        resolved_at="2026-09-02T00:00:00+00:00", cluster_id="c1", plot_id="p2",
+        opponent_plot_id=None, decided_by="operator_override",
+    ))
+
+    result = equity_report.build_result(storage, cluster_id="c1", season_ids=[SEASON])
+    section = result.sections[0]
+
+    assert section.bumps_by_decided_by == {"operator_escalation": 1, "operator_override": 1}

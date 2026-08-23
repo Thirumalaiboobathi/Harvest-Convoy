@@ -214,11 +214,18 @@ def test_callback_resolution_writes_a_real_ledger_entry(tmp_path) -> None:
     assert loser_history[0].season_id == SEASON
     assert loser_history[0].days_bumped == webhook.DEFAULT_DAYS_BUMPED
     assert loser_history[0].outcome == "bumped"
+    # ADR-013 "Resolved on review": an escalation resolution is a human
+    # decision, distinguished from an operator override (decided_by=
+    # "operator_override") because it resolves a tie the agent's own
+    # process asked a human to break, rather than reversing a confident
+    # agent decision -- but it is not "agent"-decided either.
+    assert loser_history[0].decided_by == "operator_escalation"
 
     winner_history = get_ledger_history(farmer_a.farmer_id, storage)
     assert len(winner_history) == 1
     assert winner_history[0].days_bumped == 0
     assert winner_history[0].outcome == "won"
+    assert winner_history[0].decided_by == "operator_escalation"
 
 
 def _decision_record_for(plot_id: str, opponent_id: str, cluster_id: str, decision_date: str) -> DecisionRecord:
