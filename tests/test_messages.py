@@ -38,20 +38,31 @@ def test_harvest_scheduled_renders_without_keyerror(mod, area_unit) -> None:
 
 def test_harvest_scheduled_uses_natural_first_not_1vathu_in_tamil() -> None:
     """"1வது" isn't a word a Tamil speaker uses -- "first" is irregular
-    (முதலாவது), the same way English "first" isn't "oneth". 2nd/3rd/4th
-    keep the digit+ஆவது/வது pattern -- only position 1 is wrong. Caught
-    on the deployed path, round 4 review."""
+    (முதலாவது), the same way English "first" isn't "oneth". Caught on
+    the deployed path, round 4 review."""
     text = messages_ta.harvest_scheduled(2.5, "acre", route_position=0)
     assert "1வது" not in text
     assert "முதலாவது" in text
 
 
-@pytest.mark.parametrize("route_position,expected", [(1, "2வது"), (2, "3வது"), (3, "4வது")])
-def test_harvest_scheduled_keeps_digit_ordinal_for_second_and_later_in_tamil(
+@pytest.mark.parametrize(
+    "route_position,expected",
+    [(1, "இரண்டாவது"), (2, "மூன்றாவது"), (3, "நான்காவது"), (7, "எட்டாவது")],
+)
+def test_harvest_scheduled_uses_spelled_ordinal_for_second_and_later_in_tamil(
     route_position, expected
 ) -> None:
+    """"4வது" (digit + suffix) is the same un-natural hybrid as "1வது" --
+    caught in the same review pass, once the full 1-8 set was rendered
+    and compared rather than reviewing position 1 in isolation."""
     text = messages_ta.harvest_scheduled(2.5, "acre", route_position=route_position)
     assert expected in text
+    assert f"{route_position + 1}வது" not in text
+
+
+def test_harvest_scheduled_falls_back_to_digit_ordinal_beyond_eight_in_tamil() -> None:
+    text = messages_ta.harvest_scheduled(2.5, "acre", route_position=8)
+    assert "9-ஆவது" in text
 
 
 @pytest.mark.parametrize(
@@ -82,8 +93,20 @@ def test_location_hint_is_not_half_translated_in_tamil() -> None:
     text = messages_ta.location_hint(0.8, direction)
     assert "of village center" not in text
     assert "village center" not in text
-    assert "கிராம மையத்திலிருந்து" in text
     assert direction in text  # the resolved Tamil compound, not the English key
+
+
+def test_location_hint_is_compressed_in_tamil_village_centre_stated_once() -> None:
+    """Density fix, live-output review: location_hint() dropped "திசையில்"
+    and "கிராம மையத்திலிருந்து" -- both wrapped a five-stop operator
+    route summary to ten lines. The village-center convention now lives
+    once in route_summary_header(), not repeated on every stop."""
+    direction = messages_ta.format_direction("NNW")
+    text = messages_ta.location_hint(0.8, direction)
+    assert text == f"0.8km {direction}"
+    assert "கிராம மையத்திலிருந்து" not in text
+    assert "திசையில்" not in text
+    assert "கிராம மையத்திலிருந்து" in messages_ta.route_summary_header("Kamatchipuram")
 
 
 @pytest.mark.parametrize("mod", _MODULES, ids=["en", "ta"])

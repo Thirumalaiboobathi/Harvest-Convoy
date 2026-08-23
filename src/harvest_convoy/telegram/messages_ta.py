@@ -23,6 +23,15 @@ request; day-count pluralization bug fixed everywhere it occurred
 (நாள்/நாட்கள்); escalation_argument_label went through three wordings
 before landing on "ஏஜென்ட்டின் பரிந்துரை:", picked after being rendered
 in a full escalation message rather than in isolation.
+
+Revision log (live-output review, 2026-08-23): route-position ordinals
+(harvest_scheduled) were only special-cased for position 1 (முதலாவது);
+positions 2-8 rendered the un-natural "Nவது" digit+suffix hybrid --
+fixed for the full set, see _ORDINAL_WORDS. The operator route summary's
+per-stop location_hint dropped "திசையில்" and "கிராம மையத்திலிருந்து" --
+both wrapped every stop to two lines in practice, turning a five-stop
+route into ten lines of prose; the village-center convention is now
+stated once in route_summary_header instead.
 """
 
 from __future__ import annotations
@@ -100,14 +109,23 @@ def format_direction(direction: str) -> str:
 
 
 def location_hint(distance_km: float, direction: str) -> str:
-    """e.g. "0.8km வடக்கு-வடமேற்கு திசையில் கிராம மையத்திலிருந்து"
-    ("0.8km in the NNW direction, from the village center"). `direction`
-    is already resolved via format_direction(). Was a single hardcoded
-    English string in notify.py regardless of language until caught live
-    on the deployed path -- a Tamil-registered farmer's route summary
-    read "...NNW of village center" verbatim, mid-Tamil-sentence."""
-    return f"{distance_km:.1f}km {direction} திசையில் கிராம மையத்திலிருந்து"
-    # "{distance_km}km in the {direction} direction, from the village center"
+    """e.g. "0.8km வடக்கு-வடமேற்கு" ("0.8km NNW"). `direction` is already
+    resolved via format_direction(). Compressed on live-output review: the
+    full sentence form ("...திசையில் கிராம மையத்திலிருந்து", "...in the
+    direction of, from the village center") wrapped to two lines per stop
+    in the operator's five-stop route summary -- ten lines of prose for a
+    list meant to be scanned at 6 AM, not read. "திசையில்" (in the
+    direction of) and "கிராம மையத்திலிருந்து" (from the village center)
+    are both dropped here; the village-center convention is now stated
+    once in route_summary_header() instead of on every line. Checked
+    against the worst case before this shipped -- the longest farmer name
+    across both seeded clusters (Rajendran Mudaliar) paired with the
+    longest 16-point compass word (கிழக்கு-தென்கிழக்கு, ESE) still renders
+    as one line. English was checked too and doesn't have the same
+    problem -- it already uses the bare compass letters (NNW) rather than
+    a spelled-out compound, so it was left as-is. See
+    notify.build_operator_route_summary_text / full_label."""
+    return f"{distance_km:.1f}km {direction}"
 
 
 # Product name stays in Latin script -- proper nouns aren't transliterated.
@@ -198,16 +216,37 @@ CROP_CONFIRM_DECLINED_MESSAGE = (
 #  at all -- see ADR-008 Decision 11's revision note).
 
 
+# Full spelled ordinal words, 1-8 -- covers every position a route
+# realistically reaches in this project's seeded clusters (8 plots).
+# "Nவது" (digit + suffix, no spelled stem) was the prior form for n != 1
+# -- "1வது" was caught and special-cased to "முதலாவது" in round 4
+# review, but "4வது"/"2வது"/etc. are the same un-natural hybrid, just
+# not caught because review happened on position 1 in isolation rather
+# than the full rendered set. Spelling every position out (முதலாவது,
+# இரண்டாவது, மூன்றாவது, ...) is the form these actually take in Tamil --
+# the suffix "-ஆவது" attaches to the ordinal stem, not to a bare digit.
+_ORDINAL_WORDS = {
+    1: "முதலாவது",   # first
+    2: "இரண்டாவது",  # second
+    3: "மூன்றாவது",  # third
+    4: "நான்காவது",  # fourth
+    5: "ஐந்தாவது",   # fifth
+    6: "ஆறாவது",     # sixth
+    7: "ஏழாவது",     # seventh
+    8: "எட்டாவது",   # eighth
+}
+
+
 def _ordinal_word(n: int) -> str:
-    """"முதலாவது" (first) for position 1, "Nவது" for everything else.
-    "1வது" isn't a word a Tamil speaker uses -- "first" is a suppletive
-    irregular form in Tamil the same way it is in English ("first," not
-    "oneth"). "முதலாவது" matches the existing digit+"ஆவது"/"வது" ordinal
-    pattern used for 2nd/3rd/4th (இரண்டாவது, மூன்றாவது, ...), so it
-    slots into the same sentence position without changing the grammar
-    around it. Caught on the deployed path, round 4 native-speaker
-    review -- see harvest_scheduled()."""
-    return "முதலாவது" if n == 1 else f"{n}வது"
+    """Spelled Tamil ordinal for 1-8 (see _ORDINAL_WORDS). Beyond 8 --
+    not reachable by any seeded cluster today, but routes aren't
+    hard-capped at 8 in general -- falls back to the digit+hyphen+ஆவது
+    form Tamil actually uses for larger ordinals ("18-ஆவது நூற்றாண்டு",
+    18th century), rather than growing the spelled table indefinitely or
+    reusing the un-natural bare "Nவது" this replaces."""
+    if n in _ORDINAL_WORDS:
+        return _ORDINAL_WORDS[n]
+    return f"{n}-ஆவது"
 
 
 def harvest_scheduled(area_acres: float, area_unit: str, route_position: int) -> str:
@@ -421,8 +460,11 @@ def route_summary_empty(cluster_name: str) -> str:
 
 
 def route_summary_header(cluster_name: str) -> str:
-    return f"{cluster_name} -- இன்றைய பாதை:"
-    # "{cluster_name} route for today:"
+    return f"{cluster_name} -- இன்றைய பாதை (தூரங்கள் கிராம மையத்திலிருந்து):"
+    # "{cluster_name} route for today (distances from village center):" --
+    # states the village-center convention once here instead of on every
+    # stop line, now that location_hint() no longer repeats it. See
+    # location_hint()'s docstring for the density finding.
 
 
 def route_stop_line(index: int, label: str) -> str:

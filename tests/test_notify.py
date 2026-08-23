@@ -75,10 +75,11 @@ def test_harvest_scheduled_message_gives_stop_number() -> None:
 
 
 def test_harvest_scheduled_message_gives_ordinal_in_tamil() -> None:
-    """Tamil uses "வரிசையில் Nவது" (Nth in the line), not "#N" -- a
-    native-speaker review round-1 wording fix, not a translation of "#3"."""
+    """Tamil uses "வரிசையில் மூன்றாவது" (third in the line), not "#N" -- a
+    native-speaker review round-1 wording fix, not a translation of "#3".
+    Spelled ordinal, not digit+suffix -- see messages_ta._ORDINAL_WORDS."""
     text = notify.build_harvest_scheduled_text(_plot(), route_position=2, language="ta")
-    assert "3வது" in text
+    assert "மூன்றாவது" in text
     assert "#3" not in text
 
 
@@ -308,5 +309,15 @@ def test_location_hint_is_tamil_by_default_not_half_translated() -> None:
     hint = notify.location_hint(cluster, plot)  # default language="ta"
     assert "km" in hint
     assert "of village center" not in hint
-    assert "கிராம மையத்திலிருந்து" in hint
     assert "வடக்கு" in hint  # due north offset -> தமிழ் "N"-ish direction
+
+
+def test_location_hint_is_compressed_in_tamil() -> None:
+    """Density fix: the per-stop Tamil hint no longer repeats "திசையில்"
+    or "கிராம மையத்திலிருந்து" -- that's now stated once in the route
+    summary header (build_operator_route_summary_text)."""
+    cluster = _cluster()
+    plot = _plot(lat=cluster.machine_start_lat + 0.01, lon=cluster.machine_start_lon)
+    hint = notify.location_hint(cluster, plot)  # default language="ta"
+    assert "திசையில்" not in hint
+    assert "கிராம மையத்திலிருந்து" not in hint
