@@ -349,7 +349,14 @@ def _send_notifications(
     *,
     rain_event_classification: str = "none",
 ) -> None:
-    fits_route: list[tuple[Farmer, Plot]] = []
+    # (route_position, Farmer, Plot) -- sorted by route_position before
+    # use, below. Appending in result.outcomes's incidental order (a
+    # plot-id sort, agents/coordinator.py's RunResult.outcomes) and
+    # relying on that order for the operator's route summary was a real,
+    # live bug: it could silently number the operator's stops in a
+    # different sequence than each farmer was individually told via
+    # decision.route_position. See ADR-013's Prerequisite section.
+    fits_route: list[tuple[int, Farmer, Plot]] = []
 
     for outcome in result.outcomes:
         plot = plots_by_id.get(outcome.plot_id)
@@ -369,7 +376,7 @@ def _send_notifications(
         elif outcome.outcome == PlotOutcome.FITS:
             decision = decisions_by_id[outcome.plot_id]
             notify.send_harvest_scheduled(client, farmer, plot, decision.route_position)
-            fits_route.append((farmer, plot))
+            fits_route.append((decision.route_position, farmer, plot))
             # The confirmation record is created here, at dispatch time,
             # unconditionally -- even for a farmer with no chat_id (the
             # fact "this plot was scheduled and nobody could be asked"
@@ -395,8 +402,10 @@ def _send_notifications(
         # a real, disclosed scope boundary, not silently dropped.
 
     if fits_route:
+        fits_route.sort(key=lambda item: item[0])
+        ordered_route = [(farmer, plot) for _, farmer, plot in fits_route]
         notify.send_operator_route_summary(
-            client, cluster.operator_chat_id, cluster, fits_route,
+            client, cluster.operator_chat_id, cluster, ordered_route,
             season_id=season_id, report_date=today.isoformat(),
         )
 

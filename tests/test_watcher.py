@@ -185,6 +185,83 @@ def test_triggered_run_sends_notifications_and_marks_the_day_done(tmp_path, monk
     assert 999 in chat_ids_notified  # operator route summary
 
 
+def test_operator_route_summary_order_matches_farmer_route_positions(tmp_path, monkeypatch) -> None:
+    """ADR-013 Prerequisite: the operator's route summary must number
+    stops in the same order each farmer was individually told via
+    decision.route_position -- previously it numbered them in
+    coordinator.py's RunResult.outcomes order (a plot-id sort), which
+    could silently disagree with route_position whenever nearest-neighbor
+    ordering (scheduling/route.py) didn't happen to match alphabetical
+    plot_id order. Three plots, placed so nearest-neighbor order (from
+    the machine's start point) is p3, p1, p2 -- deliberately not
+    alphabetical -- so a plot-id-sorted rendering would be provably wrong.
+    """
+    storage = FileStorage(tmp_path / "s.json")
+    start_lat, start_lon = 9.865, 77.454
+
+    def _plot_at(pid: str, fid: str, lat: float, lon: float) -> Plot:
+        from datetime import timedelta
+
+        return Plot(
+            plot_id=pid, farmer_id=fid, cluster_id="c1",
+            lat=lat, lon=lon, crop="paddy", variety="ADT45",
+            transplant_date=TODAY - timedelta(days=110), area_acres=1.0,
+        )
+
+    plots = [
+        _plot_at("p1", "f1", 9.900, 77.500),  # 2nd nearest to the start point
+        _plot_at("p2", "f2", 9.950, 77.550),  # farthest from the start point
+        _plot_at("p3", "f3", 9.866, 77.455),  # nearest to the start point
+    ]
+    farmers = [
+        Farmer(farmer_id="f1", name="Farmer One", cluster_id="c1", telegram_chat_id=101, language="en"),
+        Farmer(farmer_id="f2", name="Farmer Two", cluster_id="c1", telegram_chat_id=102, language="en"),
+        Farmer(farmer_id="f3", name="Farmer Three", cluster_id="c1", telegram_chat_id=103, language="en"),
+    ]
+    storage.put_cluster(Cluster(
+        cluster_id="c1", name="Test Cluster", machine_capacity_acres_per_day=3.5,
+        machine_start_lat=start_lat, machine_start_lon=start_lon,
+        operator_chat_id=999, operator_language="en",
+    ))
+    for f in farmers:
+        storage.put_farmer(f)
+    for p in plots:
+        storage.put_plot(p)
+    _patch_weather(monkeypatch, [ForecastDay("d0", 0.0), ForecastDay("d1", 20.0)])
+
+    client = _FakeClient()
+    result = watcher_mod.run_daily_watch(
+        "c1", "season-1", storage=storage, today=TODAY, telegram_client=client,
+        get_claim=_truthful_claim,
+    )
+    assert result["status"] == "triggered"
+
+    import re
+
+    announced_position = {}
+    for chat_id, text, _ in client.sent:
+        if chat_id == 999:
+            continue
+        match = re.search(r"stop #(\d+)", text)
+        assert match, f"expected a route-position message for chat {chat_id}, got: {text!r}"
+        farmer_name = next(f.name for f in farmers if f.telegram_chat_id == chat_id)
+        announced_position[farmer_name] = int(match.group(1))
+
+    operator_text = next(text for chat_id, text, _ in client.sent if chat_id == 999)
+    lines_in_order = [
+        line for line in operator_text.splitlines()
+        if re.match(r"^\d+\. ", line)
+    ]
+    assert len(lines_in_order) == 3
+    for line in lines_in_order:
+        position_str, rest = line.split(". ", 1)
+        farmer_name = next(f.name for f in farmers if rest.startswith(f.name))
+        assert int(position_str) == announced_position[farmer_name], (
+            f"operator summary listed {farmer_name} at position {position_str}, "
+            f"but they were told {announced_position[farmer_name]}"
+        )
+
+
 def test_watcher_fired_twice_same_day_does_not_double_notify(tmp_path, monkeypatch) -> None:
     """The literal failure path: two real invocations of run_daily_watch
     for the same cluster on the same day (e.g. a duplicate EventBridge
