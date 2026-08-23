@@ -764,16 +764,25 @@ def route_stale(decision_date: str) -> str:
 
 
 def route_dropped_notice(area_acres: float, area_unit: str) -> str:
-    # Deliberately doesn't name a reason -- same discipline as
-    # escalation_resolved_lost. See ADR-013 Decision 11.
+    # Names ஆபரேட்டர் (the operator) as the one who changed the route,
+    # matching escalation_resolved_lost's precedent of naming the actor
+    # rather than using passive voice -- passive would obscure that a
+    # person made this call. Doesn't invent a reason: this system
+    # doesn't know which is true. Doesn't promise he's first next time
+    # either -- see the English version's comment for why (capped
+    # fairness bump, MAX_FAIRNESS_BONUS invariant, can't outrank real
+    # urgency). See ADR-013 Decision 11 and "Resolved on review."
     area = format_area(area_acres, area_unit)
     return (
-        f"இன்றைய பாதை மாறியுள்ளது -- இன்று உங்கள் {area} வயலுக்கு "
-        "இயந்திரம் வராது. அடுத்த வாய்ப்பில் மறு பரிசீலனை செய்யப்படும்."
+        f"புதுப்பிப்பு: ஆபரேட்டர் இன்றைய பாதையை மாற்றியுள்ளார் -- இன்று "
+        f"உங்கள் {area} வயலுக்கு இயந்திரம் வராது. உங்கள் வயல் மீண்டும் "
+        "வழக்கமான பட்டியலில் சேர்க்கப்பட்டுள்ளது, அடுத்த பாதையில் "
+        "முதலில் வரும் என உறுதியில்லை."
     )
-    # "Today's route has changed -- the machine won't be coming to your
-    #  {area} plot today. You'll be reconsidered at the next
-    #  opportunity."
+    # "Update: the operator has changed today's route -- the machine
+    #  won't be coming to your {area} plot today. Your plot goes back
+    #  into the normal pool; there's no guarantee of going first in the
+    #  next route."
 
 
 # --- Advocate argument, templated (not LLM-generated) for Tamil ---

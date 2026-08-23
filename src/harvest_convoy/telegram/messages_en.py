@@ -486,12 +486,21 @@ def route_stale(decision_date: str) -> str:
 
 
 def route_dropped_notice(area_acres: float, area_unit: str) -> str:
-    # Deliberately doesn't name a reason (weather, another farmer, the
-    # operator's own arrangement) -- this system doesn't know which of
-    # those is true and shouldn't guess, same discipline as
-    # escalation_resolved_lost. See ADR-013 Decision 11.
+    # Names the operator as the one who changed the route -- passive
+    # voice ("the route has changed") would obscure that a person made
+    # this call, which is its own kind of dishonesty. Doesn't invent or
+    # guess a reason (weather, another farmer, the operator's own
+    # arrangement) -- this system doesn't know which is true, same
+    # discipline as escalation_resolved_lost. Doesn't promise he's first
+    # next time either: dropping a plot un-harvests it (clear_plot_harvest)
+    # and records a fairness bump, but that bump only ever contributes a
+    # capped tie-breaking weight in a future close call (coordinator.py's
+    # MAX_FAIRNESS_BONUS invariant) -- it can't outrank a more urgent
+    # plot. So the honest claim is "back in the normal pool," not "first
+    # in line." See ADR-013 Decision 11 and "Resolved on review."
     return (
-        f"Today's route has changed -- the machine won't be coming to "
-        f"your {format_area(area_acres, area_unit)} plot today. You'll "
-        f"be reconsidered at the next opportunity."
+        f"Update: the operator has changed today's route -- the machine "
+        f"won't be coming to your {format_area(area_acres, area_unit)} "
+        f"plot today. Your plot goes back into the normal pool for the "
+        f"next route, with no guarantee of going first."
     )
