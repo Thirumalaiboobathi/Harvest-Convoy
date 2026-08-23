@@ -184,4 +184,9 @@ ADR, in the order the decisions were made:
 - [ADR-004](docs/adr/ADR-004-telegram.md) — Telegram integration, message design
 - [ADR-005](docs/adr/ADR-005-persistence-fairness.md) — DynamoDB schema, fairness ledger
 - [ADR-006](docs/adr/ADR-006-deploy.md) — AWS deployment, both live-found bugs and their fixes
+- ADR-007 — number never assigned; no such document was ever written or removed
 - [ADR-008](docs/adr/ADR-008-tn-generalization-and-tamil.md) — Tamil Nadu generalization (per-cluster GDD, second cluster), Tamil-language farmer interface, and the live-verified Nova Pro Tamil-script finding
+- [ADR-009](docs/adr/ADR-009-harvest-lifecycle-and-validation.md) — 2025 historical backtest, the plot-harvest-lifecycle correctness bug it surfaced, harvest confirmation loop, registration-time maturity projection, post-harvest drying-window rain alert
+- [ADR-010](docs/adr/ADR-010-reporting-decision-replay-equity-machinery.md) — persisted per-decision records (the audit-trail gap fixed at the source), `explain_decision.py`, `equity_report.py`, `machinery_gap.py`
+- [ADR-011](docs/adr/ADR-011-rollover-breakdown-rain-classification-advance-notice.md) — seasonal rollover, machine breakdown handling, rain event classification, advance harvest notice
+- [ADR-012](docs/adr/ADR-012-operator-authorization-and-enrollment.md) — callback authorization audit (three unauthenticated mutation paths found and fixed), one-time-code operator self-enrollment, the farmer/operator onboarding asymmetry documented
