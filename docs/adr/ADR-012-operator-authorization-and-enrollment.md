@@ -70,6 +70,7 @@ what authorizes each one:
 | `linkfarmer_proxy:` | `handle_linkfarmer_proxy_callback` (new, ADR-013 Part 2) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
 | `linkfarmer_match:` | `handle_linkfarmer_match_callback` (new, ADR-013 Part 2) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
 | `linkfarmer_confirm:` | `handle_linkfarmer_confirm_callback` (new, ADR-013 Part 2) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
+| `linkfarmer_undo:` | `handle_linkfarmer_undo_callback` (new, ADR-013 Part 2 revision 2026-08-24) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
 
 **`lang:` was reconsidered and fixed, not left as a documented
 exception.** The original reasoning — this callback doesn't act on

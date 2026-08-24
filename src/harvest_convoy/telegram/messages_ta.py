@@ -939,6 +939,33 @@ def linkfarmer_linked_toast() -> str:
     # "Linked."
 
 
+LINKFARMER_UNDO_BUTTON_LABEL = "↩️ செயல்தவிர்"
+# "Undo"
+
+
+def linkfarmer_linked_with_undo_text() -> str:
+    return (
+        "இணைக்கப்பட்டது. தவறான பொருத்தமாக இருந்தால், அடுத்த ஒரு மணி "
+        "நேரத்திற்குள் இதைத் திரும்பப் பெறலாம்."
+    )
+    # "Linked. You can undo this for the next hour if it was the wrong match."
+
+
+def linkfarmer_undo_expired() -> str:
+    return "திரும்பப் பெற தாமதமாகிவிட்டது -- ஒரு மணி நேரத்திற்கும் மேலாகிவிட்டது."
+    # "Too late to undo -- more than an hour has passed."
+
+
+def linkfarmer_undo_failed() -> str:
+    return "திரும்பப் பெற முடியவில்லை -- இந்த இணைப்பு ஏற்கனவே மாறியிருக்கலாம்."
+    # "Couldn't undo -- this link may have already changed."
+
+
+def linkfarmer_undone_toast() -> str:
+    return "திரும்பப் பெறப்பட்டது -- எதுவும் இணைக்கப்படவில்லை."
+    # "Undone -- nothing is linked."
+
+
 def linkfarmer_cancelled_toast() -> str:
     return "ரத்து செய்யப்பட்டது -- எதுவும் இணைக்கப்படவில்லை."
     # "Cancelled -- nothing was linked."

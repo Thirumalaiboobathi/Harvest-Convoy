@@ -7,7 +7,7 @@ operator flow.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 from harvest_convoy.models import Cluster, Farmer, Plot
 from harvest_convoy.storage.file_storage import FileStorage
@@ -261,3 +261,117 @@ def test_linkfarmer_confirm_from_non_operator_is_refused_and_links_nothing(tmp_p
     assert storage.get_farmer("farmer-555").telegram_chat_id == 555
     assert storage.get_plot("plot-555").retired_reason is None
     assert client.edited_markup == []
+
+
+# ---------------------------------------------------------------------
+# Undo (Decision 18 revision, 2026-08-24): a wrong match is correctable,
+# not silent, within a bounded window -- one tap, three fields restored
+# to exactly what apply_link found them at, no new storage entity.
+# ---------------------------------------------------------------------
+
+def test_linkfarmer_confirm_yes_offers_an_undo_button(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    _seed_pair(storage)
+    client = _FakeClient()
+
+    webhook.handle_linkfarmer_confirm_callback(
+        client, _cbq("cb1", "linkfarmer_confirm:farmer-proxy-abc123:farmer-555:yes", 999), storage,
+    )
+
+    assert client.edited_text[-1][2] == messages_en.linkfarmer_linked_with_undo_text()
+    buttons = client.edited_text[-1][3]["inline_keyboard"]
+    assert len(buttons) == 1 and len(buttons[0]) == 1
+    assert buttons[0][0]["callback_data"].startswith("linkfarmer_undo:farmer-proxy-abc123:farmer-555:")
+
+
+def test_linkfarmer_undo_within_window_fully_reverses_the_link(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    _seed_pair(storage)
+    client = _FakeClient()
+
+    webhook.handle_linkfarmer_confirm_callback(
+        client, _cbq("cb1", "linkfarmer_confirm:farmer-proxy-abc123:farmer-555:yes", 999), storage,
+    )
+    undo_data = client.edited_text[-1][3]["inline_keyboard"][0][0]["callback_data"]
+
+    webhook.handle_linkfarmer_undo_callback(client, _cbq("cb2", undo_data, 999), storage)
+
+    assert storage.get_farmer("farmer-proxy-abc123").telegram_chat_id is None
+    assert storage.get_farmer("farmer-555").telegram_chat_id == 555
+    assert storage.get_plot("plot-555").retired_reason is None
+    assert client.answered[-1][1] == messages_en.linkfarmer_undone_toast()
+
+
+def test_linkfarmer_undo_past_the_window_is_refused_and_changes_nothing(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    _seed_pair(storage)
+    client = _FakeClient()
+    assert proxy_registration.apply_link(storage, "farmer-proxy-abc123", "farmer-555") is True
+    stale_linked_at = str(int((datetime.now(timezone.utc) - timedelta(hours=2)).timestamp()))
+
+    webhook.handle_linkfarmer_undo_callback(
+        client,
+        _cbq("cb1", f"linkfarmer_undo:farmer-proxy-abc123:farmer-555:{stale_linked_at}", 999),
+        storage,
+    )
+
+    assert storage.get_farmer("farmer-proxy-abc123").telegram_chat_id == 555
+    assert storage.get_plot("plot-555").retired_reason == "linked_to:farmer-proxy-abc123"
+    assert client.answered[-1][1] == messages_en.linkfarmer_undo_expired()
+
+
+def test_linkfarmer_undo_twice_is_refused_the_second_time(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    _seed_pair(storage)
+    client = _FakeClient()
+    assert proxy_registration.apply_link(storage, "farmer-proxy-abc123", "farmer-555") is True
+    linked_at = str(int(datetime.now(timezone.utc).timestamp()))
+    undo_data = f"linkfarmer_undo:farmer-proxy-abc123:farmer-555:{linked_at}"
+
+    webhook.handle_linkfarmer_undo_callback(client, _cbq("cb1", undo_data, 999), storage)
+    webhook.handle_linkfarmer_undo_callback(client, _cbq("cb2", undo_data, 999), storage)
+
+    assert client.answered[-1][1] == messages_en.linkfarmer_undo_failed()
+    # First undo genuinely took effect -- second is refused, not a no-op
+    # masking the first one having silently failed too.
+    assert storage.get_farmer("farmer-proxy-abc123").telegram_chat_id is None
+    assert storage.get_farmer("farmer-555").telegram_chat_id == 555
+
+
+def test_linkfarmer_undo_from_non_operator_is_refused_and_changes_nothing(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    _seed_pair(storage)
+    client = _FakeClient()
+    assert proxy_registration.apply_link(storage, "farmer-proxy-abc123", "farmer-555") is True
+    linked_at = str(int(datetime.now(timezone.utc).timestamp()))
+
+    webhook.handle_linkfarmer_undo_callback(
+        client,
+        _cbq("cb1", f"linkfarmer_undo:farmer-proxy-abc123:farmer-555:{linked_at}", 54321),
+        storage,
+    )
+
+    assert storage.get_farmer("farmer-proxy-abc123").telegram_chat_id == 555
+    assert storage.get_plot("plot-555").retired_reason == "linked_to:farmer-proxy-abc123"
+
+
+def test_undo_link_refuses_when_the_plot_was_superseded_by_a_different_link(tmp_path) -> None:
+    """If the candidate's plot no longer points back at this proxy_farmer_id
+    (e.g. an operator undid, then linked the same candidate to a
+    different proxy, or hand-edited storage in between), undo_link must
+    refuse rather than blindly restore a chat_id onto a plot it no
+    longer actually owns."""
+    from dataclasses import replace
+
+    storage = FileStorage(tmp_path / "s.json")
+    _seed_pair(storage)
+    assert proxy_registration.apply_link(storage, "farmer-proxy-abc123", "farmer-555") is True
+    # Simulate the plot having moved on to point at some other link.
+    storage.put_plot(replace(storage.get_plot("plot-555"), retired_reason="linked_to:farmer-proxy-zzz999"))
+    linked_at = str(int(datetime.now(timezone.utc).timestamp()))
+
+    result = proxy_registration.undo_link(storage, "farmer-proxy-abc123", "farmer-555", linked_at)
+
+    assert result == "stale"
+    assert storage.get_farmer("farmer-proxy-abc123").telegram_chat_id == 555  # unchanged
+    assert storage.get_plot("plot-555").retired_reason == "linked_to:farmer-proxy-zzz999"  # unchanged

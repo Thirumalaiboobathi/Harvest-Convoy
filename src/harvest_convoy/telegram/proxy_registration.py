@@ -23,7 +23,7 @@ import logging
 import os
 import secrets
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Literal
 
@@ -453,3 +453,83 @@ def apply_link(storage: Storage, proxy_farmer_id: str, candidate_farmer_id: str)
         )
         return False
     return True
+
+
+# TUNING, not sourced: how long an operator may reverse a /linkfarmer
+# link with one tap. A judgment call between "long enough to notice a
+# wrong match" and "short enough that nothing has meaningfully happened
+# under the merged identity yet" (a route/harvest notification sent to
+# the now-reachable proxy farmer, a confirmation reply). Chosen, not
+# derived -- revisit if a pilot shows operators noticing mistakes later
+# than this. Reversing after the window closes is refused, not
+# performed anyway; nothing that happened during the window (a message
+# actually sent) is retroactively undone -- see ADR-013 Part 2 Decision
+# 18's revision note for why that's an accepted, disclosed limit rather
+# than a gap this function silently papers over.
+LINKFARMER_UNDO_WINDOW = timedelta(hours=1)
+
+
+def build_linkfarmer_undo_keyboard(
+    proxy_farmer_id: str, candidate_farmer_id: str, linked_at_epoch: str, language: str
+) -> dict:
+    # linked_at_epoch: whole Unix seconds, not an ISO timestamp -- an
+    # ISO string contains colons ("10:15:30"), which would break this
+    # callback_data's own colon-delimited parsing (found live, not
+    # theoretical: the first version of this used isoformat() and every
+    # undo attempt failed parse_linkfarmer_undo_callback_data's length
+    # check silently).
+    mod = _lang_module(language)
+    return {
+        "inline_keyboard": [[{
+            "text": mod.LINKFARMER_UNDO_BUTTON_LABEL,
+            "callback_data": f"linkfarmer_undo:{proxy_farmer_id}:{candidate_farmer_id}:{linked_at_epoch}",
+        }]]
+    }
+
+
+def undo_link(storage: Storage, proxy_farmer_id: str, candidate_farmer_id: str, linked_at_epoch: str) -> str:
+    """Reverses apply_link -- three writes back to their pre-link values,
+    the exact mirror of apply_link's own three writes. No new entity, no
+    generalized merge/reconciliation: this only ever restores state
+    apply_link itself just set, and only within LINKFARMER_UNDO_WINDOW of
+    when it was set (linked_at_epoch travels in the Undo button's
+    callback_data -- no new storage field, no in-memory state, matching
+    this module's existing "everything /linkfarmer needs travels in
+    callback_data" design).
+
+    Returns "ok", "expired" (past the window), or "stale" (nothing to
+    undo -- already undone, superseded by a later link, or the expected
+    state doesn't match, e.g. a corrupted/forged callback). Never
+    raises."""
+    try:
+        linked_at_dt = datetime.fromtimestamp(int(linked_at_epoch), tz=timezone.utc)
+    except (ValueError, OSError, OverflowError):
+        return "stale"
+    if datetime.now(timezone.utc) - linked_at_dt > LINKFARMER_UNDO_WINDOW:
+        return "expired"
+
+    proxy_farmer = storage.get_farmer(proxy_farmer_id)
+    candidate_farmer = storage.get_farmer(candidate_farmer_id)
+    if proxy_farmer is None or candidate_farmer is None or proxy_farmer.telegram_chat_id is None:
+        return "stale"
+    candidate_plot = next(
+        (p for p in storage.get_plots_for_cluster(candidate_farmer.cluster_id) if p.farmer_id == candidate_farmer_id),
+        None,
+    )
+    if candidate_plot is None or candidate_plot.retired_reason != f"linked_to:{proxy_farmer_id}":
+        # Already undone, or this candidate/plot has moved on to some
+        # other state since -- refuse rather than guess.
+        return "stale"
+
+    restored_chat_id = proxy_farmer.telegram_chat_id
+    farmer_result = storage.put_farmer(replace(proxy_farmer, telegram_chat_id=None))
+    candidate_result = storage.put_farmer(replace(candidate_farmer, telegram_chat_id=restored_chat_id))
+    plot_result = storage.put_plot(replace(candidate_plot, retired_reason=None))
+    if not farmer_result.success or not candidate_result.success or not plot_result.success:
+        logger.error(
+            "undo_link: write failed proxy=%s candidate=%s farmer=%s candidate_farmer=%s plot=%s",
+            proxy_farmer_id, candidate_farmer_id,
+            farmer_result.error, candidate_result.error, plot_result.error,
+        )
+        return "stale"
+    return "ok"

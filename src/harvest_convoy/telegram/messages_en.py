@@ -587,5 +587,24 @@ def linkfarmer_linked_toast() -> str:
     return "Linked."
 
 
+LINKFARMER_UNDO_BUTTON_LABEL = "↩️ Undo"
+
+
+def linkfarmer_linked_with_undo_text() -> str:
+    return "Linked. You can undo this for the next hour if it was the wrong match."
+
+
+def linkfarmer_undo_expired() -> str:
+    return "Too late to undo -- more than an hour has passed."
+
+
+def linkfarmer_undo_failed() -> str:
+    return "Couldn't undo -- this link may have already changed."
+
+
+def linkfarmer_undone_toast() -> str:
+    return "Undone -- nothing is linked."
+
+
 def linkfarmer_cancelled_toast() -> str:
     return "Cancelled -- nothing was linked."

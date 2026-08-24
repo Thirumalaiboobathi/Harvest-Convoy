@@ -334,6 +334,13 @@ def main() -> None:
     print()
     print("linkfarmer_linked_toast():", messages_ta.linkfarmer_linked_toast())
     print("linkfarmer_cancelled_toast():", messages_ta.linkfarmer_cancelled_toast())
+    print()
+    print("NEW (added 2026-08-24) -- /linkfarmer Undo, bounded-window reversal:")
+    print("LINKFARMER_UNDO_BUTTON_LABEL:", messages_ta.LINKFARMER_UNDO_BUTTON_LABEL)
+    print("linkfarmer_linked_with_undo_text():", messages_ta.linkfarmer_linked_with_undo_text())
+    print("linkfarmer_undo_expired():", messages_ta.linkfarmer_undo_expired())
+    print("linkfarmer_undo_failed():", messages_ta.linkfarmer_undo_failed())
+    print("linkfarmer_undone_toast():", messages_ta.linkfarmer_undone_toast())
 
     print()
     print("=" * 70)

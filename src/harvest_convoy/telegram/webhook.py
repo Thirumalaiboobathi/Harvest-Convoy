@@ -1358,7 +1358,10 @@ def handle_linkfarmer_confirm_callback(
     """Step 3 of /linkfarmer -- the only step that mutates anything.
     On yes: proxy_registration.apply_link transplants the candidate's
     telegram_chat_id onto the proxy farmer_id and retires the
-    candidate's plot (Decision 18). On no: nothing is written."""
+    candidate's plot (Decision 18), then the message is edited to offer
+    a bounded-window Undo rather than just clearing the keyboard -- a
+    wrong match is now correctable, not silent (Decision 18's revision,
+    2026-08-24). On no: nothing is written."""
     callback_query_id = callback_query.get("id", "")
     parsed = parse_linkfarmer_confirm_callback_data(callback_query.get("data", ""))
     if parsed is None:
@@ -1380,13 +1383,12 @@ def handle_linkfarmer_confirm_callback(
         return
     mod = notify._lang_module(cluster.operator_language)
 
-    message = callback_query.get("message") or {}
-    msg_chat_id = (message.get("chat") or {}).get("id")
-    message_id = message.get("message_id")
-    if msg_chat_id is not None and message_id is not None:
-        client.edit_message_reply_markup(msg_chat_id, message_id, reply_markup=None)
-
     if not answer:
+        message = callback_query.get("message") or {}
+        msg_chat_id = (message.get("chat") or {}).get("id")
+        message_id = message.get("message_id")
+        if msg_chat_id is not None and message_id is not None:
+            client.edit_message_reply_markup(msg_chat_id, message_id, reply_markup=None)
         client.answer_callback_query(callback_query_id, mod.linkfarmer_cancelled_toast())
         return
 
@@ -1394,7 +1396,71 @@ def handle_linkfarmer_confirm_callback(
     if not success:
         client.answer_callback_query(callback_query_id, mod.linkfarmer_cancelled_toast(), show_alert=True)
         return
+
+    linked_at_epoch = str(int(datetime.now(timezone.utc).timestamp()))
     client.answer_callback_query(callback_query_id, mod.linkfarmer_linked_toast())
+    _edit_message(
+        client, callback_query,
+        mod.linkfarmer_linked_with_undo_text(),
+        proxy_registration.build_linkfarmer_undo_keyboard(
+            proxy_farmer_id, candidate_farmer_id, linked_at_epoch, cluster.operator_language
+        ),
+    )
+
+
+def parse_linkfarmer_undo_callback_data(data: str) -> tuple[str, str, str] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "linkfarmer_undo":
+        return None
+    _, proxy_farmer_id, candidate_farmer_id, linked_at_epoch = parts
+    return proxy_farmer_id, candidate_farmer_id, linked_at_epoch
+
+
+def handle_linkfarmer_undo_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage,
+) -> None:
+    """Reverses a /linkfarmer link within
+    proxy_registration.LINKFARMER_UNDO_WINDOW of when it happened
+    (Decision 18's revision, 2026-08-24) -- the one concession to "no
+    merge primitive" this part makes, because the reversal itself needs
+    no new machinery: retired_reason already exists and apply_link never
+    deletes anything. Past the window, or if the linked state has
+    already moved on, refused rather than guessed at."""
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_linkfarmer_undo_callback_data(callback_query.get("data", ""))
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    proxy_farmer_id, candidate_farmer_id, linked_at_epoch = parsed
+    proxy_farmer = storage.get_farmer(proxy_farmer_id)
+    cluster = storage.get_cluster(proxy_farmer.cluster_id) if proxy_farmer is not None else None
+    if not _is_operator(callback_query, cluster):
+        logger.warning(
+            "linkfarmer_undo callback proxy=%s candidate=%s from a non-operator -- refused",
+            proxy_farmer_id, candidate_farmer_id,
+        )
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    mod = notify._lang_module(cluster.operator_language)
+
+    message = callback_query.get("message") or {}
+    msg_chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if msg_chat_id is not None and message_id is not None:
+        client.edit_message_reply_markup(msg_chat_id, message_id, reply_markup=None)
+
+    result = proxy_registration.undo_link(storage, proxy_farmer_id, candidate_farmer_id, linked_at_epoch)
+    if result == "expired":
+        client.answer_callback_query(callback_query_id, mod.linkfarmer_undo_expired(), show_alert=True)
+        return
+    if result != "ok":
+        client.answer_callback_query(callback_query_id, mod.linkfarmer_undo_failed(), show_alert=True)
+        return
+    client.answer_callback_query(callback_query_id, mod.linkfarmer_undone_toast())
 
 
 def handle_callback_query(
@@ -1613,9 +1679,9 @@ def handle_update(
     handlers (ADR-013); "operator_lang:..." and "operator_replace:..."
     route to the operator-enrollment handlers (ADR-012 Part 2);
     "addfarmer_confirm:...", "linkfarmer_proxy:...", "linkfarmer_match:...",
-    and "linkfarmer_confirm:..." route to the proxy-registration/linking
-    handlers (ADR-013 Part 2); anything else goes through the existing
-    handle_callback_query escalation flow.
+    "linkfarmer_confirm:...", and "linkfarmer_undo:..." route to the
+    proxy-registration/linking handlers (ADR-013 Part 2); anything else
+    goes through the existing handle_callback_query escalation flow.
     """
     if "callback_query" in update:
         callback_query = update["callback_query"]
@@ -1673,6 +1739,9 @@ def handle_update(
             return
         if data.startswith("linkfarmer_confirm:"):
             handle_linkfarmer_confirm_callback(client, callback_query, storage)
+            return
+        if data.startswith("linkfarmer_undo:"):
+            handle_linkfarmer_undo_callback(client, callback_query, storage)
             return
         handle_callback_query(
             client, callback_query, storage, season_id, lookup_farmer_for_plot

@@ -1231,6 +1231,35 @@ if it matters.
    reason nothing in this project deletes records.
    On Cancel: nothing is written, message reverts.
 
+**5. Revised on review (2026-08-24): a bounded-window Undo, not an
+accepted "no recovery" gap.** On Confirm, the message is edited again —
+not just cleared — to *"Linked. You can undo this for the next hour if
+it was the wrong match."* with one button,
+`linkfarmer_undo:{proxy_farmer_id}:{candidate_farmer_id}:{linked_at_epoch}`
+(`linked_at_epoch`: whole Unix seconds — an ISO timestamp was tried
+first and silently broke this callback's own colon-delimited parsing,
+caught by testing the actual round trip, not just reasoning about the
+shape). Tapping it (`proxy_registration.undo_link`) performs the exact
+mirror of step 4's three writes: clears the proxy farmer's
+`telegram_chat_id`, restores it onto the candidate farmer, and clears
+the candidate plot's `retired_reason` — provided (a) less than
+`LINKFARMER_UNDO_WINDOW` (1 hour, a `# TUNING:` judgment call, not
+sourced) has passed, and (b) the candidate plot's `retired_reason`
+still reads exactly `linked_to:{proxy_farmer_id}` — refusing rather
+than guessing if either check fails (past the window, already undone,
+or superseded by some other action in between). **This was worth
+building, on reflection, precisely because it needed no new
+machinery**: `retired_reason` already existed, `apply_link` never
+deletes anything, and every fact `undo_link` needs to reverse a link is
+either already sitting in storage or travels in the Undo button's own
+callback_data — no new storage field, no in-memory state, the same
+"everything /linkfarmer needs travels in callback_data" design the rest
+of this decision already uses. What this does **not** do: retroactively
+un-send any message, or unwind any scheduling decision, that already
+happened under the merged identity during the window — an accepted,
+disclosed limit (see Decision 20 failure path 5's revision), not a gap
+this function silently papers over.
+
 **Watcher-side enforcement**: plot selection for scheduling (both
 `_run_daily_watch_one`'s normal trigger and `handle_machine_breakdown`'s
 recompute — the same two call sites `_apply_rollover_exclusion`
@@ -1349,16 +1378,21 @@ replaces it if it stops being acceptable.
 
 **5. The operator links the wrong pair** (picks a candidate farmer who
 is not actually the same person as the proxy record). The explicit
-two-name confirmation step (Decision 18, step 3) is the only guard
-against this — there is no automatic verification a linked pair is
-correct, the same trust level already extended to the operator for
-route drops and escalation resolution. A wrong link's real-world
-consequence: the wrongly-matched candidate's own genuine plot is
-retired and stops being scheduled, a real harm, silently absorbed into
-the proxy record's identity. No undo is built. Flagged as the sharpest
-edge of not building a merge/verification primitive — acceptable at
-this scale on the same "obvious immediately" reasoning as Decision 18,
-not because the consequence is small.
+two-name confirmation step (Decision 18, step 3) is the first guard
+against this, and — **revised on review, 2026-08-24** — no longer the
+only one: Decision 18's Undo button reverses the exact mistake within
+`LINKFARMER_UNDO_WINDOW` (1 hour) of the tap, one more operator tap,
+no new machinery. This does not make the mistake risk-free: past the
+window, or if the operator doesn't notice within it, the wrongly-matched
+candidate's own genuine plot stays retired and stops being scheduled —
+still a real harm, and Undo also doesn't retroactively fix any message
+already sent or schedule decision already made under the merged
+identity during the window. What changed is the shape of the risk, not
+its elimination: a mistake caught promptly is now fully, cheaply
+recoverable, rather than requiring direct storage edits; a mistake
+caught late still isn't. Flagged accordingly — the trust placed in the
+operator's initial tap is unchanged, only the cost of getting it wrong
+in the first hour has dropped.
 
 **5. Weather/storage failures during the proxy flow.** Identical
 treatment to `_persist_completed_registration`'s existing degrade
@@ -1400,6 +1434,19 @@ project — first drafts only, nothing final until reviewed here and
   பட்டியலிடப்படாது."* ("Link {proxy_name} with {candidate_name}?
   {candidate_name}'s separate plot will no longer be scheduled.")
 - `/linkfarmer` success toast: *"இணைக்கப்பட்டது."* ("Linked.")
+- Undo button (added 2026-08-24): *"↩️ செயல்தவிர்"* ("↩️ Undo")
+- Linked-with-undo-offer text: *"இணைக்கப்பட்டது. தவறான பொருத்தமாக
+  இருந்தால், அடுத்த ஒரு மணி நேரத்திற்குள் இதைத் திரும்பப் பெறலாம்."*
+  ("Linked. You can undo this for the next hour if it was the wrong
+  match.")
+- Undo expired: *"திரும்பப் பெற தாமதமாகிவிட்டது -- ஒரு மணி
+  நேரத்திற்கும் மேலாகிவிட்டது."* ("Too late to undo -- more than an
+  hour has passed.")
+- Undo failed (stale/superseded): *"திரும்பப் பெற முடியவில்லை -- இந்த
+  இணைப்பு ஏற்கனவே மாறியிருக்கலாம்."* ("Couldn't undo -- this link may
+  have already changed.")
+- Undone toast: *"திரும்பப் பெறப்பட்டது -- எதுவும் இணைக்கப்படவில்லை."*
+  ("Undone -- nothing is linked.")
 
 English equivalents ship alongside in `messages_en.py`, same shape as
 every prior part.
@@ -1416,7 +1463,14 @@ closing message text, proven directly rather than just asserted in
 prose, since that answer changes no persisted field.
 `route_override_status`-style unit tests for `village`/`registered_by`/
 `registered_at`/`retired_reason` defaulting on old rows;
-`tests/test_link_farmer.py` (new, detailed above); `test_watcher.py`
+`tests/test_link_farmer.py` (new, detailed above, plus Undo's revision:
+a successful link offers the button; undo within the window fully
+reverses all three fields; undo past the window is refused and changes
+nothing; a second undo of an already-undone link is refused, proving
+the first one genuinely took effect rather than silently no-op'ing
+both times; undo from a non-operator is refused; `undo_link` refuses
+when the candidate's plot has been superseded by a different link in
+the meantime); `test_watcher.py`
 additions for Decision 16 (the rewritten no-chat_id rollover test, plus
 a full-season regression proving a proxy-registered, notification-less
 plot is scheduled normally both this season and next) and for retired-
@@ -1448,11 +1502,19 @@ sub-split.
   silence.
 - **Decision 18's linking mechanism is explicitly a pilot-scope answer,
   not the permanent design** — it depends entirely on an operator
-  noticing a duplicate himself, with no automated detection and no undo
-  if he links the wrong pair. Stated plainly in Decision 18: this does
-  not hold at any meaningfully larger scale, and what would replace it
-  (a system-proposed, operator-confirmed duplicate match, never an
-  automatic silent merge) is sketched there, not built here.
+  noticing a duplicate himself, with no automated detection. Stated
+  plainly in Decision 18: this does not hold at any meaningfully larger
+  scale, and what would replace it (a system-proposed, operator-confirmed
+  duplicate match, never an automatic silent merge) is sketched there,
+  not built here.
+- **A wrong link is now correctable, not just visible** (revised
+  2026-08-24): `apply_link`'s effects were always confined to three
+  plain fields with nothing deleted, which made a same-shape reversal
+  cheap enough to build rather than defer — one more operator tap,
+  `LINKFARMER_UNDO_WINDOW` (1 hour) to notice, no new storage entity, no
+  in-memory state. Past that window, or if a message already went out
+  under the merged identity, the mistake's cost is unchanged from the
+  original design — Undo narrows the risk window, it does not remove it.
 - Four additive, backward-compatible schema widenings
   (`Plot.village`, `Plot.registered_by`, `Plot.registered_at`,
   `Plot.retired_reason`) and one on `Farmer` (`contact_note`) — every
@@ -1498,3 +1560,27 @@ Decision 16 approved with emphasis: the rewritten test must show the
 correction, not merely pass. The discarded `village` field is
 persisted as proposed, kept flagged as its own independent finding
 rather than folded silently into "the same four fields."
+
+## Resolved on review (2026-08-24)
+
+**Decision 18's "no undo is built" was reconsidered, after the Part 2
+commit landed, and reversed.** The original framing treated recovery
+from a wrong `/linkfarmer` match as out of scope on the theory that
+real recovery would need a merge primitive this pilot shouldn't build.
+Checked directly rather than assumed: `apply_link` never deletes
+anything and touches exactly three plain fields across two `Farmer`
+records and one `Plot`, so reversing it is the same three writes run
+backward, not a new primitive. Built as a bounded-window Undo button
+(`LINKFARMER_UNDO_WINDOW`, 1 hour) attached to the message right after
+a successful link. One real bug surfaced during implementation, not
+just review: the first version embedded the link timestamp as an ISO
+string in the Undo button's callback_data, which contains colons and
+silently broke that callback's own colon-delimited parsing — caught by
+testing the actual round trip end to end, not by re-reading the code.
+Fixed by using whole Unix seconds instead. Decision 20's failure path 5
+and the Part 2 Consequences are updated to describe the risk Undo
+actually narrows (a mistake caught within the hour is now cheaply
+recoverable) rather than the risk it does not touch (a mistake caught
+late, or a message already sent under the merged identity during the
+window) — recorded as a real remaining limit, not implied away by the
+fact that undo now exists.
