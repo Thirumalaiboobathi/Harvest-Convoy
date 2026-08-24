@@ -286,6 +286,14 @@ def test_callback_resolution_updates_the_decision_record_to_the_human_outcome(tm
     assert loser_record.resolution == "escalated_lost"
     assert loser_record.resolved_at is not None
 
+    # ADR-013 Part 3: the loser's message carries a "why" button pinned
+    # to the escalation's real decision_date -- the winner's does not.
+    winner_send = next(m for m in client.sent_messages if m[0] == 111)
+    loser_send = next(m for m in client.sent_messages if m[0] == 222)
+    assert winner_send[2] is None
+    loser_callback_data = loser_send[2]["inline_keyboard"][0][0]["callback_data"]
+    assert loser_callback_data == f"why_lost:p04:{SEASON}:{decision_date}"
+
 
 def test_callback_resolution_without_a_decision_date_does_not_crash(tmp_path) -> None:
     """An EscalationPayload with no decision_date (the default for a
@@ -321,6 +329,11 @@ def test_callback_resolution_without_a_decision_date_does_not_crash(tmp_path) ->
     )
 
     assert len(client.sent_messages) == 2
+    # ADR-013 Part 3, Decision 26 (Gap B): no decision_date was ever
+    # known for this escalation, so no "why" button is attached rather
+    # than one that would always dead-end into "not recorded."
+    loser_send = next(m for m in client.sent_messages if m[0] == 222)
+    assert loser_send[2] is None
 
 
 def test_registered_escalation_gives_loser_a_specific_reason(tmp_path) -> None:

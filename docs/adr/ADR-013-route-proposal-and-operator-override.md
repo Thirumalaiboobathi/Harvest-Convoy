@@ -3,9 +3,12 @@
 - Status: **Part 1 — Approved, with two corrections (2026-08-23),
   implemented.** See "Resolved on review" below Part 1 for what changed
   from the original proposal and why, before implementation began.
-  **Part 2 — Approved, with Decision 18 replaced (2026-08-23).** See
-  "Resolved on review" at the end of this document.
-- Date: 2026-08-23 (Part 1); 2026-08-23 (Part 2)
+  **Part 2 — Approved, with Decision 18 replaced (2026-08-23),
+  implemented, revised 2026-08-24 to add a bounded Undo.** See "Resolved
+  on review" at the end of Part 2.
+  **Part 3 — Approved with two corrections (2026-08-24), implemented.**
+  See "Resolved on review" at the end of this document.
+- Date: 2026-08-23 (Part 1); 2026-08-23 (Part 2); 2026-08-24 (Part 3)
 
 ## Context
 
@@ -1584,3 +1587,566 @@ recoverable) rather than the risk it does not touch (a mistake caught
 late, or a message already sent under the merged identity during the
 window) — recorded as a real remaining limit, not implied away by the
 fact that undo now exists.
+
+---
+
+# Part 3: "Why not my plot?" — a farmer's own reachable answer
+
+## Context
+
+A farmer told `not_ready` ("your crop isn't ready, do nothing") while
+he can see the neighbour's field being cut has no way to ask why, and
+no reason to trust that the system looked at his plot at all. A farmer
+told `escalation_resolved_lost` ("today's machine is going to X's plot
+instead") gets one sentence of reason and no way to hear it again or
+see it laid out more plainly. Both are the moment this project's whole
+trust story is won or lost in the first week, and today neither message
+offers any way back into the reasoning behind it.
+
+`scripts/explain_decision.py` (ADR-010 Part 1) already reconstructs
+exactly this kind of answer — from `DecisionRecord`, never recomputed —
+but it's a CLI script an auditor runs with AWS/repo access, not
+something a farmer sitting with a phone can reach. This part gives two
+of that script's farmer-relevant facts a one-tap path to the person who
+actually needs them, without exposing the rest of what that script
+prints (round counts, urgency scores, threshold source, capacity
+formulas) — a farmer needs an answer, not the audit.
+
+Read `scripts/explain_decision.py`, `storage/interface.py`'s
+`DecisionRecord`, `agents/contracts.py`'s `AdvocateClaim`, and
+`telegram/notify.py`/`messages_en.py`/`messages_ta.py`'s `not_ready`,
+`escalation_resolved_lost`, and `resolution_reason` before implementing
+this — the whole point is to reuse what those already compute and
+render, not to build a second, independently-worded copy of either.
+
+## Decision 22: where the button attaches, and where it doesn't
+
+One button, added to exactly two message types:
+
+- **`not_ready`** (`watcher.py`, `PlotOutcome.TOO_GREEN`) — every time
+  it's sent, every trigger day the plot stays too green. Each day's
+  message gets its own button, pinned to that day's own record (Decision
+  25) — a farmer who's been not-ready for a week can tap any of the
+  week's messages and get that day's honest answer, not today's.
+- **`escalation_resolved_lost`** (`webhook.py`, after a human resolves a
+  contested pair) — the loser's copy only. The winner's
+  `escalation_resolved_won` gets no button; "why did I win" isn't the
+  failure mode this part exists to prevent, and a button that always
+  answers "you had the stronger claim" teaches a farmer nothing he
+  doesn't already know from winning.
+
+No button on `harvest_scheduled`, `advance_harvest_notice`,
+`drying_window_alert`, `route_dropped_notice`, or any registration/
+rollover/confirmation prompt — none of those carry a "why not" question
+this project can honestly answer from a `DecisionRecord`, and CLAUDE.md's
+no-new-farmer-surface rule means a button is added only where a bounded,
+one-tap answer genuinely exists, not speculatively.
+
+## Decision 23: stored records only — no live weather call, no LLM, and why that's a real constraint here, not a formality
+
+The temptation, for `not_ready`, is to answer "how far is my crop from
+ready" with a projected date — `agronomy/calibration.py`'s
+`project_maturity_for_plot()` already does exactly that, and it's
+already farmer-facing wording (`projected_maturity_sentence`,
+`advance_harvest_notice`). **Rejected for this feature.**
+`project_maturity_for_plot()` makes a live Open-Meteo call and computes
+a fresh projection at whatever moment it's called — which means a tap
+today and a tap tomorrow on the *same, already-sent* message would
+silently return two different answers to "why wasn't my plot ready,"
+neither one being what was actually true at decision time. That's
+exactly the failure `explain_decision.py`'s own rule exists to prevent
+("a replay must never reconstruct a plausible past; it must report the
+recorded one") — recomputing at read time instead of reporting what was
+already decided, just with arithmetic instead of a model. This part
+answers "why did today's message say what it said," not "what does the
+weather look like right now" — the second question isn't being asked,
+and answering it anyway would be dishonest even though the wording
+"sounds right."
+
+Everything both answers use is already sitting in a `DecisionRecord`,
+written at decision time by `coordinator.run_cluster_with_claims`
+(too_green case: `accumulated_gdd`, `maturity_gdd_used`,
+`rain_threshold_mm`, `usable_harvest_days`, `capacity_budget_acres`,
+`machine_capacity_acres_per_day`; lost-escalation case: those plus
+`opponent_plot_id`, `own_claim`, `opponent_claim` — both
+`AdvocateClaim.model_dump()` dicts frozen the moment the negotiation
+ran). No new `Storage` entity, no new write path — this part is
+strictly read-only, like Parts 1–3 of ADR-010.
+
+**The lost-escalation reason is the *exact same* function call the
+original message used**, not a re-worded copy: `messages_en.py`/
+`messages_ta.py`'s `resolution_reason(bumped_winner, bumped_loser,
+winner_days_past_maturity, loser_days_past_maturity)` is called again
+here, fed from the loser's own `DecisionRecord.own_claim`/
+`opponent_claim` dicts instead of the live `AdvocateClaim` objects
+`webhook.py` had in hand at resolution time — same four fields, same
+function, same wording, guaranteed identical rather than
+independently-drafted-to-look-similar. This is the literal mechanism
+behind "the same honest wording already used in the loser message."
+
+## Decision 24: a new module, not a repurposing of `explain_decision.py`
+
+```python
+# telegram/farmer_why.py
+"""Farmer-facing "why?" answers -- ADR-013 Part 3. Assembled entirely
+from a DecisionRecord already written at decision time (ADR-010 Part
+0.5) -- never a live call, never a model, never a recomputed projection.
+Not explain_decision.py's audience or its output shape: that script is
+the full audit trail for an auditor with repo/AWS access; this module
+returns exactly one short, already-localized answer for the farmer who
+asked, reusing the same underlying data and (for the lost-escalation
+case) the literal same resolution_reason() call, not a re-derived
+narrative.
+"""
+
+def _record_or_none(
+    storage: Storage, plot_id: str, season_id: str, decision_date: str,
+) -> DecisionRecord | None:
+    if not decision_date:  # Decision 26, Gap B: no date was ever known
+        return None
+    return storage.get_decision_record(plot_id, season_id, decision_date)
+
+
+def _formatted_date(mod, decision_date: str) -> str | None:
+    if not decision_date:
+        return None
+    try:
+        return mod.format_date(date.fromisoformat(decision_date))
+    except ValueError:
+        return None
+
+
+def why_not_ready_text(
+    storage: Storage, plot_id: str, season_id: str, decision_date: str, *, language: str = "ta",
+) -> str:
+    mod = notify._lang_module(language)
+    formatted_date = _formatted_date(mod, decision_date)
+    record = _record_or_none(storage, plot_id, season_id, decision_date)
+    if record is None or formatted_date is None:
+        return mod.why_not_recorded(formatted_date)
+    # Capped at 99: a TOO_GREEN record's accumulated_gdd is always below
+    # maturity_gdd_used by construction (scheduling/solver.py), but a
+    # rounding artifact that happens to land on 100 would read as
+    # "fully grown -- but not ready," a real self-contradiction for a
+    # farmer to notice. Presentation-only cap, not a change to the
+    # underlying stored numbers.
+    pct_grown = min(99, round(record.accumulated_gdd / record.maturity_gdd_used * 100))
+    return mod.why_not_ready_answer(
+        formatted_date, pct_grown, record.capacity_budget_acres, record.usable_harvest_days,
+    )
+
+
+def why_lost_text(
+    storage: Storage, plot_id: str, season_id: str, decision_date: str, *, language: str = "ta",
+) -> str:
+    mod = notify._lang_module(language)
+    formatted_date = _formatted_date(mod, decision_date)
+    record = _record_or_none(storage, plot_id, season_id, decision_date)
+    if (
+        record is None or formatted_date is None
+        or record.own_claim is None or record.opponent_claim is None
+    ):
+        return mod.why_not_recorded(formatted_date)
+    winner_plot = storage.get_plot(record.opponent_plot_id) if record.opponent_plot_id else None
+    winner_farmer = storage.get_farmer(winner_plot.farmer_id) if winner_plot else None
+    winner_name = winner_farmer.name if winner_farmer else mod.DEFAULT_WINNER_LABEL
+    reason = mod.resolution_reason(
+        bumped_winner=record.opponent_claim["bumped_last_season"],
+        bumped_loser=record.own_claim["bumped_last_season"],
+        winner_days_past_maturity=record.opponent_claim["days_past_maturity"],
+        loser_days_past_maturity=record.own_claim["days_past_maturity"],
+    )
+    return mod.why_lost_answer(formatted_date, winner_name, reason)
+```
+
+`why_not_recorded(formatted_date)` is the one honest answer for every
+gap this part can hit — a decision from before ADR-010 Part 0.5 shipped
+(2026-08-19), a `DecisionRecord` write that failed that day, or
+(lost-escalation only) an escalation payload lost to a process restart
+with no `decision_date` ever recorded for this button (Decision 26).
+Not distinguished by cause in the farmer-facing answer — a one-tap
+terminal answer isn't the place for `explain_decision.py`'s
+cause-by-cause audit language; "not recorded, we won't guess" is the
+whole honest truth a farmer needs here, matching CLAUDE.md's instruction
+directly. **`formatted_date` is threaded in and stated up front on every
+answer** (`why_not_ready_answer`, `why_lost_answer`, and `why_not_
+recorded` itself when a date is known) — reconsidered on review
+(2026-08-24): a pure read is safe against a repeat tap by construction
+(nothing to corrupt), but a farmer tapping the same message a week later
+would otherwise read a dateless answer as news about today rather than
+a record of that day's decision. Naming the date up front removes the
+ambiguity outright rather than trusting a farmer to infer it from
+context he may not remember.
+
+## Decision 25: the not-ready answer, and the lost answer, in full
+
+```python
+WHY_BUTTON_LABEL = "❓ Why?"
+
+def why_not_recorded(formatted_date: str | None = None) -> str:
+    if formatted_date:
+        return (
+            f"We don't have a record of {formatted_date}'s decision to "
+            f"look back on, so we can't reconstruct why -- we won't guess."
+        )
+    return (
+        "We don't have a record of that day's decision to look back on, "
+        "so we can't reconstruct why -- we won't guess."
+    )
+
+def why_not_ready_answer(
+    formatted_date: str, pct_grown: int, capacity_budget_acres: float, usable_harvest_days: int,
+) -> str:
+    day_word = "day" if usable_harvest_days == 1 else "days"
+    return (
+        f"On {formatted_date}: your crop had reached about {pct_grown}% "
+        f"of the growth it needs before harvest -- that's why it wasn't "
+        f"ready that day. (For reference: that day the machine's total "
+        f"capacity across {usable_harvest_days} good {day_word} was "
+        f"about {capacity_budget_acres:.1f} acres -- this didn't affect "
+        f"your plot, which wasn't ready regardless.)"
+    )
+
+def why_lost_answer(formatted_date: str, winner_name: str, reason: str) -> str:
+    return f"On {formatted_date}, the machine went to {winner_name}'s plot instead -- {reason}."
+```
+
+**Reconsidered on review (2026-08-24), both points below — the original
+draft put the percent-grown and capacity sentences side by side as two
+independent facts.** On review: a farmer whose crop is genuinely
+too-green, watching a neighbour's field get cut, must come away
+understanding *his crop wasn't ready* — not that "the machine was busy."
+Structurally, a `TOO_GREEN` plot was never in the machine's capacity
+pool to begin with (`scheduling/solver.py` excludes it before capacity
+allocation runs at all), so a capacity number sitting next to the
+percent-grown sentence with equal weight would let a farmer read "you
+lost the queue" — false, and worse for trust than saying nothing, per
+your instruction. Fixed two ways: the capacity clause is now explicitly
+parenthetical and subordinate ("for reference... this didn't affect
+your plot, which wasn't ready regardless"), and `formatted_date` opens
+every answer (`why_not_ready_answer`, `why_lost_answer`, and `why_not_
+recorded` when a date is known) so a farmer tapping an old message days
+later reads a dated record of a past decision, not fresh news about
+today. `capacity_budget_acres` itself is still the cluster's
+whole-machine budget for that trigger day, not this farmer's own
+acreage — worded as "the machine's total capacity," never "your plot
+could have used," so it can't be misread as a promise specific to him
+even in its now-clearly-secondary position.
+
+Tamil (drafts, for your review before this ships — printed via
+`scripts/print_tamil_strings.py` at implementation, same as every prior
+part):
+
+```python
+WHY_BUTTON_LABEL = "❓ ஏன்?"
+
+def why_not_recorded(formatted_date: str | None = None) -> str:
+    if formatted_date:
+        return (
+            f"{formatted_date} அன்றைய முடிவு பதிவு செய்யப்படவில்லை, "
+            "எனவே காரணத்தை மீண்டும் கூற முடியாது -- நாங்கள் யூகிக்க "
+            "மாட்டோம்."
+        )
+        # "{date}'s decision was not recorded, so we cannot restate the
+        #  reason -- we will not guess."
+    return (
+        "அந்த நாளின் முடிவு பதிவு செய்யப்படவில்லை, எனவே காரணத்தை "
+        "மீண்டும் கூற முடியாது -- நாங்கள் யூகிக்க மாட்டோம்."
+    )
+    # "That day's decision was not recorded, so we cannot restate the
+    #  reason -- we will not guess."
+
+def why_not_ready_answer(formatted_date, pct_grown, capacity_budget_acres, usable_harvest_days):
+    # _day_word(n, locative=True) -- a fully-formed word per case
+    # (நாளில்/நாட்களில்), not string concatenation. See "Resolved on
+    # review" below for the bug this replaced.
+    day_word_locative = _day_word(usable_harvest_days, locative=True)
+    return (
+        f"{formatted_date}: உங்கள் பயிர் அறுவடைக்குத் தேவையான "
+        f"வளர்ச்சியில் சுமார் {pct_grown}% ஐ எட்டியிருந்தது -- அன்று "
+        f"தயாராக இல்லாததற்கு அதுவே காரணம். (குறிப்புக்கு: அன்று "
+        f"இயந்திரத்தின் மொத்த திறன், {usable_harvest_days} நல்ல "
+        f"{day_word_locative}, சுமார் {capacity_budget_acres:.1f} ஏக்கர் -- "
+        f"இது உங்கள் வயலைப் பாதிக்கவில்லை, அது எப்படியிருந்தாலும் "
+        f"தயாராக இருக்கவில்லை.)"
+    )
+    # "{date}: your crop had reached about {pct}% of the growth needed
+    #  for harvest -- that is why it was not ready that day. (For
+    #  reference: that day the machine's total capacity, across {n} good
+    #  days, was about {x} acres -- this did not affect your plot, which
+    #  was not ready regardless.)"
+
+def why_lost_answer(formatted_date, winner_name, reason):
+    return f"{formatted_date} அன்று, இயந்திரம் {winner_name} உடைய வயலுக்குச் சென்றது -- {reason}."
+    # "On {date}, the machine went to {winner_name}'s plot instead --
+    #  {reason}."
+```
+
+## Decision 26: `callback_data` carries the exact record to look up — never re-resolved at tap time
+
+`(plot_id, season_id, decision_date)` is the exact primary key
+`get_decision_record` needs, and both call sites already have all three
+in hand *at the moment the message is sent* — so all three travel in the
+button's own `callback_data`, the same "no in-memory state, nothing to
+lose on restart" shape `/linkfarmer` established in Part 2:
+
+```
+why_notready:{plot_id}:{season_id}:{decision_date}
+why_lost:{plot_id}:{season_id}:{decision_date}
+```
+
+No field here can contain a colon (plot IDs, season IDs, and ISO dates
+never do), so this doesn't risk the colon-splitting bug Part 2's Undo
+button hit — noted explicitly because that bug was found by testing,
+not by inspection, and the fix there was "don't put timestamps in
+`callback_data`," which this design already avoids by construction.
+
+**`not_ready`**: `watcher.py`'s `_send_notifications` already has
+`today` (the trigger date) and `season_id` in scope at the call site —
+threaded straight into `notify.send_not_ready` as new `season_id`/
+`decision_date` keyword parameters (used only to build the button's
+`callback_data`; `build_not_ready_text` itself, and the message text it
+produces, are unchanged). No lookup, no gap — every `not_ready` message
+sent after this ships carries a working button.
+
+**`escalation_resolved_lost`**: `webhook.py`'s resolution handler has
+`escalation.decision_date` (`EscalationPayload`'s field, ADR-010
+Decision C) whenever `escalation is not None` — the ordinary case.
+**Gap B**: if the process restarted between the escalation being sent
+and being resolved, `_PENDING_ESCALATIONS` lost the entry, `escalation
+is None`, and — as already true today — the loser's message loses its
+specific reason clause. `decision_date` is genuinely unrecoverable at
+this call site in that branch (nothing stores it outside the popped
+in-memory payload); guessing `date.today()` would be reconstructing,
+not reporting, exactly what Decision 23 refuses to do. **Decided: omit
+the button entirely on this path**, rather than attach one that would
+deterministically answer "not recorded" every time it's tapped. This is
+different from the pre-Part-0.5 gap (Decision 24's `why_not_recorded`),
+where the button *is* shown and answers honestly — there, a real record
+might exist and the farmer deserves the chance to ask; here, the answer
+is already known to be unreachable before the message is even sent, so
+offering a dead-end tap teaches a farmer to distrust the button itself.
+Same disclosed limitation class as ADR-005/ADR-009/ADR-010 Decision D's
+existing "ordinary today's answer".
+
+## Decision 27: authorization — the farmer who owns the plot, checked first
+
+Same shape as `confirm:`/`rollover:` (ADR-012): the tapping identity
+must match the plot's own farmer, via `telegram_chat_id`, checked before
+any lookup runs.
+
+```python
+def parse_why_callback_data(data: str, expected_prefix: str) -> tuple[str, str, str] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != expected_prefix:
+        return None
+    _, plot_id, season_id, decision_date = parts
+    return plot_id, season_id, decision_date
+
+
+def _handle_why_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage, *, prefix: str, lost: bool,
+) -> None:
+    # handle_why_notready_callback / handle_why_lost_callback are thin
+    # public wrappers around this, each fixing prefix/lost -- one shared
+    # body, matching the "why_notready:"/"why_lost:" split at dispatch.
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_why_callback_data(callback_query.get("data", ""), prefix)
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    plot_id, season_id, decision_date = parsed
+    plot = storage.get_plot(plot_id)
+    farmer = storage.get_farmer(plot.farmer_id) if plot is not None else None
+    if plot is None or farmer is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    if not _is_farmer(callback_query, farmer):
+        # ADR-012: the tapping identity must be the plot's own farmer --
+        # this is the third farmer-owned callback class after
+        # confirm:/rollover:, and gets the exact same check, checked
+        # before any record lookup, not after.
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module(farmer.language).unrecognized_action(), show_alert=True,
+        )
+        return
+    client.answer_callback_query(callback_query_id)  # Telegram requires an answer either way
+    build_text = farmer_why.why_lost_text if lost else farmer_why.why_not_ready_text
+    client.send_message(
+        farmer.telegram_chat_id, build_text(storage, plot_id, season_id, decision_date, language=farmer.language),
+    )
+```
+
+Two new rows for ADR-012's audit table, added at implementation:
+`why_notready:` → `handle_why_callback(lost=False)`, `why_lost:` →
+`handle_why_callback(lost=True)`, both `_is_farmer`, both "Checked from
+the start."
+
+## Decision 28: one tap, one answer — mechanics
+
+- The answer is sent as a **new message** (`client.send_message`), not a
+  callback-query alert popup — Telegram caps an alert at 200 characters,
+  and the not-ready answer (percent-grown sentence plus capacity
+  sentence) doesn't reliably fit. `answer_callback_query` is still
+  called with no text, purely to satisfy Telegram's requirement that
+  every callback query be acknowledged (clears the tap's loading spinner).
+- **The button is never removed after a tap.** Every other keyboard in
+  this codebase clears itself after a tap because the tap *did*
+  something (resolved an escalation, linked a farmer, confirmed a
+  harvest) and a second tap would be a double-mutation risk. This tap
+  mutates nothing — `farmer_why`'s functions are pure reads — so a
+  second, third, or tenth tap on the same button is not a "double-tap"
+  failure mode at all, just the same honest answer read again. Explicit
+  design choice, not an oversight: nothing here needed the double-tap
+  guard every prior part in this ADR had to build.
+- **No follow-up is possible by construction.** The answer is one
+  message with no keyboard of its own; there is nothing further for the
+  farmer to tap or type in response. If a real farmer's reaction to this
+  answer turns out to need a reply (a factual correction, a dispute), that
+  is new scope this ADR does not cover and CLAUDE.md requires it be
+  raised as its own decision, not built quietly into this tap.
+
+## Decision 29: failure paths
+
+| Case | Behavior |
+|---|---|
+| Non-owning farmer / stranger taps | Refused via `_is_farmer`, before any lookup (Decision 27). |
+| Malformed or tampered `callback_data` | `parse_why_callback_data` returns `None`, generic refusal, logged. |
+| `plot_id` doesn't resolve (shouldn't happen — plots are never deleted) | Generic refusal, logged at `ERROR` as a data-consistency check. |
+| No `DecisionRecord` for the exact `(plot_id, season_id, decision_date)` — pre-Part-0.5, or a same-day write failure | `why_not_recorded()` — honest, not a crash, not a guess (Decision 24). |
+| Escalation payload lost to a process restart before resolution (Gap B) | Button omitted at send time — see Decision 26. Nothing to fail at tap time, because there is no tap available. |
+| Double-tap / repeated tap | Answered identically every time — read-only, no dedup needed (Decision 28). |
+| Restart between send and tap | No effect — everything needed travels in `callback_data` plus `Storage`, no in-memory state to lose, same property `/linkfarmer`'s three-tap flow already has. |
+| A farmer merged into another record by `/linkfarmer` (Part 2) taps an old button sent before the merge | The merged-away `Farmer.telegram_chat_id` is now `None` (Part 2, `apply_link`) — `_is_farmer` fails closed, refusing even the original recipient's own chat. Disclosed, not fixed here: rare (`/linkfarmer` runs at most a handful of times per cluster), and the same tradeoff Part 2 already accepted for provenance over convenience at pilot scale. |
+| Weather/network unavailable | Not applicable by construction — this part makes no live calls (Decision 23). |
+| No `chat_id` for the farmer | Not applicable — a farmer with no reachable Telegram identity cannot have tapped a button in Telegram in the first place. |
+
+## Tests (`tests/test_farmer_why.py`, plus `tests/test_watcher.py`/`tests/test_webhook.py` additions)
+
+`why_not_ready_text`: a `DecisionRecord` present renders the correct
+percent (including the 99%-cap case, constructed with
+`accumulated_gdd == maturity_gdd_used`) and capacity sentence; no record
+renders `why_not_recorded()` byte-for-byte; `decision_date=""` short-
+circuits without a `Storage` call (Gap B shape, reused for symmetry even
+though `not_ready`'s own send path never produces an empty date).
+`why_lost_text`: a full escalated-and-lost record renders the same
+`winner_name`/`reason` a direct call to `resolution_reason()` with the
+same claim fields would produce (byte-identical, asserted directly, not
+just "looks similar"); missing `opponent_plot_id`/claim data each
+independently fall back to `why_not_recorded()`; no `DecisionRecord`
+falls back the same way.
+
+`handle_why_callback`: real owning farmer's tap succeeds and sends the
+expected text, for both `lost=True` and `lost=False`; a non-owning
+farmer's tap is refused, `send_message` never called, matching
+`test_farmer_authorization.py`'s existing pattern; malformed
+`callback_data` refused; unresolvable `plot_id` refused and logged;
+tapping twice sends the same answer twice (proving no unintended dedup
+was added); `answer_callback_query` is called on every path, including
+refusals (Telegram-correctness, not a business rule).
+
+`watcher.py`: a `TOO_GREEN` outcome's `send_not_ready` call now carries
+today's `decision_date`, asserted against the built keyboard's
+`callback_data`. `webhook.py`: the resolved-escalation happy path
+attaches a working `why_lost:` button with the escalation's real
+`decision_date`; the `escalation is None` (Gap B) path sends the loser's
+message with **no** `why_lost:` button in its `reply_markup` — asserted
+directly, not just "doesn't crash."
+
+No-Bedrock assertion for the whole module, same as every prior report/
+explain path in this project.
+
+## Consequences
+
+- A farmer told "not ready" or "you lost" now has a bounded, one-tap way
+  to hear the actual reason on record, in his own language, without
+  starting a conversation the system can't sustain.
+- The reason for a loss is now guaranteed byte-identical to what the
+  original message already said, because it's the same function call —
+  not a second, independently-worded narrative that could quietly drift
+  from the first over time.
+- Nothing here recomputes or projects anything live — every answer is a
+  direct read of a `DecisionRecord` already written at decision time,
+  same discipline as `explain_decision.py`, extended to the one audience
+  that script was never reachable by.
+- A decision made before 2026-08-19 (ADR-010 Part 0.5), or lost to a
+  write failure, now has an honest, farmer-facing "not recorded" answer
+  instead of no way to ask at all.
+- One real, disclosed gap remains open, not fixed here: an escalation
+  resolved after a process restart loses both its specific reason
+  *and*, now, its "why" button — a farmer in that situation is no worse
+  off than today, but no better off either. Acceptable at this project's
+  restart frequency; would need the escalation payload itself persisted
+  to close, which is out of scope for this part.
+- Two new farmer-owned callback prefixes (`why_notready:`, `why_lost:`)
+  join ADR-012's audit table at implementation, both authorization-
+  checked from the first commit, extending rather than breaking that
+  table's own discipline.
+
+## Sequence (Part 3)
+
+Implement `telegram/farmer_why.py`, the `decision_date` threading in
+`watcher.py`/`notify.py`, the two new callback handlers and their audit-
+table rows in `webhook.py`/ADR-012, full test coverage, run the whole
+suite — commit, then stop and report, with the Tamil dump (this part's
+new strings, printed via `scripts/print_tamil_strings.py`) delivered as
+a file path, per your standing instruction.
+
+## Resolved on review (2026-08-24)
+
+Two checks requested before implementation, both addressed in the code
+as shipped, not just reasoned about in the abstract:
+
+**Repeat taps days later.** A pure read is safe against corruption by
+construction — nothing to double-write. But safety from corruption
+isn't the same as clarity for the reader: a farmer tapping an old
+`not_ready` or `escalation_resolved_lost` message a week on, with no
+date in the answer, could read a fresh-arriving message as news about
+today. Fixed by threading `formatted_date` (`messages_*.format_date`,
+already used everywhere else a date reaches a farmer) into every "why"
+answer, opening every one of them — `why_not_ready_answer`,
+`why_lost_answer`, and `why_not_recorded` whenever a date is known.
+Decisions 24 and 25's code blocks above reflect the shipped signatures.
+
+**The not-ready answer's emphasis.** The original draft put the
+percent-grown sentence and the capacity sentence side by side as two
+independent facts, both farmer-relevant per the original request. On
+review, that reads as "you lost the queue" to a farmer whose crop
+genuinely isn't ready — false (a `TOO_GREEN` plot was never in the
+machine's capacity pool at all, `scheduling/solver.py` excludes it
+before capacity allocation runs) and worse for trust than saying
+nothing. Fixed by making the capacity clause an explicit, subordinate
+parenthetical that states directly it did not affect the plot, rather
+than a second sentence carrying equal weight. See Decision 25's full
+"Reconsidered on review" note for the exact wording change.
+
+Both checks were verified against the real, implemented functions —
+see the rendered examples in the implementation report, not
+hand-transcribed copies of the code above.
+
+**Two real Tamil grammar bugs found while generating those rendered
+examples, not by re-reading the draft — the second inside the fix for
+the first.** The original `why_not_ready_answer` built the locative
+"in N days" phrase by appending a hardcoded plural suffix ("களில்")
+onto whatever `_day_word` returned — correct for the plural case
+(நாட்கள் + களில் → நாட்களில், matching existing usage elsewhere in
+this file) but wrong for the singular: `_day_word(1)` returns "நாள்",
+and appending "களில்" produced "நாள்களில்" — the plural marker "கள்"
+grafted onto an already-singular word, not a real word. A single-
+usable-day trigger day (a tight-capacity day, exactly the scenario the
+second check asked to see rendered) would have shipped this. The first
+fix attempt (`f"{_day_word(n)}இல்"`, plain string concatenation of the
+base word and the locative suffix இல்) was itself wrong for the
+singular case for a different reason: நாள்'s locative sandhi is நாளில்
+(a single fused word), not "நாள்" followed by a separately-glyphed
+"இல்" ("நாள்இல்") — Tamil case suffixes are not always literal
+string-appends. Fixed properly by giving `_day_word` a `locative=True`
+mode that returns the correct fully-formed word per case (நாளில்/
+நாட்களில்), the same shape `adverbial=True` already used for
+நாளாக/நாட்களாக — not a third ad hoc concatenation attempt. Both
+languages' rendered output in the implementation report reflect this
+final fix.

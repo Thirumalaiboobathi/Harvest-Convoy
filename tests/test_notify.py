@@ -264,7 +264,7 @@ def test_send_harvest_scheduled_uses_farmer_chat_id() -> None:
 def test_send_degrades_gracefully_when_farmer_has_no_chat_id() -> None:
     client = _FakeClient()
     farmer = Farmer(farmer_id="f01", name="Muthu", cluster_id="c", telegram_chat_id=None)
-    result = notify.send_not_ready(client, farmer, _plot())
+    result = notify.send_not_ready(client, farmer, _plot(), season_id="2026-kuruvai", decision_date="2026-09-09")
     assert result.success is False
     assert client.sent == []
 

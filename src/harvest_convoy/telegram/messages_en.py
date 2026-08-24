@@ -202,6 +202,58 @@ def harvest_confirmation_prompt(area_acres: float, area_unit: str) -> str:
     )
 
 
+WHY_BUTTON_LABEL = "❓ Why?"
+
+
+def why_not_recorded(formatted_date: str | None = None) -> str:
+    """The one honest answer for every gap this feature can hit -- a
+    decision from before ADR-010 Part 0.5 shipped, a same-day
+    DecisionRecord write failure, or (why_lost_text only) an escalation
+    payload lost to a process restart. Not distinguished by cause here --
+    a one-tap terminal answer isn't the place for explain_decision.py's
+    cause-by-cause audit language. See ADR-013 Part 3, Decision 24."""
+    if formatted_date:
+        return (
+            f"We don't have a record of {formatted_date}'s decision to "
+            f"look back on, so we can't reconstruct why -- we won't guess."
+        )
+    return (
+        "We don't have a record of that day's decision to look back on, "
+        "so we can't reconstruct why -- we won't guess."
+    )
+
+
+def why_not_ready_answer(
+    formatted_date: str, pct_grown: int, capacity_budget_acres: float, usable_harvest_days: int,
+) -> str:
+    """Percent-grown carries the whole answer; capacity is explicitly
+    subordinated, not a second cause standing next to it -- a too_green
+    plot was never in the machine's capacity pool at all (solver.py
+    excludes it before capacity math runs), so juxtaposing a capacity
+    number without saying so would let a farmer read "the machine was
+    busy" as the reason his crop wasn't ready, which is false and worse
+    for trust than saying nothing. The parenthetical says this plainly.
+    See ADR-013 Part 3, Decision 25 (reconsidered on review 2026-08-24)."""
+    day_word = "day" if usable_harvest_days == 1 else "days"
+    return (
+        f"On {formatted_date}: your crop had reached about {pct_grown}% "
+        f"of the growth it needs before harvest -- that's why it wasn't "
+        f"ready that day. (For reference: that day the machine's total "
+        f"capacity across {usable_harvest_days} good {day_word} was about "
+        f"{capacity_budget_acres:.1f} acres -- this didn't affect your "
+        f"plot, which wasn't ready regardless.)"
+    )
+
+
+def why_lost_answer(formatted_date: str, winner_name: str, reason: str) -> str:
+    """`reason` is built by calling this same module's resolution_reason()
+    a second time, fed from the loser's own DecisionRecord -- guaranteed
+    byte-identical to what the original escalation_resolved_lost message
+    said, not an independently-worded restatement. See ADR-013 Part 3,
+    Decision 23."""
+    return f"On {formatted_date}, the machine went to {winner_name}'s plot instead -- {reason}."
+
+
 def escalation_resolved_won(area_acres: float, area_unit: str) -> str:
     return (
         f"Update: your {format_area(area_acres, area_unit)} plot has "

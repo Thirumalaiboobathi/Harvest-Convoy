@@ -184,6 +184,15 @@ def test_triggered_run_sends_notifications_and_marks_the_day_done(tmp_path, monk
     assert 102 in chat_ids_notified  # f2 -> chat_id 102
     assert 999 in chat_ids_notified  # operator route summary
 
+    # ADR-013 Part 3: p2's not_ready message carries a "why" button
+    # pinned to today's exact DecisionRecord key, not a stale or guessed
+    # date -- this is what makes the farmer's later tap resolvable.
+    not_ready_sends = [s for s in client.sent if s[0] == 102]
+    assert len(not_ready_sends) == 1
+    reply_markup = not_ready_sends[0][2]
+    callback_data = reply_markup["inline_keyboard"][0][0]["callback_data"]
+    assert callback_data == f"why_notready:p2:season-1:{TODAY.isoformat()}"
+
 
 def test_operator_route_summary_order_matches_farmer_route_positions(tmp_path, monkeypatch) -> None:
     """ADR-013 Prerequisite: the operator's route summary must number

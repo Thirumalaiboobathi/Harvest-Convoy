@@ -213,8 +213,35 @@ def send_harvest_scheduled(
     )
 
 
+def build_why_keyboard(
+    prefix: str, plot_id: str, season_id: str, decision_date: str, *, language: str = "ta"
+) -> dict:
+    """The farmer's own one-tap "why" button (ADR-013 Part 3) -- attached
+    to not_ready (prefix="why_notready") and to the loser's copy of
+    escalation_resolved_lost (prefix="why_lost") only. plot_id/season_id/
+    decision_date are the exact DecisionRecord key already known at send
+    time; carried whole in callback_data so nothing needs to be
+    re-resolved (or guessed) at tap time -- same "no in-memory state"
+    shape as every other bounded reply keyboard in this module. None of
+    the three fields can contain a colon, so this doesn't risk the
+    colon-splitting bug ADR-013 Part 2's Undo button hit."""
+    mod = _lang_module(language)
+    return {
+        "inline_keyboard": [[{
+            "text": mod.WHY_BUTTON_LABEL,
+            "callback_data": f"{prefix}:{plot_id}:{season_id}:{decision_date}",
+        }]]
+    }
+
+
 def send_not_ready(
-    client: TelegramClient, farmer: Farmer, plot: Plot, *, rain_event_classification: str = "none"
+    client: TelegramClient,
+    farmer: Farmer,
+    plot: Plot,
+    *,
+    season_id: str,
+    decision_date: str,
+    rain_event_classification: str = "none",
 ) -> SendResult:
     if farmer.telegram_chat_id is None:
         logger.error("no chat_id for farmer %s, cannot notify", farmer.farmer_id)
@@ -223,6 +250,9 @@ def send_not_ready(
         farmer.telegram_chat_id,
         build_not_ready_text(
             plot, language=farmer.language, rain_event_classification=rain_event_classification,
+        ),
+        reply_markup=build_why_keyboard(
+            "why_notready", plot.plot_id, season_id, decision_date, language=farmer.language,
         ),
     )
 
@@ -235,16 +265,30 @@ def send_escalation_resolved(
     *,
     other_farmer_name: str | None = None,
     reason: str | None = None,
+    season_id: str | None = None,
+    decision_date: str | None = None,
 ) -> SendResult:
     if farmer.telegram_chat_id is None:
         logger.error("no chat_id for farmer %s, cannot notify", farmer.farmer_id)
         return SendResult(success=False, error="farmer has no telegram_chat_id")
+    reply_markup = None
+    if not won and season_id is not None and decision_date is not None:
+        # ADR-013 Part 3, Decision 26, Gap B: decision_date is None
+        # whenever the escalation's in-memory payload was lost to a
+        # process restart before it was resolved -- the same case that
+        # already makes this message omit its specific reason clause. No
+        # button is attached rather than one that would deterministically
+        # answer "not recorded" every time it's tapped.
+        reply_markup = build_why_keyboard(
+            "why_lost", plot.plot_id, season_id, decision_date, language=farmer.language,
+        )
     return client.send_message(
         farmer.telegram_chat_id,
         build_escalation_resolved_text(
             plot, won, language=farmer.language,
             other_farmer_name=other_farmer_name, reason=reason,
         ),
+        reply_markup=reply_markup,
     )
 
 

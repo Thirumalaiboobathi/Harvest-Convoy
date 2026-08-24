@@ -386,7 +386,11 @@ def _send_notifications(
             # ADR-011 Part 3: reflected in the message only for a
             # SUSTAINED event -- BRIEF/NONE render byte-identical to the
             # existing wording, so the common case doesn't grow at all.
-            notify.send_not_ready(client, farmer, plot, rain_event_classification=rain_event_classification)
+            notify.send_not_ready(
+                client, farmer, plot,
+                season_id=season_id, decision_date=today.isoformat(),
+                rain_event_classification=rain_event_classification,
+            )
         elif outcome.outcome == PlotOutcome.FITS:
             decision = decisions_by_id[outcome.plot_id]
             notify.send_harvest_scheduled(client, farmer, plot, decision.route_position)

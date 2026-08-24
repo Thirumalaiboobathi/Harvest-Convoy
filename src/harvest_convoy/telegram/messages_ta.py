@@ -64,14 +64,22 @@ def format_date(d: date) -> str:
     return f"{d.day} {_MONTH_NAMES[d.month]} {d.year}"
 
 
-def _day_word(n: int, *, adverbial: bool = False) -> str:
+def _day_word(n: int, *, adverbial: bool = False, locative: bool = False) -> str:
     """நாள் (singular) / நாட்கள் (plural) -- Tamil count-noun agreement.
     `adverbial=True` gives the "for/as N days" case (நாளாக/நாட்களாக) used
-    in resolution_reason. Round-2 review caught "1 நாட்கள்" (plural with
-    the count 1) in overripe_phrase -- fixed here, and applied everywhere
-    else a day count is interpolated, not just the one spot flagged."""
+    in resolution_reason. `locative=True` gives the "in N days" case
+    (நாளில்/நாட்களில்) used in why_not_ready_answer (ADR-013 Part 3) --
+    a fully-formed word for each case, not string concatenation: நாள்'s
+    singular sandhi with இல் is நாளில், not "நாள்" + "இல்" glued
+    literally (that produces the ungrammatical "நாள்இல்") -- caught
+    while rendering an actual example for review, not by re-reading the
+    code. Round-2 review caught "1 நாட்கள்" (plural with the count 1) in
+    overripe_phrase -- fixed here, and applied everywhere else a day
+    count is interpolated, not just the one spot flagged."""
     if adverbial:
         return "நாளாக" if n == 1 else "நாட்களாக"
+    if locative:
+        return "நாளில்" if n == 1 else "நாட்களில்"
     return "நாள்" if n == 1 else "நாட்கள்"
 
 
@@ -364,6 +372,58 @@ def harvest_confirmation_prompt(area_acres: float, area_unit: str) -> str:
     )
     # "Did the machine come to your {area} plot today? Tap Yes or No
     #  below." -- DRAFT, pending native-speaker review (ADR-009 Part 2).
+
+
+WHY_BUTTON_LABEL = "❓ ஏன்?"
+# "Why?" -- DRAFT, pending native-speaker review (ADR-013 Part 3).
+
+
+def why_not_recorded(formatted_date: str | None = None) -> str:
+    # DRAFT, pending native-speaker review (ADR-013 Part 3).
+    if formatted_date:
+        return (
+            f"{formatted_date} அன்றைய முடிவு பதிவு செய்யப்படவில்லை, எனவே "
+            "காரணத்தை மீண்டும் கூற முடியாது -- நாங்கள் யூகிக்க மாட்டோம்."
+        )
+        # "{date}'s decision was not recorded, so we cannot restate the
+        #  reason -- we will not guess."
+    return (
+        "அந்த நாளின் முடிவு பதிவு செய்யப்படவில்லை, எனவே காரணத்தை "
+        "மீண்டும் கூற முடியாது -- நாங்கள் யூகிக்க மாட்டோம்."
+    )
+    # "That day's decision was not recorded, so we cannot restate the
+    #  reason -- we will not guess."
+
+
+def why_not_ready_answer(
+    formatted_date: str, pct_grown: int, capacity_budget_acres: float, usable_harvest_days: int,
+) -> str:
+    # DRAFT, pending native-speaker review (ADR-013 Part 3). Percent-
+    # grown carries the whole answer; the capacity clause explicitly
+    # says it did not affect this plot -- same reasoning as
+    # messages_en.py's why_not_ready_answer, see that docstring.
+    day_word_locative = _day_word(usable_harvest_days, locative=True)
+    return (
+        f"{formatted_date}: உங்கள் பயிர் அறுவடைக்குத் தேவையான "
+        f"வளர்ச்சியில் சுமார் {pct_grown}% ஐ எட்டியிருந்தது -- அன்று "
+        f"தயாராக இல்லாததற்கு அதுவே காரணம். (குறிப்புக்கு: அன்று "
+        f"இயந்திரத்தின் மொத்த திறன், {usable_harvest_days} நல்ல "
+        f"{day_word_locative}, சுமார் {capacity_budget_acres:.1f} ஏக்கர் -- "
+        f"இது உங்கள் வயலைப் பாதிக்கவில்லை, அது எப்படியிருந்தாலும் "
+        f"தயாராக இருக்கவில்லை.)"
+    )
+    # "{date}: your crop had reached about {pct}% of the growth needed
+    #  for harvest -- that is why it was not ready that day. (For
+    #  reference: that day the machine's total capacity, across {n} good
+    #  days, was about {x} acres -- this did not affect your plot, which
+    #  was not ready regardless.)"
+
+
+def why_lost_answer(formatted_date: str, winner_name: str, reason: str) -> str:
+    # DRAFT, pending native-speaker review (ADR-013 Part 3).
+    return f"{formatted_date} அன்று, இயந்திரம் {winner_name} உடைய வயலுக்குச் சென்றது -- {reason}."
+    # "On {date}, the machine went to {winner_name}'s plot instead --
+    #  {reason}."
 
 
 def escalation_resolved_won(area_acres: float, area_unit: str) -> str:

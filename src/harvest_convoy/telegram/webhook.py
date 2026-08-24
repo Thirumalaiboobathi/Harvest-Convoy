@@ -31,7 +31,14 @@ from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.storage import Storage
 from harvest_convoy.storage.fairness import record_bump
 from harvest_convoy.storage.interface import HarvestConfirmation, RouteOverride
-from harvest_convoy.telegram import notify, operator_enrollment, proxy_registration, registration, rollover
+from harvest_convoy.telegram import (
+    farmer_why,
+    notify,
+    operator_enrollment,
+    proxy_registration,
+    registration,
+    rollover,
+)
 from harvest_convoy.telegram.client import TelegramClient
 from harvest_convoy.telegram.registration import IncomingMessage
 
@@ -1463,6 +1470,72 @@ def handle_linkfarmer_undo_callback(
     client.answer_callback_query(callback_query_id, mod.linkfarmer_undone_toast())
 
 
+def parse_why_callback_data(data: str, expected_prefix: str) -> tuple[str, str, str] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != expected_prefix:
+        return None
+    _, plot_id, season_id, decision_date = parts
+    return plot_id, season_id, decision_date
+
+
+def _handle_why_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage, *, prefix: str, lost: bool,
+) -> None:
+    """ADR-013 Part 3: a farmer's one-tap "why" on a not_ready or
+    escalation_resolved_lost message. Read-only -- nothing here mutates
+    Storage, so a repeat tap on the same button (days later, twice in a
+    row, whatever) just replays the same honest answer; the keyboard is
+    deliberately never cleared after a tap, unlike every mutating
+    callback in this module. See telegram/farmer_why.py for the actual
+    lookup and rendering."""
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_why_callback_data(callback_query.get("data", ""), prefix)
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+
+    plot_id, season_id, decision_date = parsed
+    plot = storage.get_plot(plot_id)
+    farmer = storage.get_farmer(plot.farmer_id) if plot is not None else None
+    if plot is None or farmer is None:
+        logger.error("%s callback for unknown plot=%s -- refused", prefix, plot_id)
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+
+    if not _is_farmer(callback_query, farmer):
+        # ADR-012: this plot's own farmer only, checked before any
+        # lookup below -- the third farmer-owned callback class after
+        # confirm:/rollover:, same check, same refusal wording.
+        logger.warning(
+            "%s callback for plot=%s from a chat_id that doesn't match "
+            "the registered farmer -- refused",
+            prefix, plot_id,
+        )
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module(farmer.language).unrecognized_action(), show_alert=True,
+        )
+        return
+
+    client.answer_callback_query(callback_query_id)  # Telegram requires an answer either way
+    build_text = farmer_why.why_lost_text if lost else farmer_why.why_not_ready_text
+    client.send_message(
+        farmer.telegram_chat_id,
+        build_text(storage, plot_id, season_id, decision_date, language=farmer.language),
+    )
+
+
+def handle_why_notready_callback(client: TelegramClient, callback_query: dict, storage: Storage) -> None:
+    _handle_why_callback(client, callback_query, storage, prefix="why_notready", lost=False)
+
+
+def handle_why_lost_callback(client: TelegramClient, callback_query: dict, storage: Storage) -> None:
+    _handle_why_callback(client, callback_query, storage, prefix="why_lost", lost=True)
+
+
 def handle_callback_query(
     client: TelegramClient,
     callback_query: dict,
@@ -1629,6 +1702,13 @@ def handle_callback_query(
             client, farmer, plot, won=False,
             other_farmer_name=winner_name if winner_result else None,
             reason=reason,
+            season_id=season_id,
+            # EscalationPayload.decision_date defaults to "" (a payload
+            # built before ADR-010 Part 0.5, or hand-built without one) --
+            # normalized to None here so notify.py's "was a date ever
+            # known" check (Decision 26, Gap B) treats "" the same as
+            # "no escalation found at all," not as a real, empty date.
+            decision_date=(escalation.decision_date or None) if escalation is not None else None,
         )
     else:
         logger.error(
@@ -1680,8 +1760,10 @@ def handle_update(
     route to the operator-enrollment handlers (ADR-012 Part 2);
     "addfarmer_confirm:...", "linkfarmer_proxy:...", "linkfarmer_match:...",
     "linkfarmer_confirm:...", and "linkfarmer_undo:..." route to the
-    proxy-registration/linking handlers (ADR-013 Part 2); anything else
-    goes through the existing handle_callback_query escalation flow.
+    proxy-registration/linking handlers (ADR-013 Part 2);
+    "why_notready:..." and "why_lost:..." route to the farmer's own
+    read-only "why" answer (ADR-013 Part 3); anything else goes through
+    the existing handle_callback_query escalation flow.
     """
     if "callback_query" in update:
         callback_query = update["callback_query"]
@@ -1742,6 +1824,12 @@ def handle_update(
             return
         if data.startswith("linkfarmer_undo:"):
             handle_linkfarmer_undo_callback(client, callback_query, storage)
+            return
+        if data.startswith("why_notready:"):
+            handle_why_notready_callback(client, callback_query, storage)
+            return
+        if data.startswith("why_lost:"):
+            handle_why_lost_callback(client, callback_query, storage)
             return
         handle_callback_query(
             client, callback_query, storage, season_id, lookup_farmer_for_plot

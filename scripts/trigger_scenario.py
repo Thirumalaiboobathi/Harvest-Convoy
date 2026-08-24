@@ -254,7 +254,10 @@ def main() -> None:
     print(f"    success={result.success} error={result.error}")
 
     print("\n2/4 Sending 'no action needed' -- too-green (p07)...")
-    result = notify.send_not_ready(client, farmer_of("p07"), plots_by_id["p07"])
+    result = notify.send_not_ready(
+        client, farmer_of("p07"), plots_by_id["p07"],
+        season_id=CURRENT_SEASON_ID, decision_date=REFERENCE_TODAY.isoformat(),
+    )
     print(f"    success={result.success} error={result.error}")
 
     print("\n3/4 Sending operator route summary...")

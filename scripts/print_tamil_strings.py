@@ -343,10 +343,26 @@ def main() -> None:
     print("linkfarmer_undone_toast():", messages_ta.linkfarmer_undone_toast())
 
     print()
+    print("NEW (ADR-013 Part 3) -- farmer's own \"why?\" answers:")
+    print("WHY_BUTTON_LABEL:", messages_ta.WHY_BUTTON_LABEL)
+    print("why_not_recorded(None):", messages_ta.why_not_recorded(None))
+    formatted_date = messages_ta.format_date(date(2026, 9, 9))
+    print(f"why_not_recorded('{formatted_date}'):", messages_ta.why_not_recorded(formatted_date))
+    print(f"why_not_ready_answer('{formatted_date}', 58, 3.5, 1):")
+    print(messages_ta.why_not_ready_answer(formatted_date, 58, 3.5, 1))
+    print()
+    reason = messages_ta.resolution_reason(
+        bumped_winner=True, bumped_loser=False,
+        winner_days_past_maturity=1, loser_days_past_maturity=3,
+    )
+    print(f"why_lost_answer('{formatted_date}', 'Meena Subramani', reason):")
+    print(messages_ta.why_lost_answer(formatted_date, "Meena Subramani", reason))
+
+    print()
     print("=" * 70)
     print("End of Tamil string dump. See ADR-008 Decisions 14-16 for the")
     print("pre-existing strings' review history, and ADR-009 Parts 2-4,")
-    print("ADR-011, ADR-012, and ADR-013 (Parts 1-2) for the newer strings")
+    print("ADR-011, ADR-012, and ADR-013 (Parts 1-3) for the newer strings")
     print("above -- drafts, pending the same review process.")
     print("=" * 70)
 
