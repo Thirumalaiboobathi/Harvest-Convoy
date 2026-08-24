@@ -574,15 +574,43 @@ DEFAULT_WINNER_LABEL = "தேர்ந்தெடுக்கப்பட்�
 # "the selected plot" -- fallback when no farmer record was found for
 # the winning plot; same defensive-fallback pattern as
 # DEFAULT_OTHER_FARMER_LABEL above.
+#
+# TAMIL GRAMMAR RULE -- read this before adding a template that takes a
+# case marker after a name-or-fallback value: a proper noun (a real
+# person's name, kept untranslated) takes a case marker as its own,
+# spaced word -- "Kannan Raja க்கு". A genuine Tamil common noun instead
+# FUSES the case marker onto itself with sandhi -- வயல் (plot) + க்கு
+# (dative) is வயலுக்கு, never "வயல் க்கு". A template written for the
+# proper-noun shape (spaced marker) silently produces broken Tamil the
+# moment a common-noun fallback like this constant flows through it.
+# Found twice in this codebase this way -- see DEFAULT_WINNER_DATIVE
+# just below (escalation_resolved_assigned's fallback, fixed) and
+# ADR-013 Part 3's "Resolved on review" section for the sibling bug in
+# why_not_ready_answer's day-count suffix (same root cause, a different
+# case marker). If DEFAULT_WINNER_LABEL is ever passed through another
+# template that appends its own case marker at the call site (a grep
+# for "DEFAULT_WINNER_LABEL" will show every current use), that
+# template needs the same pre-formed-phrase treatment, not a suffix
+# appended to the bare noun.
+
+DEFAULT_WINNER_DATIVE = "தேர்ந்தெடுக்கப்பட்ட வயலுக்கு"
+# Pre-fused dative for the fallback case, per the rule above --
+# escalation_resolved_assigned is written for a proper noun's spaced
+# "{name} க்கு"; passing DEFAULT_WINNER_LABEL through that same
+# template produced "வயல் க்கு" (ungrammatical). This is the correct
+# fused form instead, used as a complete phrase, never suffixed again.
 
 
-def escalation_resolved_assigned(winner_name: str) -> str:
-    return f"இயந்திரம் {winner_name} க்கு ஒதுக்கப்பட்டது."
+def escalation_resolved_assigned(winner_name: str | None) -> str:
+    # winner_name=None means no farmer record was found for the winning
+    # plot -- uses the pre-fused DEFAULT_WINNER_DATIVE rather than
+    # gluing this function's own spaced "{name} க்கு" onto
+    # DEFAULT_WINNER_LABEL, which would be exactly the bug described
+    # above the constant.
+    dative_phrase = f"{winner_name} க்கு" if winner_name else DEFAULT_WINNER_DATIVE
+    return f"இயந்திரம் {dative_phrase} ஒதுக்கப்பட்டது."
     # "Machine assigned to {winner_name}." -- winner_name is a farmer's
     # name, a proper noun, not translated -- same rule as everywhere else.
-    # Callers pass DEFAULT_WINNER_LABEL, not an English fallback, when no
-    # farmer record was found -- otherwise this would be the exact same
-    # half-translation bug in a fallback path instead of the main one.
 
 
 def unrecognized_action() -> str:

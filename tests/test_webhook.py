@@ -131,6 +131,22 @@ def test_escalation_toast_text_follows_cluster_operator_language(tmp_path) -> No
     )
 
 
+def test_escalation_resolved_assigned_renders_correct_tamil_grammar_both_ways() -> None:
+    """A real farmer's name is a proper noun and takes a spaced case
+    marker ("{name} க்கு"); the no-farmer-found fallback is a genuine
+    Tamil common noun and must FUSE its case marker instead ("வயலுக்கு",
+    never "வயல் க்கு") -- see the grammar-rule comment beside
+    messages_ta.DEFAULT_WINNER_LABEL. Regression guard for the bug found
+    2026-08-24: the fallback used to flow through this function's
+    proper-noun template unchanged, producing "வயல் க்கு"."""
+    assert messages_ta.escalation_resolved_assigned("Kannan Raja") == (
+        "இயந்திரம் Kannan Raja க்கு ஒதுக்கப்பட்டது."
+    )
+    fallback_text = messages_ta.escalation_resolved_assigned(None)
+    assert fallback_text == "இயந்திரம் தேர்ந்தெடுக்கப்பட்ட வயலுக்கு ஒதுக்கப்பட்டது."
+    assert "வயல் க்கு" not in fallback_text
+
+
 def test_handle_update_dispatches_message_to_registration(tmp_path) -> None:
     storage = FileStorage(tmp_path / "storage.json")
     save_state(RegistrationState(chat_id=42))

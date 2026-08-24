@@ -2150,3 +2150,34 @@ mode that returns the correct fully-formed word per case (நாளில்/
 நாளாக/நாட்களாக — not a third ad hoc concatenation attempt. Both
 languages' rendered output in the implementation report reflect this
 final fix.
+
+**Follow-up sweep (2026-08-24) found the same root cause pre-existing
+elsewhere, outside this part's own diff.** A grep for the same
+"suffix appended to a variable word rather than the fully-formed word
+being selected" shape across `messages_ta.py` turned up
+`escalation_resolved_assigned` (ADR-005/008 era, untouched by ADR-013
+until now): its template, `f"இயந்திரம் {winner_name} க்கு
+ஒதுக்கப்பட்டது."`, is correct when `winner_name` is a real farmer's
+name (a proper noun takes a spaced case marker) but wrong when the
+caller substitutes `DEFAULT_WINNER_LABEL` — a genuine Tamil common
+noun — for the rare case where the winning plot's farmer can't be
+resolved: "வயல் க்கு" instead of the grammatically required fused
+"வயலுக்கு". Fixed the way you asked — not by changing the template
+(which is correct for the common case it was built for), but by never
+letting the bare fallback noun reach it: `escalation_resolved_assigned`
+now takes `winner_name: str | None`, and `None` selects a new
+pre-fused constant, `DEFAULT_WINNER_DATIVE`, directly — the same shape
+`DEFAULT_OTHER_FARMER_LABEL` already used for exactly this reason. The
+general rule (proper nouns take a spaced case marker, common nouns
+fuse) is now recorded as a comment beside `DEFAULT_WINNER_LABEL` in
+`messages_ta.py`, flagged for whoever adds the next string built the
+same way. `webhook.py`'s call site was updated to pass `None` instead
+of pre-resolving to the fallback label, and `messages_en.py`'s
+counterpart was widened to `str | None` to keep the two languages'
+signatures matching (English has no case-agreement to get wrong, but a
+divergent signature between the two modules is its own hazard).
+`route_drop_confirm_prompt` (webhook.py's other `DEFAULT_WINNER_LABEL`
+call site, a hyphenated genitive `-ன்` rather than a dative) was found
+to have the identical latent shape and was deliberately **not** fixed
+here — flagged, not silently bundled into an otherwise small, single-
+purpose commit.

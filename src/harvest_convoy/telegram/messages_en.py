@@ -365,8 +365,13 @@ def escalation_already_resolved() -> str:
 DEFAULT_WINNER_LABEL = "the selected plot"
 
 
-def escalation_resolved_assigned(winner_name: str) -> str:
-    return f"Machine assigned to {winner_name}."
+def escalation_resolved_assigned(winner_name: str | None) -> str:
+    # winner_name=None means no farmer record was found for the winning
+    # plot. English has no case-marker agreement to get wrong here, but
+    # the signature stays str | None (not a caller-side DEFAULT_WINNER_
+    # LABEL substitution) to match messages_ta.py's -- see that module's
+    # comment beside DEFAULT_WINNER_LABEL for why Tamil needs this.
+    return f"Machine assigned to {winner_name or DEFAULT_WINNER_LABEL}."
 
 
 def unrecognized_action() -> str:

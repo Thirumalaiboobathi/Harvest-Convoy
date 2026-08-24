@@ -1644,7 +1644,14 @@ def handle_callback_query(
 
     _RESOLVED_ESCALATIONS.add(key)
 
-    winner_name = winner_result[0].name if winner_result else mod.DEFAULT_WINNER_LABEL
+    # None (not mod.DEFAULT_WINNER_LABEL) when no farmer record was
+    # found for the winning plot -- escalation_resolved_assigned picks
+    # its own correctly-grammared fallback phrase for that case. See
+    # messages_ta.py's comment beside DEFAULT_WINNER_LABEL: substituting
+    # the bare fallback noun here and letting this function's own
+    # spaced "{name} க்கு" template suffix it produced ungrammatical
+    # Tamil (fixed 2026-08-24).
+    winner_name = winner_result[0].name if winner_result else None
     client.answer_callback_query(
         callback_query_id, mod.escalation_resolved_assigned(winner_name)
     )
