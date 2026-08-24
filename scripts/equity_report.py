@@ -98,6 +98,18 @@ class SeasonEquitySection:
     # with the escalation/override split as the nuance underneath it.
     # See ADR-013 Decision 6/10.
     bumps_by_decided_by: dict[str, int]
+    # Proxy registration (ADR-013 Part 2): who registered each of this
+    # cluster's current plots. Current-roster caveat applies here too
+    # (Plot has no season dimension, same as registered_plot_count).
+    # Split into notification-less (still telegram_chat_id=None -- the
+    # farmer has never been reachable on Telegram) versus linked (a
+    # /linkfarmer tap has since bound a real chat_id onto this farmer_id)
+    # so a reader doesn't mistake a notification-less plot's blank
+    # confirmation/rollover columns for farmer non-responsiveness.
+    proxy_registered_plot_ids: list[str]
+    proxy_registered_acres: float
+    proxy_registered_notification_less_plot_ids: list[str]
+    proxy_registered_linked_plot_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -223,6 +235,18 @@ def _build_season_section(
             if entry.season_id == season_id and entry.days_bumped > 0:
                 bumps_by_decided_by[entry.decided_by] = bumps_by_decided_by.get(entry.decided_by, 0) + 1
 
+    # Proxy registration (ADR-013 Part 2).
+    farmers_by_id = {f.farmer_id: f for f in storage.get_farmers_for_cluster(cluster_id)}
+    proxy_plots = [p for p in plots if p.registered_by != "self"]
+    proxy_notification_less = []
+    proxy_linked = []
+    for p in proxy_plots:
+        farmer = farmers_by_id.get(p.farmer_id)
+        if farmer is not None and farmer.telegram_chat_id is not None:
+            proxy_linked.append(p.plot_id)
+        else:
+            proxy_notification_less.append(p.plot_id)
+
     return SeasonEquitySection(
         season_id=season_id,
         served_plot_ids=sorted(served_plot_ids),
@@ -257,6 +281,10 @@ def _build_season_section(
         route_overrides_modified_with_drop=route_modified_with_drop,
         route_override_acceptance_rate=route_acceptance_rate,
         bumps_by_decided_by=bumps_by_decided_by,
+        proxy_registered_plot_ids=sorted(p.plot_id for p in proxy_plots),
+        proxy_registered_acres=_acres(proxy_plots),
+        proxy_registered_notification_less_plot_ids=sorted(proxy_notification_less),
+        proxy_registered_linked_plot_ids=sorted(proxy_linked),
     )
 
 
@@ -395,6 +423,18 @@ def _render_section_text(s: SeasonEquitySection) -> list[str]:
             "hypothetical fully-automatic path (unused in this codebase today); "
             "operator_escalation is a human breaking a tie the agent asked for help on; "
             "operator_override is a human reversing a decision the agent was confident about."
+        )
+    if not s.proxy_registered_plot_ids:
+        lines.append("    Proxy-registered plots: none -- every current plot is self-registered.")
+    else:
+        lines.append(
+            f"    Proxy-registered plots (ADR-013 Part 2, current roster): "
+            f"{len(s.proxy_registered_plot_ids)} plot(s), {s.proxy_registered_acres:g} acres "
+            f"-- {len(s.proxy_registered_notification_less_plot_ids)} still notification-less "
+            f"{s.proxy_registered_notification_less_plot_ids} (blank confirmation/rollover "
+            f"columns above are expected for these, not non-responsiveness), "
+            f"{len(s.proxy_registered_linked_plot_ids)} since linked to a real chat_id "
+            f"{s.proxy_registered_linked_plot_ids}."
         )
     return lines
 

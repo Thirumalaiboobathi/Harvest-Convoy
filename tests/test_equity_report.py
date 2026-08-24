@@ -476,3 +476,52 @@ def test_bumps_by_decided_by_distinguishes_escalation_from_override(tmp_path) ->
     section = result.sections[0]
 
     assert section.bumps_by_decided_by == {"operator_escalation": 1, "operator_override": 1}
+
+
+def test_proxy_registered_section_distinguishes_notification_less_from_linked(tmp_path) -> None:
+    """ADR-013 Part 2 Decision 17: a self-registered plot, a still-
+    notification-less proxy plot, and a since-linked proxy plot must all
+    be classified distinctly -- not collapsed into one count."""
+    from dataclasses import replace
+
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+
+    storage.put_farmer(_farmer("f-self"))
+    storage.put_plot(_plot("p-self", "f-self", 2.0))  # registered_by="self" default
+
+    storage.put_farmer(Farmer(farmer_id="farmer-proxy-aaa", name="Not Yet Linked", cluster_id="c1"))
+    storage.put_plot(replace(
+        _plot("plot-proxy-aaa", "farmer-proxy-aaa", 1.5),
+        registered_by="operator:999",
+    ))
+
+    storage.put_farmer(Farmer(
+        farmer_id="farmer-proxy-bbb", name="Since Linked", cluster_id="c1", telegram_chat_id=777,
+    ))
+    storage.put_plot(replace(
+        _plot("plot-proxy-bbb", "farmer-proxy-bbb", 3.0),
+        registered_by="operator:999",
+    ))
+
+    result = equity_report.build_result(storage, cluster_id="c1", season_ids=[SEASON])
+    section = result.sections[0]
+
+    assert section.proxy_registered_plot_ids == ["plot-proxy-aaa", "plot-proxy-bbb"]
+    assert section.proxy_registered_acres == 4.5
+    assert section.proxy_registered_notification_less_plot_ids == ["plot-proxy-aaa"]
+    assert section.proxy_registered_linked_plot_ids == ["plot-proxy-bbb"]
+
+
+def test_no_proxy_registrations_reports_empty_lists(tmp_path) -> None:
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    storage.put_farmer(_farmer("f1"))
+    storage.put_plot(_plot("p1", "f1", 2.0))
+
+    result = equity_report.build_result(storage, cluster_id="c1", season_ids=[SEASON])
+    section = result.sections[0]
+
+    assert section.proxy_registered_plot_ids == []
+    assert section.proxy_registered_notification_less_plot_ids == []
+    assert section.proxy_registered_linked_plot_ids == []

@@ -709,3 +709,23 @@ def test_drying_alert_fires_from_within_the_real_run_daily_watch_pipeline(
     chat_ids_sent = {c for c, _, _ in client.sent}
     assert 101 in chat_ids_sent
     assert storage.get_harvest_confirmation("p1", SEASON).drying_alert_sent is True
+
+
+def test_apply_rollover_exclusion_excludes_a_retired_plot_but_leaves_it_in_storage(tmp_path) -> None:
+    """ADR-013 Part 2 Decision 18: a plot retired by /linkfarmer must
+    drop out of the schedulable pool at the same call sites rollover
+    exclusion already uses, but stay visible via get_plots_for_cluster
+    for the equity report -- filtered at read time, never deleted."""
+    from dataclasses import replace
+
+    storage = FileStorage(tmp_path / "s.json")
+    live_plot = _plot("p1", "f1", 5)
+    retired_plot = replace(_plot("p2", "f2", 5), retired_reason="linked_to:farmer-proxy-abc123")
+    _seed(storage, [live_plot, retired_plot], [_farmer("f1"), _farmer("f2")])
+
+    excluded = watcher_mod._apply_rollover_exclusion(storage, "c1", SEASON)
+
+    assert {p.plot_id for p in excluded} == {"p1"}
+    # Still present via the plain lookup -- never deleted.
+    assert storage.get_plot("p2") is not None
+    assert storage.get_plot("p2").retired_reason == "linked_to:farmer-proxy-abc123"

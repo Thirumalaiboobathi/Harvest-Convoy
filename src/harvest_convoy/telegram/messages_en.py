@@ -504,3 +504,88 @@ def route_dropped_notice(area_acres: float, area_unit: str) -> str:
         f"plot today. Your plot goes back into the normal pool for the "
         f"next route, with no guarantee of going first."
     )
+
+
+# --- Proxy registration and farmer linking (ADR-013 Part 2) ---
+# /addfarmer and /linkfarmer are both operator-only, text-command
+# entry points into otherwise taps-only flows -- same class of input as
+# /operator <code> (ADR-012 Part 2), never farmer-facing.
+
+def operator_only_command() -> str:
+    return "Only the operator can use this command."
+
+
+def addfarmer_farmer_name_prompt() -> str:
+    return "What is the farmer's name?"
+
+
+def addfarmer_contact_note_prompt() -> str:
+    return (
+        "Type a contact number or note if there is one, otherwise type "
+        "'skip'."
+    )
+
+
+def addfarmer_has_phone_prompt() -> str:
+    return "Does this farmer have a mobile phone with Telegram?"
+
+
+def addfarmer_confirm_summary(name: str, village: str, area_text: str, date_text: str) -> str:
+    return f"Register {name}, {village}, {area_text}, transplanted {date_text}?"
+
+
+def addfarmer_registered_toast() -> str:
+    return "Registered."
+
+
+def addfarmer_cancelled() -> str:
+    return "Registration cancelled -- nothing was saved."
+
+
+def addfarmer_nothing_pending() -> str:
+    return "No registration in progress. Send /addfarmer to start one."
+
+
+def addfarmer_complete_no_phone(name: str) -> str:
+    return (
+        f"Registration complete. Since {name} has no phone, you'll need "
+        f"to inform them directly."
+    )
+
+
+def addfarmer_complete_has_phone(name: str) -> str:
+    return (
+        f"Registration complete. Since {name} has no phone, you'll need "
+        f"to inform them directly. If they later get their own phone and "
+        f"message this bot themselves, use /linkfarmer to connect the "
+        f"two records."
+    )
+
+
+def linkfarmer_nothing_to_link() -> str:
+    return "There is no farmer to link."
+
+
+def linkfarmer_pick_proxy_prompt() -> str:
+    return "Which farmer do you want to link?"
+
+
+def linkfarmer_pick_match_prompt(proxy_name: str) -> str:
+    return f"Link {proxy_name} with which self-registered farmer?"
+
+
+def linkfarmer_confirm_prompt(proxy_name: str, candidate_name: str) -> str:
+    return (
+        f"Link {proxy_name} (registered by you) with {candidate_name} "
+        f"(self-registered)? {candidate_name}'s separate plot will stop "
+        f"being scheduled -- {proxy_name}'s existing plot continues, now "
+        f"reaching them directly on Telegram."
+    )
+
+
+def linkfarmer_linked_toast() -> str:
+    return "Linked."
+
+
+def linkfarmer_cancelled_toast() -> str:
+    return "Cancelled -- nothing was linked."

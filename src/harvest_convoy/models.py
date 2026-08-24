@@ -23,6 +23,13 @@ class Farmer:
     # this key falls through to the dataclass default in both storage
     # backends, no migration needed.
     language: Literal["ta", "en"] = "ta"
+    # ADR-013 Part 2, Decision 13/17: a proxy registration's operator
+    # jots this down verbatim (a phone number, "no phone", a relative's
+    # number) for his own reference and the equity report's provenance
+    # story. Never used to attempt a Telegram send -- the Bot API cannot
+    # address a chat_id it has never received an inbound message from,
+    # so this is not, and can never become, a usable send target.
+    contact_note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +47,26 @@ class Plot:
     # area_acres stays canonical; no downstream math reads this field.
     # See ADR-008 Decision 9.
     area_unit: Literal["acre", "cent"] = "acre"
+    # ADR-013 Part 2: message 1 of the four-message registration flow
+    # asks for this but, before this field existed, discarded it --
+    # registration.py:6-14's own docstring says it was only ever asked
+    # to make the greeting read conversationally. None means "asked
+    # before this field existed," not "no village." Now persisted for
+    # both self- and proxy-registration going forward.
+    village: str | None = None
+    # "self" (the only path before ADR-013 Part 2) or
+    # f"operator:{operator_chat_id}" for a proxy registration. See
+    # ADR-013 Part 2 Decision 17.
+    registered_by: str = "self"
+    # ISO timestamp. None for every row written before this field
+    # existed -- an honest "not recorded," not "unknown origin."
+    registered_at: str | None = None
+    # Set only by ADR-013 Part 2 Decision 18's operator-tap link action,
+    # on the losing (duplicate) side of a link: f"linked_to:{canonical
+    # farmer_id}". A plot with this set is excluded from scheduling but
+    # never removed from storage -- filtered at read time, same
+    # discipline as rollover exclusion, never deleted.
+    retired_reason: str | None = None
 
 
 @dataclass(frozen=True)

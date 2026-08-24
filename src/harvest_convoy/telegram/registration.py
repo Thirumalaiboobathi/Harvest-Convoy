@@ -35,7 +35,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Literal
 
@@ -352,17 +352,60 @@ def save_state(state: RegistrationState) -> None:
     _STATE_STORE[state.chat_id] = state
 
 
+def find_farmer_by_chat_id(storage: Storage, cluster_id: str, chat_id: int) -> Farmer | None:
+    """Linear scan over the cluster's farmers -- fine at pilot scale,
+    same reasoning operator_enrollment.matches_pending already relies on
+    for its own in-memory scan. Used so a chat_id that already has a
+    record (an earlier self-registration, or one bound by ADR-013 Part
+    2's /linkfarmer onto a proxy-registered farmer_id) is recognized
+    regardless of how that farmer_id was originally derived -- see
+    _resolve_registration_target below."""
+    for farmer in storage.get_farmers_for_cluster(cluster_id):
+        if farmer.telegram_chat_id == chat_id:
+            return farmer
+    return None
+
+
+def _resolve_registration_target(
+    storage: Storage, cluster_id: str, chat_id: int
+) -> tuple[str, str]:
+    """Returns the (farmer_id, plot_id) this registration should write
+    to. ADR-009's Prerequisite established "same derived ID -> update,
+    not duplicate" for the ordinary farmer-{chat_id} case. ADR-013 Part
+    2 generalizes this to "same telegram_chat_id -> update, not
+    duplicate" regardless of ID derivation, because a proxy-registered
+    farmer_id (farmer-proxy-{hex}) is not of that form at all -- once
+    /linkfarmer binds a real chat_id onto one, a second registration
+    attempt from that same phone must update that farmer_id, not mint a
+    fresh farmer-{chat_id} duplicate. This is safe from resurrecting an
+    already-linked-away duplicate: link_farmer.apply_link clears the
+    losing side's own telegram_chat_id when it links, so at most one
+    farmer in this cluster ever holds a given chat_id at a time -- this
+    lookup is never ambiguous."""
+    existing = find_farmer_by_chat_id(storage, cluster_id, chat_id)
+    if existing is not None:
+        plot = next(
+            (p for p in storage.get_plots_for_cluster(cluster_id) if p.farmer_id == existing.farmer_id),
+            None,
+        )
+        if plot is not None:
+            return existing.farmer_id, plot.plot_id
+    return f"farmer-{chat_id}", f"plot-{chat_id}"
+
+
 def _persist_completed_registration(
     new_state: RegistrationState, incoming: IncomingMessage, storage: Storage
 ) -> str:
     """Called only on the step-transitions-into-COMPLETE edge. Persists a
-    Farmer/Plot with deterministic IDs (farmer-{chat_id}/plot-{chat_id})
-    -- an upsert, so a second completed registration from the same
-    chat_id updates them rather than duplicating or being rejected, per
-    ADR-009's Prerequisite: one Telegram chat is one farmer's one active
-    plot in this system's model, whether the reason for registering
-    again is a typo five minutes later or a new season five months
-    later. Then tries to compose the one-sentence maturity projection.
+    Farmer/Plot at whatever (farmer_id, plot_id) _resolve_registration_target
+    says to use -- an upsert, so a second completed registration from the
+    same chat_id updates them rather than duplicating or being rejected,
+    per ADR-009's Prerequisite: one Telegram chat is one farmer's one
+    active plot in this system's model, whether the reason for
+    registering again is a typo five minutes later or a new season five
+    months later (or, per ADR-013 Part 2, the chat_id was linked onto a
+    proxy-registered farmer_id in between). Then tries to compose the
+    one-sentence maturity projection.
 
     Never raises, never blocks registration: cluster misconfiguration,
     a storage write failure, or a WeatherError all degrade to returning
@@ -389,15 +432,28 @@ def _persist_completed_registration(
         return lang.COMPLETE_MESSAGE
 
     name = (incoming.sender_name or "").strip() or f"Farmer {new_state.chat_id}"
+    farmer_id, plot_id = _resolve_registration_target(storage, cluster_id, new_state.chat_id)
+    # Provenance (registered_by/registered_at) describes origin, not
+    # last-touch: a re-registration from the same chat_id (a typo fix, a
+    # new season, or -- ADR-013 Part 2 -- a chat_id /linkfarmer already
+    # bound onto a proxy-registered plot) must not overwrite a real
+    # "operator:{chat_id}" origin with "self" just because the farmer
+    # himself is the one touching it now. Preserved from the existing
+    # plot when there is one; set fresh only for a genuinely new plot.
+    existing_plot = storage.get_plot(plot_id)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    registered_by = existing_plot.registered_by if existing_plot is not None else "self"
+    registered_at = existing_plot.registered_at if existing_plot is not None else now_iso
     farmer = Farmer(
-        farmer_id=f"farmer-{new_state.chat_id}", name=name, cluster_id=cluster_id,
+        farmer_id=farmer_id, name=name, cluster_id=cluster_id,
         telegram_chat_id=new_state.chat_id, language=new_state.language,
     )
     plot = Plot(
-        plot_id=f"plot-{new_state.chat_id}", farmer_id=farmer.farmer_id,
+        plot_id=plot_id, farmer_id=farmer.farmer_id,
         cluster_id=cluster_id, lat=new_state.lat, lon=new_state.lon,
         crop=CROP, variety=VARIETY, transplant_date=new_state.transplant_date,
         area_acres=new_state.area_acres, area_unit=new_state.area_unit,
+        village=new_state.village, registered_by=registered_by, registered_at=registered_at,
     )
     farmer_result = storage.put_farmer(farmer)
     plot_result = storage.put_plot(plot)

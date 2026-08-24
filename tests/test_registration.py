@@ -435,6 +435,11 @@ def test_registration_completion_persists_farmer_and_plot(monkeypatch, tmp_path)
     assert plot.farmer_id == "farmer-90001"
     assert plot.transplant_date == date(2026, 5, 18)
     assert plot.area_acres == 2.5
+    # ADR-013 Part 2: village is now persisted (previously asked and
+    # discarded), and provenance is recorded even for self-registration.
+    assert plot.village == "Kamatchipuram"
+    assert plot.registered_by == "self"
+    assert plot.registered_at is not None
 
 
 def test_registration_completion_uses_telegram_sender_name(monkeypatch, tmp_path) -> None:
@@ -559,3 +564,68 @@ def test_second_registration_from_same_chat_id_updates_existing_plot(
     assert updated_plot.transplant_date == date(2026, 6, 20)
     assert updated_plot.area_acres == 4.0
     assert len(storage.get_plots_for_cluster("c1")) == 1
+
+
+def test_re_registration_after_linkfarmer_updates_the_canonical_proxy_plot_not_the_retired_duplicate(
+    monkeypatch, tmp_path,
+) -> None:
+    """ADR-013 Part 2 Decision 18: generalizes ADR-009's "same chat_id ->
+    update, not duplicate" rule from ID-derivation to a live lookup.
+    Simulates the state after a real /linkfarmer link: a proxy-registered
+    farmer_id now holds the real chat_id, and the original duplicate
+    farmer-{chat_id}/plot-{chat_id} has been retired with its own
+    telegram_chat_id cleared (apply_link's actual behavior -- see
+    link_farmer.apply_link). A second self-registration from that same
+    chat_id must update the canonical proxy record, not resurrect the
+    retired duplicate by blindly re-minting farmer-{chat_id}."""
+    from harvest_convoy.models import Farmer, Plot
+
+    monkeypatch.setenv("HARVEST_CONVOY_CLUSTER_ID", "c1")
+    storage = FileStorage(tmp_path / "s.json")
+    storage.put_cluster(_cluster())
+    monkeypatch.setattr(
+        registration, "project_maturity_for_plot", lambda plot, cluster: "2026-08-20"
+    )
+    chat_id = 90009
+
+    # The proxy record (already linked -- has the real chat_id) and the
+    # retired duplicate it was linked from.
+    storage.put_farmer(Farmer(
+        farmer_id="farmer-proxy-abc123", name="Original Name", cluster_id="c1",
+        telegram_chat_id=chat_id,
+    ))
+    storage.put_plot(Plot(
+        plot_id="plot-proxy-abc123", farmer_id="farmer-proxy-abc123", cluster_id="c1",
+        lat=9.87, lon=77.46, crop="paddy", variety="ADT45",
+        transplant_date=date(2026, 5, 1), area_acres=2.5,
+        registered_by="operator:999", registered_at="2026-01-01T00:00:00+00:00",
+    ))
+    storage.put_farmer(Farmer(
+        farmer_id=f"farmer-{chat_id}", name="Original Name", cluster_id="c1",
+        telegram_chat_id=None,  # cleared by apply_link
+    ))
+    storage.put_plot(Plot(
+        plot_id=f"plot-{chat_id}", farmer_id=f"farmer-{chat_id}", cluster_id="c1",
+        lat=9.87, lon=77.46, crop="paddy", variety="ADT45",
+        transplant_date=date(2026, 5, 1), area_acres=2.5,
+        retired_reason="linked_to:farmer-proxy-abc123",
+    ))
+
+    _complete_registration(chat_id, storage, transplant_text="20 June 2026, 4.0 acres")
+
+    # The canonical proxy plot is the one that changed.
+    canonical_plot = storage.get_plot("plot-proxy-abc123")
+    assert canonical_plot.transplant_date == date(2026, 6, 20)
+    assert canonical_plot.area_acres == 4.0
+    # Provenance preserved -- this plot's origin is still the operator's,
+    # not overwritten to "self" just because the farmer touched it now.
+    assert canonical_plot.registered_by == "operator:999"
+    assert canonical_plot.registered_at == "2026-01-01T00:00:00+00:00"
+
+    # The retired duplicate is untouched -- not resurrected.
+    retired_plot = storage.get_plot(f"plot-{chat_id}")
+    assert retired_plot.transplant_date == date(2026, 5, 1)
+    assert retired_plot.retired_reason == "linked_to:farmer-proxy-abc123"
+
+    # Still exactly two plots in the cluster -- no third was created.
+    assert len(storage.get_plots_for_cluster("c1")) == 2

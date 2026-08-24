@@ -1,9 +1,11 @@
-# ADR-013: Route Proposal and Operator Override — Authority Without Gatekeeping
+# ADR-013: Route Proposal, Operator Override, and Proxy Registration
 
-- Status: **Approved, with two corrections (2026-08-23).** See
-  "Resolved on review" at the end of this document for what changed
+- Status: **Part 1 — Approved, with two corrections (2026-08-23),
+  implemented.** See "Resolved on review" below Part 1 for what changed
   from the original proposal and why, before implementation began.
-- Date: 2026-08-23
+  **Part 2 — Approved, with Decision 18 replaced (2026-08-23).** See
+  "Resolved on review" at the end of this document.
+- Date: 2026-08-23 (Part 1); 2026-08-23 (Part 2)
 
 ## Context
 
@@ -739,12 +741,760 @@ began, all initiated by your review, not left as open questions:
    Both existing `record_bump` call sites in `webhook.py` (escalation
    win/loss) updated accordingly.
 
-## Sequence
+## Sequence (Part 1)
 
 Prerequisite fix (operator route-sequence bug) — commit, stop, report.
 Then Decisions 1–11 as one unit (entity, proposal framing, Accept,
 Modify/swap/drop/Done, the fairness-bump distinction and schema
 changes, authorization, failure paths, equity report + explain_decision
-surfacing, Tamil strings) — commit, stop, report. **This document is
-Part 1 in full; awaiting explicit go-ahead before any of it is
-implemented**, per your instruction.
+surfacing, Tamil strings) — commit, stop, report. **Implemented; both
+commits landed 2026-08-23.**
+
+---
+
+# Part 2: Proxy Registration for Phone-less Farmers
+
+## Context
+
+Part 1 assumed every farmer already exists in the system. Getting a
+farmer into the system at all currently means he personally completes
+a four-message Telegram exchange (`telegram/registration.py`) — village
+name, a shared GPS pin, a yes/no crop confirmation, then a transplant
+date and area. For a pilot of eight farmers per cluster, that is real
+friction on its own, and it has a harder floor under it: **some
+farmers will not have a smartphone at all**, and the current system has
+no path for them to be registered by anyone else. That is not a rough
+edge, it is a wall — a phone-less farmer cannot get past message one,
+ever, under the current design. This part exists to remove that wall.
+
+Read `telegram/registration.py`, `models.py` (`Farmer`/`Plot`),
+`telegram/operator_enrollment.py`, ADR-009's Prerequisite (the
+"update, not duplicate" rule), and ADR-011 Part 1 Decision 2 (the
+rollover exclusion filter) before reading further — this part leans on
+the exact mechanics of all four.
+
+**A relevant existing gap, found while reading `registration.py`, not
+fixed here**: the four-message flow asks for the village name
+(message 1) purely to make the greeting read conversationally
+(`registration.py:6-14`'s own docstring) and **never persists it** —
+`Plot` has no `village` field; only `lat`/`lon` are kept. The
+instruction for this part names "village, plot location, crop,
+transplant date and area" as the four pieces a proxy supplies, which
+means a proxy-registered `Plot` needs somewhere to put a village name
+if it's going to be collected at all. Rather than replicate a
+discard-after-asking into a second flow, **Decision 17 adds a real
+`village: str | None` field to `Plot`** and starts populating it for
+both proxy and (going forward) self-registration. This is a small,
+independent, backward-compatible addition, not a prerequisite bug —
+existing rows simply read `village=None`, "asked before this field
+existed" being the honest gap, same treatment as every other
+first-appearance-of-a-field case in this project. Flagging it as its
+own line item rather than silently bundling it into "the same four
+things" without comment.
+
+## Decision 12: who may register a plot on a farmer's behalf — operator-only, no helper role
+
+**Decided: for this pilot, only the cluster's registered operator
+(`Cluster.operator_chat_id`, the identity ADR-012 already
+authenticates) may proxy-register a farmer. No separate "helper" role
+is built.**
+
+Justification: a helper role is not free — it would need its own
+provisioning mechanism (a code to hand out, exactly like
+`operator_enrollment.py`'s `/operator <code>` flow, since there is no
+other trust-establishing mechanism anywhere in this codebase), its own
+revocation story (what happens when a helper leaves — a question this
+project has never had to answer for the operator role itself, which
+has no revocation path today either), its own row shape in the
+authorization audit, and its own failure paths (a helper registering a
+farmer who's actually the operator's rival, a helper who mis-enters
+data with no one double-checking it). That is a second enrollment
+system, not a small addition, for a role whose necessity is
+speculative at eight farmers per cluster: the same operator who
+already drives the route past every farmer's field, and who ADR-012
+already trusts with route overrides and escalation resolution, is a
+plausible sole point of intake for a handful of phone-less
+registrations too. **Building a general-purpose role system for a need
+this pilot hasn't demonstrated is exactly the premature abstraction
+this project's own discipline refuses elsewhere** (CLAUDE.md: "don't
+design for hypothetical future requirements").
+
+If a real pilot surfaces a cluster where the operator genuinely cannot
+reach every phone-less farmer himself (a large cluster, an operator
+who doesn't cover the whole geographic area), that is real evidence a
+helper role is needed — revisit then, with a real cluster's actual
+shape to design against, rather than now, against a hypothesis.
+
+## Decision 13: the flow — `/addfarmer`, operator-initiated, reusing registration's own shape
+
+**Entry point**: the operator, from his own already-enrolled chat,
+sends `/addfarmer` as a plain text command — checked in
+`webhook.handle_update` at the exact same point as `/operator <code>`
+(`webhook.py:1477`, before any rollover/registration free-text
+routing), so it can never be misparsed as a farmer's registration
+reply or a rollover date answer. Unlike `/operator <code>`, no code
+follows — identity is already established, checked at the command
+itself:
+
+```python
+if (incoming.text or "").strip().lower().startswith(ADD_FARMER_COMMAND):
+    cluster_id = os.environ.get("HARVEST_CONVOY_CLUSTER_ID")
+    cluster = storage.get_cluster(cluster_id) if cluster_id else None
+    if cluster is None or chat_id != cluster.operator_chat_id:
+        client.send_message(chat_id, lang.not_authorized_for_addfarmer())
+        return
+    # ... start proxy_registration flow for this operator chat_id
+```
+
+A non-operator (a farmer, a stranger who found the bot) typing
+`/addfarmer` gets a generic refusal and nothing is started — same
+posture as every other authorization refusal in this codebase, just
+applied to a text command instead of a callback tap, since there is no
+callback yet at this point in the flow.
+
+**The state machine itself is a close mirror of `RegistrationState`**,
+not a new design: `ProxyRegistrationState` (new module,
+`telegram/proxy_registration.py`) walks
+`AWAITING_FARMER_NAME → AWAITING_CONTACT_NOTE → AWAITING_VILLAGE →
+AWAITING_LOCATION → AWAITING_CROP_CONFIRM → AWAITING_TRANSPLANT_INFO →
+AWAITING_HAS_PHONE → AWAITING_CONFIRM → COMPLETE`, reusing
+`registration.py`'s own `_parse_date`/`_parse_area`/`_is_yes`/`_is_no`
+helpers and prompt-per-step shape unchanged. Two new steps beyond
+self-registration's four, and why each is unavoidable here even though
+self-registration doesn't need it:
+
+- **`AWAITING_FARMER_NAME`** — self-registration never asks for a name
+  because Telegram already hands over `sender_name` for free
+  (`registration.py:24-29`'s own docstring: "asking would fail the
+  'does the agent already know enough to speak first' test in
+  reverse"). That fact doesn't hold here: Telegram gives the
+  **operator's** `sender_name`, not the farmer's, since the operator is
+  the one chatting. The operator must be asked, as free text — no way
+  around it, and this is operator-authored input, the same class as
+  every other command/reply the operator already types, not new
+  farmer-facing surface.
+- **`AWAITING_CONTACT_NOTE`** — optional (`skip` accepted as a valid
+  reply, same as an empty text elsewhere in this codebase's convention
+  for optional fields). Whatever the operator types — a phone number,
+  "no phone," a relative's number — is stored verbatim on
+  `Farmer.contact_note: str | None`, a plain informational field.
+  **This is never used to attempt a Telegram send.** The Bot API
+  cannot address a `chat_id` it has never received an inbound message
+  from — a phone number or username is not, by itself, a usable
+  send target — so `contact_note` exists purely for the operator's own
+  reference and the equity report's provenance story, and the field's
+  own docstring says so explicitly to prevent a future reader from
+  assuming otherwise.
+- **`AWAITING_HAS_PHONE`** — a yes/no question (reusing
+  `CONFIRMATION_YES_LABEL`/`_NO_LABEL`, no new label pair). **This does
+  not change what gets persisted** — a proxy registration always leaves
+  `telegram_chat_id=None` regardless of the answer, since the proxy
+  chat can never supply the farmer's own chat_id (Decision 18 has no
+  concept of "expected" linking either; it's the same operator tap for
+  anyone). It changes only which closing message the *operator* sees:
+  a "no phone" answer gets the plain notification-less note (Decision
+  21); a "has a phone, just not with him now" answer gets the same
+  note plus a line that `/linkfarmer` is how to connect the two records
+  once that farmer self-registers.
+- **`AWAITING_CONFIRM`** — a final yes/no summary
+  ("Register {name}, {village}, {area}, transplanted {date}?
+  [Confirm] [Cancel]") before anything is written. Self-registration
+  has no equivalent step because the farmer is reporting his own plot
+  and has no reason to mis-type someone else's details out of
+  unfamiliarity; a proxy relaying information secondhand is exactly
+  the case worth one extra confirmation before commit. See Decision
+  20's discussion of why this is the *only* mistake-guard this part
+  builds, not a full edit/correct mechanism.
+
+Village and location reuse the identical mechanisms as self-
+registration unchanged — a typed village name (Tamil script or
+Tanglish, same inference rule) and Telegram's native location-share
+for GPS, on the theory that a village-level operator physically
+visiting or already familiar with a farmer's field can share a
+location exactly as easily as the farmer himself could. If that
+assumption turns out false in the field (an operator registering
+farmers from memory, away from the plot), `village` becomes the more
+load-bearing of the two — another reason Decision 17 stops discarding
+it.
+
+## Decision 14: identity — a second ID scheme, not a variant of the first
+
+Self-registration's `farmer_id`/`plot_id` scheme
+(`farmer-{chat_id}`/`plot-{chat_id}`) cannot be reused for a proxy
+registration: the chat doing the registering is the **operator's**,
+and deriving an ID from it would either collide across every farmer
+the same operator ever proxy-registers (all landing on the same
+`farmer-{operator_chat_id}`) or, if a phone-less farmer never gets a
+phone at all, has no `chat_id` to derive from in the first place.
+
+**Decided**: proxy-registered farmers and plots get IDs from a short
+random suffix, not a chat_id: `farmer-proxy-{6 hex chars}` /
+`plot-proxy-{6 hex chars}` (`secrets.token_hex(3)`, collision-checked
+against `storage.get_farmer`/`get_plot` before use, retried on the rare
+collision — same defensive shape `generate_operator_code.py` already
+uses for its own code space). **This ID, once assigned, never changes**
+— including after Decision 18's linking step binds a real
+`telegram_chat_id` onto it. Self-registration's IDs and proxy IDs are
+now two disjoint, permanently distinguishable namespaces by
+construction (`-proxy-` in the ID), which doubles as a free, zero-cost
+provenance signal alongside Decision 17's explicit `registered_by`
+field.
+
+## Decision 15: the no-phone case — weighed both ways, decided, and its consequence traced through
+
+**Option A — proxy relay.** Register the plot fully, keep
+`Farmer.telegram_chat_id = None`, and build a mechanism for the
+operator to answer harvest confirmations and rollover prompts *as* the
+farmer's proxy (some new "answer on behalf of" authorization letting
+the operator's tap count as the farmer's reply).
+
+**Option B — notification-less, in person.** Register the plot fully,
+`Farmer.telegram_chat_id` stays `None` — exactly the representation
+this codebase already uses for "cannot be reached" everywhere else
+(all eight guarded `notify.py` send functions, `watcher.py`'s
+`_check_drying_window_alerts`/`_check_advance_harvest_notices`/
+`run_evening_confirmations`, all already degrade cleanly and log on
+this exact condition today). The plot appears on the operator's daily
+route precisely as any other plot — route generation has no notion of
+`telegram_chat_id` at all — and every farmer-facing message this
+system would otherwise have sent simply isn't sent; the operator, who
+is already physically visiting this plot today because it's on his
+route, is this farmer's entire information channel, out of band,
+exactly as it already is for every non-Telegram interaction this
+project has never tried to model (weather, hiring labor, arranging
+drying space).
+
+**Decided: Option B.** Option A is not a small addition — it requires
+a new authorization category (the operator's tap counting as a
+different person's answer, on `confirm:`/`rollover:` callbacks
+ADR-012 just finished locking down to a single, exact-identity check),
+a new place for `decided_by`-style attribution questions to arise
+(if the operator's proxy-answer disagrees with what the farmer would
+have said, who is accountable for that in the equity report?), and a
+doubled test surface for confirmation and rollover handling, all to
+serve a channel the operator already has for free: he drives past this
+plot. **The test this project already applies —"does the agent already
+know enough to speak first? If not, it's out of scope"— cuts the same
+way here**: the system does not, and cannot, know what the farmer would
+tap in response to a message it can't deliver, and Option A would be
+built entirely to paper over exactly that unknown by inventing a
+substitute channel this project has no way to verify. Option B invents
+nothing: it is the existing, already-tested "unreachable farmer"
+degrade path, now reached by a population that gets there by design
+rather than by anomaly.
+
+**The consequence Option B doesn't get to skip, and the reason this
+decision isn't as simple as "reuse what exists"**: every one of those
+eight `telegram_chat_id is None` call sites already degrades safely
+for message-sending — but **`run_season_rollover`'s handling of that
+same condition does not just skip a send, it currently writes a
+`SeasonRolloverPrompt` record specifically so the plot gets *excluded*
+from next season's scheduling** (`watcher.py:787-805`, comment:
+"recorded as unknown ... nobody could ask, so nobody said yes").
+`_apply_rollover_exclusion` (`watcher.py:146-167`) excludes any plot
+whose `SeasonRolloverPrompt.replied is not True` — and a farmer who was
+never asked can, by construction, never make `replied` become `True`.
+**Under today's code, a permanently phone-less farmer's plot would be
+correctly scheduled this season, then silently and permanently
+excluded starting next season**, the exact opposite of what this part
+exists to build, and the specific failure Decision 16 exists to close.
+
+## Decision 16: closing the rollover-exclusion gap — reachability decides whether a prompt is even written, not just whether it's answered
+
+**The fix is one conditional's behavior change in `run_season_rollover`,
+not a change to the exclusion filter itself.** `_apply_rollover_exclusion`
+already has the rule this needs — Decision 2 of ADR-011 Part 1: *no
+`SeasonRolloverPrompt` record at all means include by default* (proven
+today by `test_new_farmer_joining_mid_season_has_no_prompt_and_is_included_by_default`).
+That rule exists precisely for "never asked"; the bug is that
+`run_season_rollover` currently treats "couldn't ask because
+unreachable" as if it were "asked and got no answer" by writing a
+record anyway, when it should treat "couldn't ask" as "never asked" and
+let the existing default do its job.
+
+```python
+# watcher.py: run_season_rollover, the farmer.telegram_chat_id is None branch
+if farmer.telegram_chat_id is None:
+    logger.info(
+        "run_season_rollover: farmer %s has no chat_id -- no prompt "
+        "recorded, plot=%s stays included by default next trigger "
+        "(ADR-011 Part 1 Decision 2)",
+        farmer.farmer_id, plot.plot_id,
+    )
+    skipped_no_chat_id += 1
+    continue  # no SeasonRolloverPrompt written -- this is the fix
+```
+
+**Why this was ever written the other way, and why changing it now is
+safe**: before this part, no code path could produce a *permanently,
+by-design* phone-less registered farmer — `telegram_chat_id` was always
+set at the one real registration entry point
+(`_persist_completed_registration:394`). A `None` chat_id was only
+reachable via a seed script or a hand-edited record: an anomaly, not a
+designed state, and treating an anomaly conservatively (exclude, don't
+silently include) was the defensible default at the time. Proxy
+registration makes "registered, permanently unreachable" a real,
+intended, expected population for the first time — the old default
+now excludes exactly the farmers this part exists to include, so the
+justification for the old behavior no longer applies to the population
+it now actually governs.
+
+**This does reopen one question the old code closed**: if a
+*reachable* farmer's send fails for an ordinary transient reason (a
+network error, Telegram rate-limiting) rather than because
+`telegram_chat_id is None`, that path is untouched — `send_result.success
+== False` already skips writing the record and retries next
+invocation (`watcher.py:814-819`), unaffected by this change, since
+that condition was never the one being fixed.
+
+**Test change required**: `test_no_chat_id_farmer_is_recorded_as_unknown_not_defaulted_to_included`
+(`tests/test_season_rollover.py:406`) currently asserts the old
+behavior by name and must be rewritten, not just left passing by
+accident — its replacement,
+`test_no_chat_id_farmer_writes_no_prompt_and_is_included_by_default`,
+asserts `storage.get_season_rollover_prompt("p1", SEASON_2) is None`
+after `run_season_rollover`, then runs `run_daily_watch` and asserts
+the plot is scheduled, mirroring
+`test_new_farmer_joining_mid_season_has_no_prompt_and_is_included_by_default`'s
+own shape since both cases now collapse to the identical mechanism.
+
+**`run_evening_confirmations`'s existing no-chat_id branch
+(`watcher.py:662-672`) needs no change**: it already just skips
+sending and leaves the `HarvestConfirmation` at `asked_at=None`
+("unknown" forever), and nothing reads that confirmation's status to
+*exclude* a plot from being scheduled in the first place — only from
+follow-through-rate and late-reply ledger credit, both already-accepted
+gaps for any existing unreachable farmer. Drying-window alerts and
+advance-harvest notices (`watcher.py:482`, `558`) also need no change
+for the same reason — they inform, they don't gate. **Considered and
+rejected**: redirecting these safety-relevant alerts to the operator
+instead of silently dropping them. Rejected for this part specifically
+because the plot's daily presence on the operator's own route already
+re-surfaces it to him every single day it remains unharvested — a
+second, separate alert channel for the same fact would be new
+machinery serving information the operator already receives by another
+path. Flagged, not silently decided, in case a future pilot shows the
+route alone isn't a strong enough signal in practice.
+
+## Decision 17: consent and provenance — where a plot came from, in storage and in the equity report
+
+**`Plot` gains three fields, all additive and backward-compatible:**
+
+```python
+# models.py
+@dataclass(frozen=True)
+class Plot:
+    plot_id: str
+    farmer_id: str
+    cluster_id: str
+    lat: float
+    lon: float
+    crop: str
+    variety: str
+    transplant_date: date
+    area_acres: float
+    area_unit: Literal["acre", "cent"] = "acre"
+    village: str | None = None          # NEW -- see Context; None for
+    # every row that predates this field, honestly "asked before this
+    # existed" rather than "no village."
+    registered_by: str = "self"         # NEW -- "self" or
+    # f"operator:{operator_chat_id}". Default "self" is correct for
+    # every row written before this part existed: self-registration was
+    # the only path.
+    registered_at: str | None = None    # NEW -- ISO timestamp. None for
+    # every pre-existing row; self-registration starts setting this too
+    # (small addition to _persist_completed_registration, not just the
+    # new proxy path) so provenance is equally complete for both paths
+    # going forward.
+    retired_reason: str | None = None   # NEW -- set only by Decision 18's
+    # link action, on the losing (duplicate) side of a link. Format
+    # f"linked_to:{canonical_farmer_id}" -- a plain string, not a new
+    # entity, deliberately embedding the one fact a reader or a future
+    # dedupe check needs (which farmer_id is now canonical) rather than
+    # a bare boolean. A plot with this set is excluded from scheduling
+    # (Decision 18) but never removed from storage or from the equity
+    # report -- the same "filter at read time, never delete" discipline
+    # RouteOverride/rollover exclusion already use.
+```
+
+**`Farmer` gains only the informational contact note from Decision
+13** — Decision 18, as revised below, needs no new `Farmer` field at
+all: "has this proxy farmer been linked yet" is fully answered by the
+existing `telegram_chat_id is None` check, and which plot lost a link
+is recorded on the `Plot` side (`retired_reason`, above), not the
+`Farmer` side.
+
+```python
+# models.py
+@dataclass(frozen=True)
+class Farmer:
+    farmer_id: str
+    name: str
+    cluster_id: str
+    telegram_chat_id: int | None = None
+    language: Literal["ta", "en"] = "ta"
+    contact_note: str | None = None      # NEW -- see Decision 13.
+    # Never used to send a message.
+```
+
+No migration needed on either backend: both `FileStorage` and
+`DynamoStorage` construct these dataclasses via `Farmer(**raw)`/
+`Plot(**raw)` from a stored dict (`file_storage.py:93-115`,
+`dynamo.py:155-195`) — a key absent from an old stored row simply falls
+through to the new field's default. Verified by reading both
+deserialization paths directly, not assumed.
+
+**`equity_report.py`** gains a `proxy_registered_plot_ids: list[str]`
+field on `SeasonEquitySection` (plus a matching acres figure, same
+shape as the existing smallholder/larger split), computed by filtering
+`plots` on `p.registered_by != "self"` — reusing the section's existing
+"filter the current plot roster by a `Plot`-level predicate, render a
+count-and-list block, fall back to a stated zero-case line" idiom
+verbatim, no new rendering pattern. Rendered as its own paragraph:
+count proxy-registered vs. self-registered, and *within*
+proxy-registered, how many are still notification-less
+(`telegram_chat_id is None`) versus since-linked — so a reader of the
+report can see this feature's actual uptake and doesn't mistake a
+notification-less plot's blank confirmation/rollover columns for
+farmer non-responsiveness. That last distinction is the direct answer
+to the concern this whole part exists to avoid creating quietly.
+
+## Decision 18: linking — resolved on review, simpler than either option this ADR originally offered
+
+**Neither Option A nor Option B, on review. The actual design: a
+phone-less farmer who later gets a phone runs the existing, unchanged
+four-message registration flow himself — no code, no new command, no
+signal of any kind that he already has a record. This produces a real
+duplicate: a fresh `farmer-{chat_id}`/`plot-{chat_id}` alongside the
+still-standing `farmer-proxy-{hex}`/`plot-proxy-{hex}`. The operator —
+who already knows both records exist, because he created one of them —
+then links the two with a tap**, reusing the exact operator-tap shape
+this codebase already builds and authorizes for `route_accept`,
+`route_modify`, `route_swap`, `route_drop`, `route_drop_confirm`, and
+`route_done`: an operator-only text command starts it
+(`/linkfarmer` — text is fine here, it's operator-authored, the same
+class of input as `/addfarmer`), everything after that is taps.
+
+**No `/join` command, no new farmer-facing surface of any kind, no
+free text from a farmer anywhere in this mechanism, and no general
+merge primitive** — this does one fixed thing, for one fixed scenario,
+with no reconciliation of conflicting field values: the *proxy*
+record's plot details stay authoritative unconditionally. If the
+farmer's self-registration reported a different transplant date or
+area than the proxy record has on file, that correction is silently
+lost — a real, disclosed limitation of not building a merge primitive,
+stated plainly rather than glossed over, and acceptable at this scale
+because the same operator who links the two records is also the
+person standing closest to whichever field actually needs correcting
+if it matters.
+
+**The mechanism, concretely:**
+
+1. `/linkfarmer` (operator-identity-checked, same as `/addfarmer`)
+   lists this cluster's still-unlinked proxy farmers as tap targets —
+   "unlinked" is `registered_by != "self" and telegram_chat_id is
+   None`, derived at read time, no new field needed to track it. Empty
+   list → a plain "nothing to link" reply, no further steps.
+   (`linkfarmer_proxy:{proxy_farmer_id}`)
+2. Tapping one lists the cluster's other farmers as the candidate
+   match — every farmer in the cluster except proxy records and the
+   one just picked, sorted most-recently-registered first (`registered_at`,
+   Decision 17) since the intended match is almost always the farmer
+   who *just* self-registered. (`linkfarmer_match:{proxy_farmer_id}:{candidate_farmer_id}`)
+3. Picking a candidate shows an explicit two-name confirmation ("Link
+   {proxy farmer's name} (registered by you) with {candidate's name}
+   (self-registered {date})? This farmer's separate plot will stop
+   being scheduled — {proxy farmer's name}'s existing plot continues,
+   now reaching them directly on Telegram.") with Confirm/Cancel.
+   (`linkfarmer_confirm:{proxy_farmer_id}:{candidate_farmer_id}:{yes|no}`)
+4. On Confirm, three writes: `storage.put_farmer(replace(proxy_farmer,
+   telegram_chat_id=candidate_farmer.telegram_chat_id))` — the proxy
+   farmer_id stays canonical (it may already carry scheduling/ledger
+   history the brand-new duplicate never had a chance to accumulate),
+   now reachable. `storage.put_farmer(replace(candidate_farmer,
+   telegram_chat_id=None))` — **necessary, not optional**: without
+   clearing it, two `Farmer` records would claim the same
+   `telegram_chat_id` at once, and `registration.py`'s own
+   chat_id-based dedupe (needed regardless, to stop a second
+   self-registration from the same phone creating yet another
+   duplicate) would have no reliable way to pick which one is
+   canonical on a future lookup. Clearing it here is what keeps that
+   lookup a plain, unambiguous "find the one farmer with this
+   chat_id" — no reference-following, no `retired_reason` parsing
+   needed at re-registration time. The candidate's own plot is
+   retired: `storage.put_plot(replace(candidate_plot,
+   retired_reason=f"linked_to:{proxy_farmer_id}"))` — recorded for a
+   human reading raw storage, even though the mechanism above no
+   longer depends on reading it back. The candidate `Farmer` record
+   itself is left in storage, now with no chat_id and no active plot —
+   inert, never looked up again, kept rather than deleted for the same
+   reason nothing in this project deletes records.
+   On Cancel: nothing is written, message reverts.
+
+**Watcher-side enforcement**: plot selection for scheduling (both
+`_run_daily_watch_one`'s normal trigger and `handle_machine_breakdown`'s
+recompute — the same two call sites `_apply_rollover_exclusion`
+already filters at) additionally excludes any plot with
+`retired_reason is not None`, alongside the existing rollover
+exclusion, not instead of it.
+
+**If the operator never links them** — the honest, stated consequence:
+the duplicate plot is a real, independent row in the schedulable pool,
+and will be scheduled, notified, and potentially harvested exactly
+like any other plot, under the wrong identity, until someone acts.
+**This is deliberately accepted, not solved, for this pilot's scale**:
+eight farmers per cluster means the same real person appearing as two
+separate names on the operator's own route, or in the equity report,
+is not a subtle signal — it is immediately, visibly obvious to the one
+person already looking at that list every day, which is exactly why
+this design is safe to ship without automatic duplicate detection.
+**This does not hold at any meaningfully larger scale.** A cluster of
+fifty or a hundred farmers, or an operator managing several clusters,
+could easily miss a duplicate that reads as two unremarkable names in
+a longer list, and the drop into equity-report-only visibility (a
+report that has to be actively read, not a fact sitting in front of
+the operator's face every morning) is exactly the shift from "visible
+and correctable" to "silent" this document has argued against
+elsewhere. **What would replace this at scale**: a real
+duplicate-detection signal computed by the system, not left to human
+memory — the most honest version is probably a same-cluster,
+same-approximate-GPS-and-similar-name heuristic surfaced as a *proposal*
+the operator confirms or dismisses (the identical "propose, never
+gatekeep, human taps to act" shape this whole ADR already uses for
+routes), rather than an automatic silent merge, which would reintroduce
+exactly the "the LLM/system computes something that reaches a
+scheduling decision without a human confirming it" risk this project's
+core rule exists to prevent. Not built now — flagged as the concrete
+next step, not a vague "revisit later."
+
+## Decision 19: authorization
+
+**Every new command and every new callback in this part is
+operator-identity-checked**: `/addfarmer` and `/linkfarmer` both check
+`chat_id == cluster.operator_chat_id` at the moment they're invoked
+(Decision 13's shape), and every callback that follows —
+`addfarmer_confirm:`, `linkfarmer_proxy:`, `linkfarmer_match:`,
+`linkfarmer_confirm:` — checks the tapping identity
+(`callback_query["from"]["id"]`) against the same field via the
+existing `_is_operator` helper. No new authorization primitive
+anywhere in this part; nothing here is farmer-facing, so `_is_farmer`
+is never relevant to it.
+
+**Added to ADR-012's audit table:**
+
+| Prefix | Handler | Authorized against | Status |
+|---|---|---|---|
+| `addfarmer_confirm:` | `handle_addfarmer_confirm_callback` | `Cluster.operator_chat_id` via `_is_operator` | Checked from the start |
+| `linkfarmer_proxy:` | `handle_linkfarmer_proxy_callback` | `Cluster.operator_chat_id` via `_is_operator` | Checked from the start |
+| `linkfarmer_match:` | `handle_linkfarmer_match_callback` | `Cluster.operator_chat_id` via `_is_operator` | Checked from the start |
+| `linkfarmer_confirm:` | `handle_linkfarmer_confirm_callback` | `Cluster.operator_chat_id` via `_is_operator` | Checked from the start |
+
+(`/addfarmer` and `/linkfarmer` are text commands, not callback
+prefixes, so they sit outside this specific table by the table's own
+scope — same as `/operator <code>` today — but their authorization
+rule is stated above and gets the identical wrong-party test
+treatment.)
+
+**Test, per your standing instruction**:
+`test_addfarmer_from_non_operator_is_refused_and_starts_no_flow`,
+`test_addfarmer_confirm_from_non_operator_is_refused_and_persists_nothing`,
+`test_linkfarmer_from_non_operator_is_refused_and_starts_no_flow`,
+`test_linkfarmer_confirm_from_non_operator_is_refused_and_links_nothing`
+— construct a pending proxy registration (and, for the link tests, a
+real proxy/duplicate pair), tap/text from a chat_id that isn't
+`cluster.operator_chat_id`, assert the refusal, assert no
+`Farmer`/`Plot` written or changed, no in-memory state created or
+consumed.
+
+## Decision 20: failure paths
+
+**1. The operator runs `/addfarmer` twice for the same real farmer**
+(forgot he already did it, or wants to fix a typo). **No correction or
+duplicate-detection mechanism is built for this.** Each completed run
+mints a fresh `farmer-proxy-{hex}`/`plot-proxy-{hex}` pair with no
+collision against the first — this is an accepted, disclosed gap for
+this pilot's scale, mitigated only by Decision 13's confirmation-
+before-commit step catching the *in-flight* version of this mistake
+(operator re-reads the summary, recognizes the farmer, cancels). A
+committed duplicate has no fix path in this part beyond direct storage
+editing — Decision 18's `/linkfarmer` mechanism links a proxy record to
+a *self*-registered one, it has no path for two proxy records of the
+same person, since neither side of that pair would ever pick up a
+`telegram_chat_id` for the other to match against. Flagged, not
+silently accepted without saying so: a future "list this cluster's
+proxy-registered farmers, tap to edit or retire one" surface is the
+natural next step if this proves to matter in practice.
+
+**2. The proxy flow is interrupted mid-way** (operator's phone dies,
+restarts the conversation, sends an unrelated message). Same accepted
+limitation class as `registration.py`'s and `operator_enrollment.py`'s
+own in-memory `_STATE_STORE`s: state does not survive a process
+restart, and a stale in-progress flow is simply abandoned and
+restarted from `/addfarmer` again with no special handling — identical
+risk profile to the two existing flows this project has already
+shipped with the same limitation. The same holds for `/linkfarmer`'s
+own three-tap sequence.
+
+**3. `/addfarmer` or `/linkfarmer` (or any of their callbacks) from a
+non-operator.** Covered by Decision 19 — refused, logged, no mutation.
+
+**4. A farmer who was proxy-registered phone-less later self-registers,
+and the operator never runs `/linkfarmer`.** This is Decision 18's
+accepted, disclosed outcome, not a bug: a second, real, independent
+`farmer-{chat_id}`/`plot-{chat_id}` now exists alongside the proxy
+record, both schedulable, until an operator tap resolves it. See
+Decision 18's own "if the operator never links them" paragraph for the
+full argument for why this is acceptable at pilot scale and what
+replaces it if it stops being acceptable.
+
+**5. The operator links the wrong pair** (picks a candidate farmer who
+is not actually the same person as the proxy record). The explicit
+two-name confirmation step (Decision 18, step 3) is the only guard
+against this — there is no automatic verification a linked pair is
+correct, the same trust level already extended to the operator for
+route drops and escalation resolution. A wrong link's real-world
+consequence: the wrongly-matched candidate's own genuine plot is
+retired and stops being scheduled, a real harm, silently absorbed into
+the proxy record's identity. No undo is built. Flagged as the sharpest
+edge of not building a merge/verification primitive — acceptable at
+this scale on the same "obvious immediately" reasoning as Decision 18,
+not because the consequence is small.
+
+**5. Weather/storage failures during the proxy flow.** Identical
+treatment to `_persist_completed_registration`'s existing degrade
+path — never raises, logs loudly, the operator still gets a completion
+message (or, here, a failure message if the write itself failed), no
+half-written `Farmer`-without-`Plot` state (both written together or
+neither, matching the existing all-or-nothing framing already in place
+for self-registration's own persistence step).
+
+## Decision 21: Tamil strings (drafts, for your review before this ships)
+
+Same `print_tamil_strings.py` discipline as every string in this
+project — first drafts only, nothing final until reviewed here and
+(per ADR-008 Decision 17) receipted on a real device.
+
+- `/addfarmer` usage/refusal: *"இந்தக் கட்டளையை ஆபரேட்டர் மட்டுமே
+  பயன்படுத்த முடியும்."* ("Only the operator can use this command.")
+- Farmer-name prompt: *"விவசாயியின் பெயர் என்ன?"* ("What is the
+  farmer's name?")
+- Contact-note prompt (optional): *"தொடர்பு எண் அல்லது குறிப்பு
+  (இருந்தால்) தட்டச்சு செய்யவும், இல்லையெனில் 'skip' என தட்டச்சு
+  செய்யவும்."* ("Type a contact number or note if there is one,
+  otherwise type 'skip'.")
+- Has-phone question: *"இந்த விவசாயிக்கு டெலிகிராம் உள்ள மொபைல் போன்
+  உள்ளதா?"* ("Does this farmer have a mobile phone with Telegram?")
+- Confirm-before-commit summary line: *"{name}, {village}, {area},
+  நடவு தேதி {date} — பதிவு செய்யவா?"* ("{name}, {village}, {area},
+  transplanted {date} — register?")
+- Notification-less registration's closing note to the operator (not
+  the farmer — the farmer never receives a message here at all):
+  *"பதிவு முடிந்தது. {name}-க்கு தொலைபேசி இல்லாததால், அவருக்கான
+  தகவல்களை நீங்கள் நேரடியாகத் தெரிவிக்க வேண்டும்."* ("Registration
+  complete. Since {name} has no phone, you'll need to inform them
+  directly.")
+- `/linkfarmer` with nothing to link: *"இணைக்க எந்த விவசாயியும்
+  இல்லை."* ("There is no farmer to link.")
+- `/linkfarmer` step 2 confirmation prompt: *"{proxy_name}-ஐ
+  {candidate_name}-உடன் இணைக்கவா? {candidate_name}-ன் தனி வயல் இனி
+  பட்டியலிடப்படாது."* ("Link {proxy_name} with {candidate_name}?
+  {candidate_name}'s separate plot will no longer be scheduled.")
+- `/linkfarmer` success toast: *"இணைக்கப்பட்டது."* ("Linked.")
+
+English equivalents ship alongside in `messages_en.py`, same shape as
+every prior part.
+
+## Tests
+
+`tests/test_proxy_registration.py` (new): the full
+`ProxyRegistrationState` transition sequence including the three new
+steps (name, contact note, has-phone); `/addfarmer` authorization
+(Decision 19's two tests); `AWAITING_CONFIRM`'s Cancel path writes
+nothing; both a has-phone=yes and a has-phone=no completed registration
+leave `Farmer.telegram_chat_id=None` and differ only in the operator's
+closing message text, proven directly rather than just asserted in
+prose, since that answer changes no persisted field.
+`route_override_status`-style unit tests for `village`/`registered_by`/
+`registered_at`/`retired_reason` defaulting on old rows;
+`tests/test_link_farmer.py` (new, detailed above); `test_watcher.py`
+additions for Decision 16 (the rewritten no-chat_id rollover test, plus
+a full-season regression proving a proxy-registered, notification-less
+plot is scheduled normally both this season and next) and for retired-
+plot exclusion at both scheduling call sites; `test_registration.py`
+additions for the chat_id-based dedupe fix, including the resurrection
+case (detailed above); `test_equity_report.py` addition for the new
+proxy-registration section, including the notification-less-vs-linked
+sub-split.
+
+## Consequences
+
+- **The rollover-exclusion fix (Decision 16) changes behavior for any
+  existing farmer with `telegram_chat_id=None`, not just new proxy
+  registrations** — before this part, such a farmer (however that
+  state arose) was excluded from next season by default; after, he is
+  included by default, same as any other never-asked plot. No
+  production farmer is known to be in this state today (the only route
+  to it before this part was a seed script or manual edit), so this is
+  a correction with no known present-day behavioral cost, not a live
+  regression risk — stated plainly rather than assumed.
+- **Two disjoint, permanent ID namespaces now coexist**
+  (`farmer-{chat_id}` and `farmer-proxy-{hex}`), distinguishable by
+  construction, doubling as a zero-cost provenance signal alongside the
+  explicit `registered_by` field.
+- **A phone-less farmer's plot is scheduled, harvested, and reported on
+  exactly like any other** — the only thing that doesn't happen for him
+  is any Telegram message, ever, which the equity report now surfaces
+  explicitly rather than leaving indistinguishable from ordinary farmer
+  silence.
+- **Decision 18's linking mechanism is explicitly a pilot-scope answer,
+  not the permanent design** — it depends entirely on an operator
+  noticing a duplicate himself, with no automated detection and no undo
+  if he links the wrong pair. Stated plainly in Decision 18: this does
+  not hold at any meaningfully larger scale, and what would replace it
+  (a system-proposed, operator-confirmed duplicate match, never an
+  automatic silent merge) is sketched there, not built here.
+- Four additive, backward-compatible schema widenings
+  (`Plot.village`, `Plot.registered_by`, `Plot.registered_at`,
+  `Plot.retired_reason`) and one on `Farmer` (`contact_note`) — every
+  existing row and every existing test's assertions are unaffected,
+  verified against both backends' deserialization paths directly.
+- No general-purpose role system built; no new farmer-facing surface
+  and no farmer-initiated free text anywhere in this part — every new
+  command (`/addfarmer`, `/linkfarmer`) is operator-authored, and every
+  farmer-facing interaction is either unchanged (the existing
+  four-message flow) or nonexistent (a notification-less farmer).
+- Nothing here touches the deployed AgentCore artifact.
+
+## Sequence (Part 2)
+
+**Approved 2026-08-23, with Decision 18 replaced by the simpler
+operator-tap-linking design above** (see "Resolved on review" below).
+Single commit for the whole part (no prerequisite bug this time, unlike
+Part 1) — schema widenings, `proxy_registration.py` (`/addfarmer` +
+`/linkfarmer` + both callback flows), the Decision 16 rollover fix and
+its rewritten test, the chat_id-dedupe generalization in
+`registration.py` (including the retired-plot resurrection guard),
+equity report section, Tamil strings printed for review — commit, stop,
+report.
+
+## Resolved on review (2026-08-23)
+
+**Decision 18 replaced, not chosen between.** The original draft
+offered two options (a bounded `/join <code>` farmer command, or a
+fully operator-mediated merge) and asked for a call between them. On
+review, neither was adopted: the actual design needs no code and no
+merge primitive at all — the farmer just uses the existing,
+unmodified four-message flow, producing a visible duplicate, and the
+operator links it with a tap, the same authorization shape already
+built six times over for route overrides. Recorded here as a
+correction to this document's own framing (it presented two options
+when a simpler third was available), not as an idea originating from
+either option offered. Explicitly recorded in Decision 18 as a
+pilot-scope answer, with its scale limit and replacement sketched
+rather than left implicit.
+
+Decisions 12, 13, 14, 15, 17, 19, 20 approved as originally written.
+Decision 16 approved with emphasis: the rewritten test must show the
+correction, not merely pass. The discarded `village` field is
+persisted as proposed, kept flagged as its own independent finding
+rather than folded silently into "the same four fields."

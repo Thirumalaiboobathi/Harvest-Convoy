@@ -66,6 +66,10 @@ what authorizes each one:
 | `route_drop:` | `handle_route_drop_callback` (new, ADR-013) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
 | `route_drop_confirm:` | `handle_route_drop_confirm_callback` (new, ADR-013) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
 | `route_done:` | `handle_route_done_callback` (new, ADR-013) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
+| `addfarmer_confirm:` | `handle_addfarmer_confirm_callback` (new, ADR-013 Part 2) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
+| `linkfarmer_proxy:` | `handle_linkfarmer_proxy_callback` (new, ADR-013 Part 2) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
+| `linkfarmer_match:` | `handle_linkfarmer_match_callback` (new, ADR-013 Part 2) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
+| `linkfarmer_confirm:` | `handle_linkfarmer_confirm_callback` (new, ADR-013 Part 2) | `Cluster.operator_chat_id` via `_is_operator` | New | Checked from the start |
 
 **`lang:` was reconsidered and fixed, not left as a documented
 exception.** The original reasoning — this callback doesn't act on

@@ -403,7 +403,20 @@ def test_farmer_mid_rollover_reply_is_routed_to_rollover_not_registration(tmp_pa
     assert storage.get_plot("p1").transplant_date == date(2027, 1, 10)
 
 
-def test_no_chat_id_farmer_is_recorded_as_unknown_not_defaulted_to_included(tmp_path) -> None:
+def test_no_chat_id_farmer_writes_no_prompt_and_is_included_by_default(tmp_path, monkeypatch) -> None:
+    """Corrected, ADR-013 Part 2 Decision 16: this test used to assert
+    the opposite of what it asserts now -- that an unreachable farmer's
+    plot got a SeasonRolloverPrompt written specifically so it would be
+    *excluded* next season. That was silently wrong for a farmer who is
+    unreachable by design (ADR-013 Part 2's proxy-registered,
+    notification-less farmers): it would have dropped exactly the
+    population that feature exists to include, every single season,
+    with no farmer ever able to change that outcome by replying, because
+    there was never a message for them to reply to. The corrected
+    behavior: no prompt is written at all, and the plot falls through to
+    the same "no record means include" default proven by
+    test_new_farmer_joining_mid_season_has_no_prompt_and_is_included_by_default
+    below -- both cases are now, deliberately, the same mechanism."""
     storage = FileStorage(tmp_path / "s.json")
     storage.put_cluster(_cluster())
     storage.put_farmer(_farmer("f1", None))  # no telegram_chat_id
@@ -415,10 +428,14 @@ def test_no_chat_id_farmer_is_recorded_as_unknown_not_defaulted_to_included(tmp_
     )
 
     assert result["skipped_no_chat_id"] == 1
-    prompt = storage.get_season_rollover_prompt("p1", SEASON_2)
-    assert prompt is not None
-    assert prompt.replied is None
-    assert watcher_mod.rollover_status(prompt) == "unknown"
+    assert storage.get_season_rollover_prompt("p1", SEASON_2) is None
+
+    _patch_weather(monkeypatch, [ForecastDay("d0", 0.0), ForecastDay("d1", 20.0)])
+    daily_result = watcher_mod.run_daily_watch(
+        "c1", SEASON_2, storage=storage, today=TODAY_S2, telegram_client=_FakeClient(),
+        get_claim=_tied_claim,
+    )
+    assert daily_result["status"] == "triggered"
 
 
 def test_new_farmer_joining_mid_season_has_no_prompt_and_is_included_by_default(tmp_path, monkeypatch) -> None:

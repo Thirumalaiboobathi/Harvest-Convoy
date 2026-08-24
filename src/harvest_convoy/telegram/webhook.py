@@ -21,6 +21,7 @@ already exists.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Callable
@@ -30,7 +31,7 @@ from harvest_convoy.models import Farmer, Plot
 from harvest_convoy.storage import Storage
 from harvest_convoy.storage.fairness import record_bump
 from harvest_convoy.storage.interface import HarvestConfirmation, RouteOverride
-from harvest_convoy.telegram import notify, operator_enrollment, registration, rollover
+from harvest_convoy.telegram import notify, operator_enrollment, proxy_registration, registration, rollover
 from harvest_convoy.telegram.client import TelegramClient
 from harvest_convoy.telegram.registration import IncomingMessage
 
@@ -1189,6 +1190,213 @@ def handle_operator_replace_callback(
     client.answer_callback_query(callback_query_id, mod.operator_enrolled(cluster.name))
 
 
+# --- ADR-013 Part 2: proxy registration confirm, and farmer linking ---
+
+def parse_addfarmer_confirm_callback_data(data: str) -> tuple[str, bool] | None:
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "addfarmer_confirm" or parts[2] not in ("yes", "no"):
+        return None
+    _, cluster_id, answer = parts
+    return cluster_id, answer == "yes"
+
+
+def handle_addfarmer_confirm_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage,
+) -> None:
+    """The [Confirm]/[Cancel] tap ending /addfarmer (Decision 13).
+    Re-derives cluster.operator_chat_id from the embedded cluster_id and
+    checks the tapper against it directly, the same shape every route_*
+    callback uses -- an operator_chat_id embedded in the callback data
+    itself would prove nothing about who is actually tapping."""
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_addfarmer_confirm_callback_data(callback_query.get("data", ""))
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    cluster_id, answer = parsed
+    cluster = storage.get_cluster(cluster_id)
+    if not _is_operator(callback_query, cluster):
+        logger.warning(
+            "addfarmer_confirm callback for cluster=%s from a non-operator -- refused",
+            cluster_id,
+        )
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+
+    tapper_id = callback_query["from"]["id"]
+    mod = notify._lang_module(cluster.operator_language)
+    state = proxy_registration.get_pending_state(tapper_id)
+    if state is None or state.step != proxy_registration.ProxyRegistrationStep.AWAITING_CONFIRM:
+        client.answer_callback_query(callback_query_id, mod.addfarmer_nothing_pending(), show_alert=True)
+        return
+    proxy_registration.clear_state(tapper_id)
+
+    message = callback_query.get("message") or {}
+    msg_chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if msg_chat_id is not None and message_id is not None:
+        client.edit_message_reply_markup(msg_chat_id, message_id, reply_markup=None)
+
+    if not answer:
+        client.answer_callback_query(callback_query_id, mod.addfarmer_cancelled())
+        return
+
+    result = proxy_registration.persist_proxy_registration(state, storage)
+    if result is None:
+        client.answer_callback_query(callback_query_id, mod.addfarmer_cancelled(), show_alert=True)
+        return
+    farmer, _plot = result
+    client.answer_callback_query(callback_query_id, mod.addfarmer_registered_toast())
+    closing = (
+        mod.addfarmer_complete_has_phone(farmer.name) if state.has_phone
+        else mod.addfarmer_complete_no_phone(farmer.name)
+    )
+    client.send_message(tapper_id, closing)
+
+
+def parse_linkfarmer_proxy_callback_data(data: str) -> str | None:
+    parts = data.split(":")
+    if len(parts) != 2 or parts[0] != "linkfarmer_proxy":
+        return None
+    return parts[1]
+
+
+def handle_linkfarmer_proxy_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage,
+) -> None:
+    """Step 1 of /linkfarmer (Decision 18): the operator picked which
+    unlinked proxy farmer to link. Edits the same message in place into
+    the candidate list, mirroring route_modify's edit-in-place shape."""
+    callback_query_id = callback_query.get("id", "")
+    proxy_farmer_id = parse_linkfarmer_proxy_callback_data(callback_query.get("data", ""))
+    if proxy_farmer_id is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    proxy_farmer = storage.get_farmer(proxy_farmer_id)
+    cluster = storage.get_cluster(proxy_farmer.cluster_id) if proxy_farmer is not None else None
+    if not _is_operator(callback_query, cluster):
+        logger.warning(
+            "linkfarmer_proxy callback for farmer=%s from a non-operator -- refused",
+            proxy_farmer_id,
+        )
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    outbound = proxy_registration.build_linkfarmer_match_message(
+        storage, proxy_farmer_id, cluster.operator_language
+    )
+    client.answer_callback_query(callback_query_id)
+    _edit_message(client, callback_query, outbound.text, outbound.reply_markup)
+
+
+def parse_linkfarmer_match_callback_data(data: str) -> tuple[str, str] | None:
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "linkfarmer_match":
+        return None
+    _, proxy_farmer_id, candidate_farmer_id = parts
+    return proxy_farmer_id, candidate_farmer_id
+
+
+def handle_linkfarmer_match_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage,
+) -> None:
+    """Step 2 of /linkfarmer: the operator picked which self-registered
+    farmer matches. Shows the explicit two-name confirmation (Decision
+    18, step 3) before anything is written."""
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_linkfarmer_match_callback_data(callback_query.get("data", ""))
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    proxy_farmer_id, candidate_farmer_id = parsed
+    proxy_farmer = storage.get_farmer(proxy_farmer_id)
+    cluster = storage.get_cluster(proxy_farmer.cluster_id) if proxy_farmer is not None else None
+    if not _is_operator(callback_query, cluster):
+        logger.warning(
+            "linkfarmer_match callback proxy=%s candidate=%s from a non-operator -- refused",
+            proxy_farmer_id, candidate_farmer_id,
+        )
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    mod = notify._lang_module(cluster.operator_language)
+    candidate_farmer = storage.get_farmer(candidate_farmer_id)
+    if candidate_farmer is None:
+        client.answer_callback_query(callback_query_id, mod.unrecognized_action(), show_alert=True)
+        return
+    client.answer_callback_query(callback_query_id)
+    _edit_message(
+        client, callback_query,
+        mod.linkfarmer_confirm_prompt(proxy_farmer.name, candidate_farmer.name),
+        proxy_registration.build_linkfarmer_confirm_keyboard(
+            proxy_farmer_id, candidate_farmer_id, cluster.operator_language
+        ),
+    )
+
+
+def parse_linkfarmer_confirm_callback_data(data: str) -> tuple[str, str, bool] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "linkfarmer_confirm" or parts[3] not in ("yes", "no"):
+        return None
+    _, proxy_farmer_id, candidate_farmer_id, answer = parts
+    return proxy_farmer_id, candidate_farmer_id, answer == "yes"
+
+
+def handle_linkfarmer_confirm_callback(
+    client: TelegramClient, callback_query: dict, storage: Storage,
+) -> None:
+    """Step 3 of /linkfarmer -- the only step that mutates anything.
+    On yes: proxy_registration.apply_link transplants the candidate's
+    telegram_chat_id onto the proxy farmer_id and retires the
+    candidate's plot (Decision 18). On no: nothing is written."""
+    callback_query_id = callback_query.get("id", "")
+    parsed = parse_linkfarmer_confirm_callback_data(callback_query.get("data", ""))
+    if parsed is None:
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    proxy_farmer_id, candidate_farmer_id, answer = parsed
+    proxy_farmer = storage.get_farmer(proxy_farmer_id)
+    cluster = storage.get_cluster(proxy_farmer.cluster_id) if proxy_farmer is not None else None
+    if not _is_operator(callback_query, cluster):
+        logger.warning(
+            "linkfarmer_confirm callback proxy=%s candidate=%s from a non-operator -- refused",
+            proxy_farmer_id, candidate_farmer_id,
+        )
+        client.answer_callback_query(
+            callback_query_id, notify._lang_module("ta").unrecognized_action(), show_alert=True,
+        )
+        return
+    mod = notify._lang_module(cluster.operator_language)
+
+    message = callback_query.get("message") or {}
+    msg_chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if msg_chat_id is not None and message_id is not None:
+        client.edit_message_reply_markup(msg_chat_id, message_id, reply_markup=None)
+
+    if not answer:
+        client.answer_callback_query(callback_query_id, mod.linkfarmer_cancelled_toast())
+        return
+
+    success = proxy_registration.apply_link(storage, proxy_farmer_id, candidate_farmer_id)
+    if not success:
+        client.answer_callback_query(callback_query_id, mod.linkfarmer_cancelled_toast(), show_alert=True)
+        return
+    client.answer_callback_query(callback_query_id, mod.linkfarmer_linked_toast())
+
+
 def handle_callback_query(
     client: TelegramClient,
     callback_query: dict,
@@ -1403,8 +1611,11 @@ def handle_update(
     "route_modify:...", "route_swap:...", "route_drop_confirm:...",
     "route_drop:...", and "route_done:..." route to the route-proposal
     handlers (ADR-013); "operator_lang:..." and "operator_replace:..."
-    route to the operator-enrollment handlers (ADR-012 Part 2); anything
-    else goes through the existing handle_callback_query escalation flow.
+    route to the operator-enrollment handlers (ADR-012 Part 2);
+    "addfarmer_confirm:...", "linkfarmer_proxy:...", "linkfarmer_match:...",
+    and "linkfarmer_confirm:..." route to the proxy-registration/linking
+    handlers (ADR-013 Part 2); anything else goes through the existing
+    handle_callback_query escalation flow.
     """
     if "callback_query" in update:
         callback_query = update["callback_query"]
@@ -1451,6 +1662,18 @@ def handle_update(
         if data.startswith("operator_replace:"):
             handle_operator_replace_callback(client, callback_query, storage)
             return
+        if data.startswith("addfarmer_confirm:"):
+            handle_addfarmer_confirm_callback(client, callback_query, storage)
+            return
+        if data.startswith("linkfarmer_proxy:"):
+            handle_linkfarmer_proxy_callback(client, callback_query, storage)
+            return
+        if data.startswith("linkfarmer_match:"):
+            handle_linkfarmer_match_callback(client, callback_query, storage)
+            return
+        if data.startswith("linkfarmer_confirm:"):
+            handle_linkfarmer_confirm_callback(client, callback_query, storage)
+            return
         handle_callback_query(
             client, callback_query, storage, season_id, lookup_farmer_for_plot
         )
@@ -1477,6 +1700,44 @@ def handle_update(
     if (incoming.text or "").strip().lower().startswith(operator_enrollment.COMMAND):
         outbound = operator_enrollment.handle_operator_command(chat_id, incoming.text, storage)
         client.send_message(chat_id, outbound.text, reply_markup=outbound.reply_markup)
+        return
+
+    # "/addfarmer" and "/linkfarmer" -- ADR-013 Part 2, operator-only,
+    # checked before anything else for the same reason "/operator <code>"
+    # is: never parsed as farmer registration text or a rollover date
+    # reply. Both commands check the sending chat_id against
+    # Cluster.operator_chat_id directly (there is no code to validate --
+    # identity is already established by the time an operator is
+    # enrolled at all), refusing generically and starting nothing on a
+    # mismatch.
+    text_lower = (incoming.text or "").strip().lower()
+    if text_lower.startswith(proxy_registration.ADD_FARMER_COMMAND) or text_lower.startswith(
+        proxy_registration.LINK_FARMER_COMMAND
+    ):
+        cluster_id = os.environ.get("HARVEST_CONVOY_CLUSTER_ID")
+        cluster = storage.get_cluster(cluster_id) if cluster_id else None
+        if cluster is None or chat_id != cluster.operator_chat_id:
+            logger.warning(
+                "addfarmer/linkfarmer command from chat_id=%s -- not this "
+                "cluster's operator, refused",
+                chat_id,
+            )
+            client.send_message(chat_id, notify._lang_module("ta").operator_only_command())
+            return
+        if text_lower.startswith(proxy_registration.ADD_FARMER_COMMAND):
+            outbound = proxy_registration.handle_addfarmer_command(chat_id, storage)
+        else:
+            outbound = proxy_registration.handle_linkfarmer_command(chat_id, storage)
+        client.send_message(chat_id, outbound.text, reply_markup=outbound.reply_markup)
+        return
+
+    # An operator mid-/addfarmer-flow reply -- routed here, not into
+    # registration.handle_incoming, so an operator's free-text answer
+    # about someone else's plot is never mistaken for his own
+    # registration attempt. See ADR-013 Part 2 Decision 13.
+    addfarmer_outbound = proxy_registration.handle_incoming(chat_id, incoming, storage)
+    if addfarmer_outbound is not None:
+        client.send_message(chat_id, addfarmer_outbound.text, reply_markup=addfarmer_outbound.reply_markup)
         return
 
     # A farmer mid-reply to a "yes, tap and tell me the date" rollover

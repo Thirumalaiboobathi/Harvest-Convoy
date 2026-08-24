@@ -144,12 +144,16 @@ def run_daily_watch(
 
 
 def _apply_rollover_exclusion(storage: Storage, cluster_id: str, season_id: str) -> list[Plot]:
-    """This season's plot roster, minus any plot whose farmer declined a
-    rollover prompt or never replied to one (ADR-011 Part 1) -- excluded
-    from the scheduling pool entirely, not merely ranked last. A plot
-    with no rollover-prompt record at all for this season_id is included
-    by default (a brand-new registration, or a cluster/season
-    run_season_rollover has never been triggered for). Shared by the
+    """This season's plot roster, minus (a) any plot whose farmer
+    declined a rollover prompt or never replied to one (ADR-011 Part 1)
+    and (b) any plot retired by ADR-013 Part 2's /linkfarmer (Decision
+    18) -- both excluded from the scheduling pool entirely, not merely
+    ranked last. A plot with no rollover-prompt record at all for this
+    season_id is included by default (a brand-new registration, a
+    cluster/season run_season_rollover has never been triggered for, or
+    -- ADR-013 Part 2 Decision 16 -- a permanently unreachable farmer,
+    for whom run_season_rollover now deliberately writes no prompt at
+    all rather than one that would otherwise exclude him). Shared by the
     normal daily trigger and the machine-breakdown recompute (ADR-011
     Part 2), so a plot excluded this morning doesn't reappear in an
     afternoon recompute.
@@ -164,6 +168,15 @@ def _apply_rollover_exclusion(storage: Storage, cluster_id: str, season_id: str)
             cluster_id, len(excluded_by_rollover), season_id, sorted(excluded_by_rollover),
         )
         plots = [p for p in plots if p.plot_id not in excluded_by_rollover]
+
+    excluded_by_link = [p.plot_id for p in plots if p.retired_reason is not None]
+    if excluded_by_link:
+        logger.info(
+            "watcher: cluster=%s excluding %d retired plot(s) (linked to a "
+            "canonical farmer via /linkfarmer): %s",
+            cluster_id, len(excluded_by_link), sorted(excluded_by_link),
+        )
+        plots = [p for p in plots if p.retired_reason is None]
     return plots
 
 
@@ -785,20 +798,28 @@ def run_season_rollover(
         now_iso = datetime.now(timezone.utc).isoformat()
 
         if farmer.telegram_chat_id is None:
-            # Never gets a real send attempt -- the record still lands on
-            # storage (asked_at set) so this plot is correctly excluded
-            # via replied staying None, not silently defaulted to
-            # "included" for lack of any record at all. See ADR-011
-            # Part 1, Decision 2's no-record-means-include rule: that
-            # rule is for a plot nobody has ever asked about, not one we
-            # tried and couldn't reach.
-            storage.put_season_rollover_prompt(SeasonRolloverPrompt(
-                plot_id=plot.plot_id, farmer_id=farmer.farmer_id, cluster_id=cluster_id,
-                old_season_id=old_season_id, new_season_id=new_season_id, asked_at=now_iso,
-            ))
+            # No prompt record written at all -- this plot stays included
+            # by default next trigger, via ADR-011 Part 1 Decision 2's
+            # own no-record-means-include rule.
+            #
+            # Corrected, ADR-013 Part 2 Decision 16: this branch used to
+            # write a prompt record anyway (asked_at set, replied left
+            # None) specifically so the plot would be *excluded* --
+            # treating "couldn't ask" the same as "asked and got no
+            # answer". That was defensible before proxy registration
+            # existed, when telegram_chat_id=None was always an anomaly
+            # (a seed script or a hand-edited record), never a real,
+            # by-design, permanent state. ADR-013 Part 2 makes
+            # "registered, permanently unreachable" an intended
+            # population for the first time, and the old default would
+            # have silently and permanently excluded exactly the farmers
+            # that feature exists to include, starting the very next
+            # season. Writing nothing here lets the existing default do
+            # the correct thing instead.
             logger.info(
-                "run_season_rollover: farmer %s has no chat_id, cannot ask "
-                "about plot=%s -- recorded as unknown",
+                "run_season_rollover: farmer %s has no chat_id -- no prompt "
+                "recorded, plot=%s stays included by default next trigger "
+                "(ADR-011 Part 1 Decision 2)",
                 farmer.farmer_id, plot.plot_id,
             )
             skipped_no_chat_id += 1

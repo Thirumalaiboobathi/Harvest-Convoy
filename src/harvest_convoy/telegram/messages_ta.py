@@ -837,3 +837,108 @@ def advocate_argument(
         # "Has been standing ready for {n} days; needs harvesting soon."
     return "இந்த வயலுக்கு இன்று முன்னுரிமை தேவை."
     # "This plot needs priority today."
+
+
+# --- Proxy registration and farmer linking (ADR-013 Part 2) -- DRAFT,
+# pending native-speaker review like every string in this project. ---
+
+def operator_only_command() -> str:
+    return "இந்தக் கட்டளையை ஆபரேட்டர் மட்டுமே பயன்படுத்த முடியும்."
+    # "Only the operator can use this command."
+
+
+def addfarmer_farmer_name_prompt() -> str:
+    return "விவசாயியின் பெயர் என்ன?"
+    # "What is the farmer's name?"
+
+
+def addfarmer_contact_note_prompt() -> str:
+    return (
+        "தொடர்பு எண் அல்லது குறிப்பு (இருந்தால்) தட்டச்சு செய்யவும், "
+        "இல்லையெனில் 'skip' என தட்டச்சு செய்யவும்."
+    )
+    # "Type a contact number or note if there is one, otherwise type 'skip'."
+
+
+def addfarmer_has_phone_prompt() -> str:
+    return "இந்த விவசாயிக்கு டெலிகிராம் உள்ள மொபைல் போன் உள்ளதா?"
+    # "Does this farmer have a mobile phone with Telegram?"
+
+
+def addfarmer_confirm_summary(name: str, village: str, area_text: str, date_text: str) -> str:
+    return f"{name}, {village}, {area_text}, நடவு தேதி {date_text} — பதிவு செய்யவா?"
+    # "{name}, {village}, {area_text}, transplanted {date_text} — register?"
+
+
+def addfarmer_registered_toast() -> str:
+    return "பதிவு செய்யப்பட்டது."
+    # "Registered."
+
+
+def addfarmer_cancelled() -> str:
+    return "பதிவு ரத்து செய்யப்பட்டது -- எதுவும் சேமிக்கப்படவில்லை."
+    # "Registration cancelled -- nothing was saved."
+
+
+def addfarmer_nothing_pending() -> str:
+    return "எந்தப் பதிவும் நடைபெறவில்லை. தொடங்க /addfarmer அனுப்பவும்."
+    # "No registration in progress. Send /addfarmer to start one."
+
+
+def addfarmer_complete_no_phone(name: str) -> str:
+    return (
+        f"பதிவு முடிந்தது. {name}-க்கு தொலைபேசி இல்லாததால், அவருக்கான "
+        f"தகவல்களை நீங்கள் நேரடியாகத் தெரிவிக்க வேண்டும்."
+    )
+    # "Registration complete. Since {name} has no phone, you'll need to
+    #  inform them directly."
+
+
+def addfarmer_complete_has_phone(name: str) -> str:
+    return (
+        f"பதிவு முடிந்தது. {name}-க்கு தொலைபேசி இல்லாததால், அவருக்கான "
+        f"தகவல்களை நீங்கள் நேரடியாகத் தெரிவிக்க வேண்டும். பின்னர் அவர் "
+        f"சொந்தமாக இந்த போட்டுக்கு செய்தி அனுப்பினால், இரண்டு பதிவுகளையும் "
+        f"இணைக்க /linkfarmer பயன்படுத்தவும்."
+    )
+    # "Registration complete. Since {name} has no phone, you'll need to
+    #  inform them directly. If they later message this bot themselves,
+    #  use /linkfarmer to connect the two records."
+
+
+def linkfarmer_nothing_to_link() -> str:
+    return "இணைக்க எந்த விவசாயியும் இல்லை."
+    # "There is no farmer to link."
+
+
+def linkfarmer_pick_proxy_prompt() -> str:
+    return "எந்த விவசாயியை இணைக்க விரும்புகிறீர்கள்?"
+    # "Which farmer do you want to link?"
+
+
+def linkfarmer_pick_match_prompt(proxy_name: str) -> str:
+    return f"{proxy_name}-ஐ எந்த சுய-பதிவு செய்த விவசாயியுடன் இணைப்பது?"
+    # "Link {proxy_name} with which self-registered farmer?"
+
+
+def linkfarmer_confirm_prompt(proxy_name: str, candidate_name: str) -> str:
+    return (
+        f"{proxy_name}-ஐ (நீங்கள் பதிவு செய்தது) {candidate_name}-உடன் "
+        f"(சுய-பதிவு) இணைக்கவா? {candidate_name}-ன் தனி வயல் இனி "
+        f"பட்டியலிடப்படாது -- {proxy_name}-ன் வயல் தொடரும், இப்போது "
+        f"நேரடியாக டெலிகிராமில் சென்றடையும்."
+    )
+    # "Link {proxy_name} (registered by you) with {candidate_name}
+    #  (self-registered)? {candidate_name}'s separate plot will stop
+    #  being scheduled -- {proxy_name}'s plot continues, now reaching
+    #  them directly on Telegram."
+
+
+def linkfarmer_linked_toast() -> str:
+    return "இணைக்கப்பட்டது."
+    # "Linked."
+
+
+def linkfarmer_cancelled_toast() -> str:
+    return "ரத்து செய்யப்பட்டது -- எதுவும் இணைக்கப்படவில்லை."
+    # "Cancelled -- nothing was linked."
