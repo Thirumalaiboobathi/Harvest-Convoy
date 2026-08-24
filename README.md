@@ -605,7 +605,7 @@ ADR-008, Decision 14 (the finding) and Decision 15 (the fix).
 
 ## Verification finds what tests don't
 
-Seven separate defects turned up across this project's history, none of
+Eight separate defects turned up across this project's history, none of
 them caught by the test suite going red:
 
 1. **Registration never persisted a `Farmer`/`Plot` to storage at all.**
@@ -635,17 +635,63 @@ them caught by the test suite going red:
    dangerous of the two, since an unauthorized "yes" could redirect
    another farmer's date-reply flow to the imposter's own chat. Same
    audit, same question (ADR-012).
+8. **A Tamil fallback string doubled a noun in both languages** —
+   "the selected plot's plot instead" — in a farmer-facing "why did I
+   lose" answer, shipped two turns before it was found, with a test
+   that stayed green the whole time: the test asserted
+   `DEFAULT_WINNER_LABEL in text`, which is true of the broken string
+   too. A substring assertion passes on gibberish that happens to
+   contain the substring; it was never checking the sentence was
+   grammatical, only that a fragment of it was present. Found by
+   grepping every remaining use of the fallback constant across the
+   codebase and rendering both paths by hand to actually read the
+   output, not by re-reading the passing test (ADR-013 Part 3).
 
 Every test touching these paths was green the whole time, because a
 test only exercises what someone already thought to check when they
-wrote it. None of these seven were found that way. What found them
-instead was the same method each time, repeated across four ADRs: run
+wrote it. None of these eight were found that way. What found them
+instead was the same handful of methods, repeated across five ADRs: run
 the system against something real instead of a demo, try to build the
 thing that reads data the system is supposed to be producing and see
-what's actually there, or read every call site of a function that's
-supposed to matter and confirm it's called from where it needs to be.
-Tests confirm what you thought to check. Verification — actually using,
-replaying, or auditing the system end-to-end — finds what you didn't.
+what's actually there, read every call site of a function that's
+supposed to matter and confirm it's called from where it needs to be,
+or — for #8 — grep every call site of a *value* rather than a function
+and actually render each one instead of trusting that a passing
+assertion meant the output was correct. Tests confirm what you thought
+to check. Verification — actually using, replaying, rendering, or
+auditing the system end-to-end — finds what you didn't.
+
+**A ninth finding, different in kind from the eight above: the
+verification harness itself was lying.** `scripts/print_tamil_strings.py`
+exists specifically so every new Tamil string gets read by a human
+before it ships. Its demo of `escalation_resolved_assigned`'s no-farmer
+fallback called the function as
+`escalation_resolved_assigned(messages_ta.DEFAULT_WINNER_LABEL)` —
+passing the fallback *label* as the argument. After
+`escalation_resolved_assigned` was fixed to take `winner_name: str |
+None`, a non-`None` string (even the fallback label itself) still
+re-enters the real-farmer-name branch — so this call kept rendering the
+exact broken "வயல் க்கு" text the fix was supposed to eliminate, right
+there in the review dump meant to catch it. Production calls it as
+`escalation_resolved_assigned(None)`, which is the only call that ever
+exercises the fixed branch. Every prior native-speaker review round
+that looked at this fallback was reading a sentence the running code
+could never actually produce; the one path a human was supposed to
+catch a mistake in was never correctly shown to them at all. This is
+not "another defect the harness happened to miss" — the seven above and
+#8 were things the harness (or a test) could have caught but didn't
+design for; this is the harness actively calling production code the
+wrong way and reporting a clean result. A verification tool that
+doesn't call the way production calls doesn't just fail to find bugs —
+it manufactures confidence that a review happened when it didn't, which
+is worse than having no harness at all: "we checked" now means
+something false. Fixed by making the harness call exactly what
+`webhook.py` calls (`None`, not the label), and by adding the fallback
+demo that had never existed for `route_drop_confirm_prompt` either.
+Every harness in this project (`print_tamil_strings.py`,
+`explain_decision.py`, `equity_report.py`, `machinery_gap.py`) is now
+worth the same question: does its demo/test data actually match how the
+real call site invokes it, or only resemble it.
 
 ## Cost
 
