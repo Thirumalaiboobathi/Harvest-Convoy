@@ -853,7 +853,11 @@ def handle_route_drop_callback(
 
     plot = storage.get_plot(plot_id)
     farmer = storage.get_farmer(plot.farmer_id) if plot is not None else None
-    farmer_name = farmer.name if farmer is not None else mod.DEFAULT_WINNER_LABEL
+    # None (not mod.DEFAULT_WINNER_LABEL) when no farmer record was
+    # found -- route_drop_confirm_prompt picks its own correctly-
+    # grammared fallback phrase for that case (fixed 2026-08-24, same
+    # class as escalation_resolved_assigned's fix above).
+    farmer_name = farmer.name if farmer is not None else None
     # Failure path: dropping the only remaining stop is allowed (the
     # operator's prerogative), but the confirmation prompt gets an added
     # warning line so it isn't one accidental tap away (ADR-013 Decision

@@ -149,6 +149,9 @@ def test_why_lost_reason_matches_a_direct_resolution_reason_call(tmp_path) -> No
 
 
 def test_why_lost_falls_back_to_default_winner_label_when_winner_unresolvable(tmp_path) -> None:
+    """Regression guard for a doubled-noun bug found 2026-08-24: the
+    fallback used to flow through why_lost_answer's "{name}'s plot"
+    template unchanged, producing "the selected plot's plot instead"."""
     storage = FileStorage(tmp_path / "s.json")
     storage.put_decision_record(_lost_record("p1", "f1", "2026-09-09", "p-winner"))
     # No winner farmer/plot seeded -- opponent_plot_id doesn't resolve.
@@ -156,6 +159,11 @@ def test_why_lost_falls_back_to_default_winner_label_when_winner_unresolvable(tm
     text = farmer_why.why_lost_text(storage, "p1", SEASON, "2026-09-09", language="en")
 
     assert messages_en.DEFAULT_WINNER_LABEL in text
+    assert "plot's plot" not in text
+
+    text_ta = farmer_why.why_lost_text(storage, "p1", SEASON, "2026-09-09", language="ta")
+    assert messages_ta.DEFAULT_WINNER_DATIVE in text_ta
+    assert "வயல் உடைய வயலுக்கு" not in text_ta
 
 
 @pytest.mark.parametrize("missing_field", ["own_claim", "opponent_claim"])

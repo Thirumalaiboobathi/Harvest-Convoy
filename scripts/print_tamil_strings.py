@@ -160,8 +160,8 @@ def main() -> None:
     print("escalation_already_resolved():", messages_ta.escalation_already_resolved())
     print("escalation_resolved_assigned('Kannan Raja'):",
           messages_ta.escalation_resolved_assigned("Kannan Raja"))
-    print("escalation_resolved_assigned(DEFAULT_WINNER_LABEL):",
-          messages_ta.escalation_resolved_assigned(messages_ta.DEFAULT_WINNER_LABEL))
+    print("escalation_resolved_assigned(None) -- no farmer record found:",
+          messages_ta.escalation_resolved_assigned(None))
     print("unrecognized_action():", messages_ta.unrecognized_action())
 
     _section("advocate_argument -- templated (not model-generated) Tamil, all branches")
@@ -294,6 +294,9 @@ def main() -> None:
     print()
     print("route_drop_confirm_prompt('Muthu Pandian', is_last_plot=True):")
     print(messages_ta.route_drop_confirm_prompt("Muthu Pandian", is_last_plot=True))
+    print()
+    print("route_drop_confirm_prompt(None, is_last_plot=False) -- no farmer record found:")
+    print(messages_ta.route_drop_confirm_prompt(None, is_last_plot=False))
     print()
     print("route_already_confirmed():", messages_ta.route_already_confirmed())
     print()

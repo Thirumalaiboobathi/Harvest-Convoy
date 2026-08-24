@@ -147,6 +147,24 @@ def test_escalation_resolved_assigned_renders_correct_tamil_grammar_both_ways() 
     assert "வயல் க்கு" not in fallback_text
 
 
+def test_route_drop_confirm_prompt_renders_correct_tamil_grammar_both_ways() -> None:
+    """Same bug class, same fix shape as escalation_resolved_assigned's
+    fallback (see the test above): a real farmer's name is a proper noun
+    and takes a hyphenated genitive ("{name}-ன்"); the no-farmer-found
+    fallback is a genuine Tamil common noun. Genitive-fusing
+    DEFAULT_WINNER_LABEL and reusing the template's own trailing
+    "வயலை" would double the noun ("வயலின் வயலை" -- "the selected
+    plot's plot"), so DEFAULT_WINNER_ACCUSATIVE stands in for the whole
+    fragment instead. Regression guard for the bug found 2026-08-24."""
+    assert messages_ta.route_drop_confirm_prompt("Kannan Raja", is_last_plot=False) == (
+        "Kannan Raja-ன் வயலை இன்றைய பாதையிலிருந்து நீக்கவா?"
+    )
+    fallback_text = messages_ta.route_drop_confirm_prompt(None, is_last_plot=False)
+    assert fallback_text == "தேர்ந்தெடுக்கப்பட்ட வயலை இன்றைய பாதையிலிருந்து நீக்கவா?"
+    assert "வயலின் வயலை" not in fallback_text
+    assert "வயல்-ன்" not in fallback_text
+
+
 def test_handle_update_dispatches_message_to_registration(tmp_path) -> None:
     storage = FileStorage(tmp_path / "storage.json")
     save_state(RegistrationState(chat_id=42))

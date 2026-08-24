@@ -245,13 +245,21 @@ def why_not_ready_answer(
     )
 
 
-def why_lost_answer(formatted_date: str, winner_name: str, reason: str) -> str:
+def why_lost_answer(formatted_date: str, winner_name: str | None, reason: str) -> str:
     """`reason` is built by calling this same module's resolution_reason()
     a second time, fed from the loser's own DecisionRecord -- guaranteed
     byte-identical to what the original escalation_resolved_lost message
     said, not an independently-worded restatement. See ADR-013 Part 3,
-    Decision 23."""
-    return f"On {formatted_date}, the machine went to {winner_name}'s plot instead -- {reason}."
+    Decision 23.
+
+    winner_name=None means no farmer record was found for the winning
+    plot -- uses DEFAULT_WINNER_LABEL directly rather than appending
+    "'s plot" to it, which would double the noun ("the selected plot's
+    plot") -- found via the 2026-08-24 grep sweep, same class as
+    escalation_resolved_lost's own already-documented doubled-plot fix.
+    """
+    subject = f"{winner_name}'s plot" if winner_name else DEFAULT_WINNER_LABEL
+    return f"On {formatted_date}, the machine went to {subject} instead -- {reason}."
 
 
 def escalation_resolved_won(area_acres: float, area_unit: str) -> str:
@@ -517,8 +525,15 @@ def route_edit_header(cluster_name: str) -> str:
     return f"{cluster_name} -- editing today's route:"
 
 
-def route_drop_confirm_prompt(farmer_name: str, *, is_last_plot: bool) -> str:
-    text = f"Drop {farmer_name}'s plot from today's route?"
+def route_drop_confirm_prompt(farmer_name: str | None, *, is_last_plot: bool) -> str:
+    # farmer_name=None means no farmer record was found for this plot.
+    # DEFAULT_WINNER_LABEL is already "the selected plot" -- appending
+    # "'s plot" to it would double the noun, the same class of bug
+    # escalation_resolved_lost's own comment documents catching once
+    # before. See messages_ta.py's DEFAULT_WINNER_ACCUSATIVE comment for
+    # the fuller reasoning (this function's Tamil counterpart).
+    subject = f"{farmer_name}'s plot" if farmer_name else DEFAULT_WINNER_LABEL
+    text = f"Drop {subject} from today's route?"
     if is_last_plot:
         text += (
             " This is the last plot on today's route -- confirming leaves "

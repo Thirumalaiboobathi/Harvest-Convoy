@@ -69,7 +69,11 @@ def why_lost_text(
         return mod.why_not_recorded(formatted_date)
     winner_plot = storage.get_plot(record.opponent_plot_id) if record.opponent_plot_id else None
     winner_farmer = storage.get_farmer(winner_plot.farmer_id) if winner_plot is not None else None
-    winner_name = winner_farmer.name if winner_farmer is not None else mod.DEFAULT_WINNER_LABEL
+    # None (not mod.DEFAULT_WINNER_LABEL) when no farmer record was
+    # found for the winning plot -- why_lost_answer picks its own
+    # correctly-formed fallback phrase for that case, same fix shape as
+    # escalation_resolved_assigned/route_drop_confirm_prompt (2026-08-24).
+    winner_name = winner_farmer.name if winner_farmer is not None else None
     reason = mod.resolution_reason(
         bumped_winner=record.opponent_claim["bumped_last_season"],
         bumped_loser=record.own_claim["bumped_last_season"],

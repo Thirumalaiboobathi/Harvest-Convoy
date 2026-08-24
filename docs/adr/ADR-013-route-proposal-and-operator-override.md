@@ -2181,3 +2181,65 @@ call site, a hyphenated genitive `-ன்` rather than a dative) was found
 to have the identical latent shape and was deliberately **not** fixed
 here — flagged, not silently bundled into an otherwise small, single-
 purpose commit.
+
+## Resolved on review (2026-08-24, continued): route_drop_confirm_prompt, and two more found by the sweep
+
+`route_drop_confirm_prompt` fixed on request, same approach. On
+inspection its case wasn't quite `DEFAULT_WINNER_DATIVE`'s sibling: the
+real-name path builds a possessor (genitive `{name}-ன்`) in front of a
+*separate* possessed noun (the template's own trailing `வயலை`,
+accusative). Genitive-fusing `DEFAULT_WINNER_LABEL`
+(`தேர்ந்தெடுக்கப்பட்ட வயலின்`) and keeping that trailing `வயலை` would
+have produced "the selected plot's plot" — grammatically fused, but
+doubling the noun, a distinct failure mode from the sandhi bug (see
+`messages_en.py`'s pre-existing comment on `escalation_resolved_lost`,
+which documents catching this exact doubling once before, in English).
+Named the new constant for what it actually is —
+`DEFAULT_WINNER_ACCUSATIVE`, standing in for the whole
+"`{possessor}`-ன் வயலை" fragment at once — rather than forcing a
+"genitive" label onto something that isn't one, per your instruction to
+match the constant's actual grammar. Tested the same way as
+`escalation_resolved_assigned`: both paths rendered, plus a negative
+guard against the doubled/unfused form.
+
+**The requested sweep (grep every use of `DEFAULT_WINNER_LABEL` and
+`DEFAULT_OTHER_FARMER_LABEL`) found two more live issues, not zero:**
+
+1. `scripts/print_tamil_strings.py` demonstrated
+   `escalation_resolved_assigned`'s fallback by calling
+   `escalation_resolved_assigned(messages_ta.DEFAULT_WINNER_LABEL)` —
+   passing the *label itself* as `winner_name`, which re-enters the
+   proper-noun branch and reproduces the exact bug just fixed
+   ("வயல் க்கு") in the review dump meant to catch it. Fixed to call
+   `escalation_resolved_assigned(None)`, matching how `webhook.py`
+   actually calls it now. Also added a missing fallback demo for
+   `route_drop_confirm_prompt(None, ...)`, which had never been shown
+   to a reviewer at all.
+2. `telegram/farmer_why.py`'s `why_lost_text` (this ADR's own Part 3
+   code) built its fallback the same collapsed way
+   `escalation_resolved_assigned`'s call site used to —
+   `winner_name = ... else mod.DEFAULT_WINNER_LABEL` — before passing
+   it into `why_lost_answer`. That function's template, `{winner_name}'s
+   plot` (English) / `{winner_name} உடைய வயலுக்கு` (Tamil), doubled the
+   noun in **both** languages once the fallback landed: "the selected
+   plot's plot instead" / "தேர்ந்தெடுக்கப்பட்ட வயல் உடைய
+   வயலுக்குச்". Confirmed live by calling the actual function, not
+   inferred. This was reachable in production (a lost escalation whose
+   winning plot's farmer record can't be resolved) and had shipped in
+   the Part 3 commit — the existing test only asserted
+   `DEFAULT_WINNER_LABEL in text`, which is true of the broken string
+   too, so it didn't catch the doubling. Fixed the same way: `why_lost_
+   answer` takes `winner_name: str | None`; `None` builds the subject
+   from `DEFAULT_WINNER_LABEL` (English) or reuses `DEFAULT_WINNER_
+   DATIVE` (Tamil — the same constant `escalation_resolved_assigned`
+   already uses, since this template independently needed the same
+   dative case) directly, never suffixing either. Test rewritten to
+   assert the exact non-doubled fallback text in both languages, with a
+   negative guard.
+
+`DEFAULT_WINNER_DATIVE` is now used by two functions
+(`escalation_resolved_assigned`, `why_lost_answer`) instead of one — the
+comment beside `DEFAULT_WINNER_LABEL` was updated to say so, and now
+reads "found four times," not three, with the general lesson (grep
+before adding a fifth use; check both the case-marker-fusion question
+*and* the doubled-noun question) stated for whoever adds the next one.

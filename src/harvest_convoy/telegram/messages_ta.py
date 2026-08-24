@@ -419,9 +419,17 @@ def why_not_ready_answer(
     #  was not ready regardless.)"
 
 
-def why_lost_answer(formatted_date: str, winner_name: str, reason: str) -> str:
+def why_lost_answer(formatted_date: str, winner_name: str | None, reason: str) -> str:
     # DRAFT, pending native-speaker review (ADR-013 Part 3).
-    return f"{formatted_date} அன்று, இயந்திரம் {winner_name} உடைய வயலுக்குச் சென்றது -- {reason}."
+    # winner_name=None -- no farmer record found for the winning plot --
+    # reuses DEFAULT_WINNER_DATIVE (already the correct fused dative for
+    # the fallback noun) rather than genitive-suffixing DEFAULT_WINNER_
+    # LABEL and keeping this template's own trailing "வயலுக்கு", which
+    # would double the noun ("வயல் உடைய வயலுக்கு" -- "the selected
+    # plot's plot") -- found via the 2026-08-24 grep sweep, same class
+    # as escalation_resolved_assigned/route_drop_confirm_prompt's fixes.
+    dative_phrase = f"{winner_name} உடைய வயலுக்கு" if winner_name else DEFAULT_WINNER_DATIVE
+    return f"{formatted_date} அன்று, இயந்திரம் {dative_phrase}ச் சென்றது -- {reason}."
     # "On {date}, the machine went to {winner_name}'s plot instead --
     #  {reason}."
 
@@ -583,22 +591,40 @@ DEFAULT_WINNER_LABEL = "தேர்ந்தெடுக்கப்பட்�
 # (dative) is வயலுக்கு, never "வயல் க்கு". A template written for the
 # proper-noun shape (spaced marker) silently produces broken Tamil the
 # moment a common-noun fallback like this constant flows through it.
-# Found twice in this codebase this way -- see DEFAULT_WINNER_DATIVE
-# just below (escalation_resolved_assigned's fallback, fixed) and
-# ADR-013 Part 3's "Resolved on review" section for the sibling bug in
-# why_not_ready_answer's day-count suffix (same root cause, a different
-# case marker). If DEFAULT_WINNER_LABEL is ever passed through another
-# template that appends its own case marker at the call site (a grep
-# for "DEFAULT_WINNER_LABEL" will show every current use), that
-# template needs the same pre-formed-phrase treatment, not a suffix
-# appended to the bare noun.
+# Found four times in this codebase this way -- DEFAULT_WINNER_DATIVE
+# (reused by escalation_resolved_assigned AND why_lost_answer, both
+# needing a dative) and DEFAULT_WINNER_ACCUSATIVE just below
+# (route_drop_confirm_prompt's fallback), plus ADR-013 Part 3's
+# "Resolved on review" section for the sibling bug in why_not_ready_
+# answer's day-count suffix (same root cause, a different case marker).
+# All four were found by grepping every use of this constant, not by
+# re-reading each call site in isolation -- if you're adding a fifth
+# use, grep "DEFAULT_WINNER_LABEL" first, and check both (a) whether
+# the case marker fuses for a common noun and (b) whether the template
+# already has its own trailing noun that a genitive/possessive fallback
+# would double (see DEFAULT_WINNER_ACCUSATIVE's comment for that second
+# failure mode -- it's not just about the case marker).
 
 DEFAULT_WINNER_DATIVE = "தேர்ந்தெடுக்கப்பட்ட வயலுக்கு"
-# Pre-fused dative for the fallback case, per the rule above --
-# escalation_resolved_assigned is written for a proper noun's spaced
-# "{name} க்கு"; passing DEFAULT_WINNER_LABEL through that same
-# template produced "வயல் க்கு" (ungrammatical). This is the correct
-# fused form instead, used as a complete phrase, never suffixed again.
+# Pre-fused dative for the fallback case, per the rule above -- used
+# directly (never suffixed again) by both escalation_resolved_assigned
+# ("{name} க்கு" template) and why_lost_answer ("{name} உடைய வயலுக்கு"
+# template, which independently doubled the noun for the same reason
+# before this fix -- see that function's own comment).
+
+DEFAULT_WINNER_ACCUSATIVE = "தேர்ந்தெடுக்கப்பட்ட வயலை"
+# For route_drop_confirm_prompt's fallback. Not the genitive sibling of
+# DEFAULT_WINNER_DATIVE, on inspection: that template's real-name path
+# builds a POSSESSOR (genitive "{name}-ன்") in front of a separate
+# POSSESSED noun ("வயலை", accusative -- the plot being dropped). Fusing
+# a genitive onto DEFAULT_WINNER_LABEL ("தேர்ந்தெடுக்கப்பட்ட வயலின்")
+# and keeping the template's own trailing "வயலை" would read "the
+# selected plot's plot" -- grammatically fused, but doubling the noun,
+# the exact class of bug messages_en.py's escalation_resolved_lost
+# comment already documents catching once before. There's no possessor
+# in the fallback case, so this constant stands in for the whole
+# "{possessor}-ன் வயலை" fragment at once, already accusative-marked,
+# used as a complete phrase and never suffixed further.
 
 
 def escalation_resolved_assigned(winner_name: str | None) -> str:
@@ -819,8 +845,13 @@ def route_edit_header(cluster_name: str) -> str:
     # "{cluster_name} -- editing today's route:"
 
 
-def route_drop_confirm_prompt(farmer_name: str, *, is_last_plot: bool) -> str:
-    text = f"{farmer_name}-ன் வயலை இன்றைய பாதையிலிருந்து நீக்கவா?"
+def route_drop_confirm_prompt(farmer_name: str | None, *, is_last_plot: bool) -> str:
+    # farmer_name=None means no farmer record was found for this plot --
+    # uses the pre-formed DEFAULT_WINNER_ACCUSATIVE rather than gluing
+    # this function's own "{name}-ன் வயலை" onto DEFAULT_WINNER_LABEL,
+    # which would double "plot" (see DEFAULT_WINNER_ACCUSATIVE's comment).
+    subject = f"{farmer_name}-ன் வயலை" if farmer_name else DEFAULT_WINNER_ACCUSATIVE
+    text = f"{subject} இன்றைய பாதையிலிருந்து நீக்கவா?"
     # "Drop {farmer_name}'s plot from today's route?"
     if is_last_plot:
         text += (
