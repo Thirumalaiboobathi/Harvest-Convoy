@@ -33,6 +33,7 @@ from harvest_convoy.storage.fairness import record_bump
 from harvest_convoy.storage.interface import HarvestConfirmation, RouteOverride
 from harvest_convoy.telegram import (
     farmer_why,
+    help as help_command,
     notify,
     operator_enrollment,
     proxy_registration,
@@ -1868,6 +1869,18 @@ def handle_update(
     if (incoming.text or "").strip().lower().startswith(operator_enrollment.COMMAND):
         outbound = operator_enrollment.handle_operator_command(chat_id, incoming.text, storage)
         client.send_message(chat_id, outbound.text, reply_markup=outbound.reply_markup)
+        return
+
+    # "/help" -- ADR-014, checked before anything else for the same
+    # reason every other command already is: never parsed as farmer
+    # registration text or a rollover date reply. Never touches any
+    # pending state (registration/rollover/addfarmer) -- read, answer,
+    # done; the sender's next real message continues whatever was
+    # already in progress, unaffected.
+    if (incoming.text or "").strip().lower().startswith(help_command.HELP_COMMAND):
+        cluster_id = os.environ.get("HARVEST_CONVOY_CLUSTER_ID")
+        reply_text = help_command.build_help_reply(storage, cluster_id, chat_id, season_id)
+        client.send_message(chat_id, reply_text)
         return
 
     # "/addfarmer" and "/linkfarmer" -- ADR-013 Part 2, operator-only,

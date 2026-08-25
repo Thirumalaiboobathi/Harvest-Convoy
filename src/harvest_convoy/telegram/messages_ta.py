@@ -1088,3 +1088,71 @@ def linkfarmer_undone_toast() -> str:
 def linkfarmer_cancelled_toast() -> str:
     return "ரத்து செய்யப்பட்டது -- எதுவும் இணைக்கப்படவில்லை."
     # "Cancelled -- nothing was linked."
+
+
+# --- /help (ADR-014) -- read-only status, assembled from stored records
+# only, never a live recompute. See telegram/help.py. DRAFTS, pending
+# native-speaker review.
+
+def help_unavailable() -> str:
+    return "எங்கள் தரப்பில் ஏதோ சரியாக அமைக்கப்படவில்லை -- பின்னர் முயற்சிக்கவும்."
+    # "Something's not set up right on our end -- please try again later."
+
+
+def help_unregistered() -> str:
+    return "நீங்கள் இன்னும் பதிவு செய்யவில்லை -- தொடங்க எனக்கு ஏதேனும் செய்தி அனுப்புங்கள்."
+    # "You're not registered yet -- send me any message to get started."
+
+
+def help_no_plot_found() -> str:
+    return "உங்கள் பதிவு உள்ளது, ஆனால் வயல் பதிவில் இல்லை -- உங்கள் ஆபரேட்டரைத் தொடர்பு கொள்ளவும்."
+    # "We have your registration but no plot on record -- please contact your operator."
+
+
+def help_farmer_reply(
+    village: str | None, area_text: str, transplant_date_text: str, projected_ready_text: str | None,
+) -> str:
+    village_text = village or "கிராமம் பதிவு செய்யப்படவில்லை"
+    if projected_ready_text:
+        ready_text = f"{projected_ready_text} அளவில் தயாராக இருக்கும் என எதிர்பார்க்கப்படுகிறது"
+    else:
+        ready_text = (
+            "இன்னும் கிடைக்கவில்லை -- உங்கள் வயல் தயாராகும் ஒரு வாரத்திற்கு "
+            "முன்பு அந்த மதிப்பீட்டை அனுப்புவோம்"
+        )
+    return (
+        f"உங்கள் வயல்: {village_text}, {area_text}, நடவு தேதி {transplant_date_text}.\n"
+        f"தயாராகும் தேதி: {ready_text}.\n"
+        f"இயந்திரம் திட்டமிடப்படும்போது அல்லது உங்கள் வயலுக்கு கவனம் "
+        f"தேவைப்படும்போது நாங்கள் உங்களுக்குச் செய்தி அனுப்புவோம் -- விசாரிக்க "
+        f"வேண்டாம்."
+    )
+    # "Your plot: {village}, {area}, transplanted {date}. Ready date:
+    #  {ready}. We'll message you when the machine is scheduled or your
+    #  plot needs attention -- no need to ask." -- ready_text's fallback:
+    #  "not available yet -- we send that estimate about a week before
+    #  your plot is ready."
+
+
+def help_operator_reply(cluster_name: str) -> str:
+    return (
+        f"நீங்கள் {cluster_name}-க்கான ஆபரேட்டர்.\n"
+        f"கட்டளைகள்: தொலைபேசி இல்லாத விவசாயியைப் பதிவு செய்ய /addfarmer, "
+        f"சுய-பதிவுக்குப் பிறகு இணைக்க /linkfarmer, உங்களை மாற்ற "
+        f"/operator <code>. பாதை மாற்றங்களும் பழுது அறிக்கைகளும் இன்றைய "
+        f"செய்திகளில் உள்ள பொத்தான்கள் மூலம் நடக்கும்."
+    )
+    # "You're the operator for {cluster_name}. Commands: /addfarmer to
+    #  register a phone-less farmer, /linkfarmer to connect after
+    #  self-registration, /operator <code> to replace yourself. Route
+    #  changes and breakdown reports happen via the buttons on today's
+    #  messages."
+
+
+def help_operator_addendum(cluster_name: str) -> str:
+    return (
+        f"நீங்கள் {cluster_name}-க்கான ஆபரேட்டரும் கூட -- கட்டளைகள்: "
+        f"/addfarmer, /linkfarmer, /operator <code>."
+    )
+    # "You're also the operator for {cluster_name} -- commands:
+    #  /addfarmer, /linkfarmer, /operator <code>."

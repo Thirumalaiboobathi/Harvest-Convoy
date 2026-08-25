@@ -680,3 +680,55 @@ def linkfarmer_undone_toast() -> str:
 
 def linkfarmer_cancelled_toast() -> str:
     return "Cancelled -- nothing was linked."
+
+
+# --- /help (ADR-014) -- read-only status, assembled from stored records
+# only, never a live recompute. See telegram/help.py.
+
+def help_unavailable() -> str:
+    return "Something's not set up right on our end -- please try again later."
+
+
+def help_unregistered() -> str:
+    return "You're not registered yet -- send me any message to get started."
+
+
+def help_no_plot_found() -> str:
+    return "We have your registration but no plot on record -- please contact your operator."
+
+
+def help_farmer_reply(
+    village: str | None, area_text: str, transplant_date_text: str, projected_ready_text: str | None,
+) -> str:
+    village_text = village or "village not recorded"
+    ready_text = (
+        f"expected around {projected_ready_text}" if projected_ready_text
+        else "not available yet -- we send that estimate about a week before your plot is ready"
+    )
+    return (
+        f"Your plot: {village_text}, {area_text}, transplanted {transplant_date_text}.\n"
+        f"Projected ready: {ready_text}.\n"
+        f"We'll message you when the machine is scheduled or your plot needs "
+        f"attention -- no need to check in."
+    )
+
+
+def help_operator_reply(cluster_name: str) -> str:
+    return (
+        f"You're the operator for {cluster_name}.\n"
+        f"Commands: /addfarmer to register a farmer without a phone, "
+        f"/linkfarmer to connect them once they register themselves, "
+        f"/operator <code> to replace yourself. Route changes and breakdown "
+        f"reports happen via the buttons on today's messages."
+    )
+
+
+def help_operator_addendum(cluster_name: str) -> str:
+    """Appended to a farmer reply, not the standalone operator reply --
+    for the chat_id-is-both case (ADR-014 Decision 2): the farmer view
+    always wins, this is the one-line pointer that still surfaces
+    operator access from the same message."""
+    return (
+        f"You're also the operator for {cluster_name} -- commands: "
+        f"/addfarmer, /linkfarmer, /operator <code>."
+    )
