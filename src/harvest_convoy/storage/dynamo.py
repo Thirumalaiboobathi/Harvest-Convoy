@@ -91,6 +91,80 @@ def _decode(d: dict) -> dict:
     return {k: _from_decimal(v) for k, v in d.items()}
 
 
+# ADR-015: _from_decimal alone cannot tell a float field holding a whole
+# number (e.g. Plot.area_acres=3.0) from an int field holding the same
+# Decimal (e.g. Farmer.telegram_chat_id) -- DynamoDB's Number type erases
+# that distinction, and no heuristic over the *value* can recover it. The
+# fix is type information at the read site: each entity that has float
+# fields gets an explicit list of their names here, and its own get_*
+# casts them back to float after the generic decode. This is deliberately
+# NOT a general reflection-based decoder (see ADR-015's Decision for why
+# option 1/2 were rejected) -- these lists are the single source of truth
+# a dedicated completeness test (test_dynamo_storage.py) checks against
+# every dataclass's actual float-typed fields, so a future float field
+# added to a dataclass and forgotten here fails a test, not a live read.
+CLUSTER_FLOAT_FIELDS = (
+    "machine_capacity_acres_per_day",
+    "machine_start_lat",
+    "machine_start_lon",
+    "maturity_gdd_override",
+)
+PLOT_FLOAT_FIELDS = ("lat", "lon", "area_acres")
+DECISION_RECORD_FLOAT_FIELDS = (
+    "accumulated_gdd",
+    "maturity_gdd_used",
+    "urgency",
+    "rain_threshold_mm",
+    "machine_capacity_acres_per_day",
+    "capacity_budget_acres",
+    "rain_urgency_boost",
+)
+# AdvocateClaim.model_dump() shape, nested inside DecisionRecord.own_claim
+# / opponent_claim. AdvocateClaim itself is a Pydantic model (contracts.py),
+# not one of the stdlib dataclasses the completeness test walks, so this
+# list is checked separately against AdvocateClaim.model_fields.
+DECISION_CLAIM_FLOAT_FIELDS = ("urgency_score", "acres", "weighted_bump_days")
+
+
+def _floats(d: dict, fields: tuple[str, ...]) -> dict:
+    """Cast the named top-level keys to float where present and not None
+    -- see ADR-015. A missing key is left alone (matches every other
+    optional-field handling in this file: absence is not an error)."""
+    out = dict(d)
+    for f in fields:
+        if out.get(f) is not None:
+            out[f] = float(out[f])
+    return out
+
+
+def _cast_claim_floats(claim: dict | None) -> dict | None:
+    if claim is None:
+        return None
+    return _floats(claim, DECISION_CLAIM_FLOAT_FIELDS)
+
+
+def _item_to_cluster(item: dict) -> Cluster:
+    return Cluster(**_floats(_decode(_strip_keys(item)), CLUSTER_FLOAT_FIELDS))
+
+
+def _item_to_plot(item: dict) -> Plot:
+    decoded = _floats(
+        _decode(_strip_keys(item, extra=("GSI1PK", "GSI1SK"))), PLOT_FLOAT_FIELDS
+    )
+    decoded["transplant_date"] = date.fromisoformat(decoded["transplant_date"])
+    return Plot(**decoded)
+
+
+def _item_to_decision_record(item: dict) -> DecisionRecord:
+    decoded = _floats(
+        _decode(_strip_keys(item, extra=("GSI1PK", "GSI1SK"))),
+        DECISION_RECORD_FLOAT_FIELDS,
+    )
+    decoded["own_claim"] = _cast_claim_floats(decoded.get("own_claim"))
+    decoded["opponent_claim"] = _cast_claim_floats(decoded.get("opponent_claim"))
+    return DecisionRecord(**decoded)
+
+
 class DynamoStorage:
     def __init__(
         self,
@@ -123,7 +197,7 @@ class DynamoStorage:
         item = resp.get("Item")
         if item is None:
             return None
-        return Cluster(**_decode(_strip_keys(item)))
+        return _item_to_cluster(item)
 
     def put_cluster(self, cluster: Cluster) -> StorageResult:
         item = {
@@ -190,9 +264,7 @@ class DynamoStorage:
         item = resp.get("Item")
         if item is None:
             return None
-        decoded = _decode(_strip_keys(item, extra=("GSI1PK", "GSI1SK")))
-        decoded["transplant_date"] = date.fromisoformat(decoded["transplant_date"])
-        return Plot(**decoded)
+        return _item_to_plot(item)
 
     def put_plot(self, plot: Plot) -> StorageResult:
         d = asdict(plot)
@@ -208,12 +280,7 @@ class DynamoStorage:
 
     def get_plots_for_cluster(self, cluster_id: str) -> list[Plot]:
         items = self._query_gsi1(cluster_id, "PLOT#")
-        result = []
-        for i in items:
-            decoded = _decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK")))
-            decoded["transplant_date"] = date.fromisoformat(decoded["transplant_date"])
-            result.append(Plot(**decoded))
-        return result
+        return [_item_to_plot(i) for i in items]
 
     # --- Fairness ledger ---
 
@@ -381,26 +448,20 @@ class DynamoStorage:
         item = resp.get("Item")
         if item is None:
             return None
-        return DecisionRecord(**_decode(_strip_keys(item, extra=("GSI1PK", "GSI1SK"))))
+        return _item_to_decision_record(item)
 
     def get_decision_records_for_plot(
         self, plot_id: str, season_id: str | None = None
     ) -> list[DecisionRecord]:
         sk_prefix = f"DECISION#{season_id}#" if season_id is not None else "DECISION#"
         items = self._query_pk_prefix(f"PLOT#{plot_id}", sk_prefix)
-        return [
-            DecisionRecord(**_decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK"))))
-            for i in items
-        ]
+        return [_item_to_decision_record(i) for i in items]
 
     def get_decision_records_for_cluster(
         self, cluster_id: str, season_id: str
     ) -> list[DecisionRecord]:
         items = self._query_gsi1(cluster_id, f"DECISION#{season_id}#")
-        return [
-            DecisionRecord(**_decode(_strip_keys(i, extra=("GSI1PK", "GSI1SK"))))
-            for i in items
-        ]
+        return [_item_to_decision_record(i) for i in items]
 
     # --- Season rollover -- ADR-011 Part 1 ---
 

@@ -693,6 +693,33 @@ Every harness in this project (`print_tamil_strings.py`,
 worth the same question: does its demo/test data actually match how the
 real call site invokes it, or only resemble it.
 
+**Two of the above are the same lesson wearing different clothes, and
+worth naming as its own pattern, distinct from the other eight: an
+equality check that is technically true while validating the wrong
+thing.** #8's test asserted `DEFAULT_WINNER_LABEL in text` and stayed
+green on the doubled-noun bug, because that assertion is true of the
+broken string too — it never checked the sentence was grammatical, only
+that a fragment of it was present. The second instance (ADR-015) is the
+same shape at the type level: live verification against the real
+DynamoDB table found that `DecisionRecord`'s float fields — and, it
+turned out, `Plot.area_acres`/`lat`/`lon` and three of `Cluster`'s fields
+too — came back from a real read as Python `int`, not `float`, whenever
+the stored value happened to be a whole number, because DynamoDB's
+Number type doesn't preserve the distinction and the decoder decided the
+type from the value alone (the same root cause ADR-006 Decision 9 fixed
+for `Farmer.telegram_chat_id`, in the opposite direction). A frozen
+dataclass's own `__eq__` — and Python dict equality on the nested
+`AdvocateClaim` claims — reported the round-tripped object as equal to
+the original anyway, because `int(0) == float(0.0)` is `True`. The test
+that would have caught it earlier could have existed the whole time; it
+just needed to assert `type(x) is float`, not `x == 3.0`. This bug was
+live on three real Kamatchipuram plots (`area_acres` of exactly `3`,
+`2`, and `1` acres) before it was found and fixed — confirmed by reading
+them, not assumed. Both instances point at the same discipline: when a
+round trip or a substring is what you're actually verifying, assert the
+specific property that would fail if the thing were subtly wrong, not a
+looser check that happens to also be true of the broken version.
+
 ## Cost
 
 Measured, not estimated, on the real 8-plot Kamatchipuram scenario

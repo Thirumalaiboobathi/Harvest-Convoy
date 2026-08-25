@@ -1,9 +1,71 @@
 # CLAUDE.md
 
 Operational rules for working on Harvest Convoy. For what the system is
-and how it's built, see [ARCHITECTURE.md](ARCHITECTURE.md) and the ADR
-index inside it (`docs/adr/`) — read the relevant ADRs before touching
-adjacent code; don't restate their content here, extend it there.
+and how it's built, see [ARCHITECTURE.md](ARCHITECTURE.md); its ADR
+index has a fuller per-ADR summary than the one-liners below.
+
+## ADR index — decisions only
+
+For session-start triage, not for citing reasoning. Each line is what an
+ADR decided, nothing more — the argument, failure paths, and sourcing
+live in the ADR itself. **Do not read every ADR at session start.**
+Read only the ones a given task actually names, using this index to
+figure out which those are. All Implemented unless marked otherwise.
+
+- **ADR-000** — Stack: Python 3.12, Strands Agents SDK, Bedrock Nova Pro
+  (`ap-south-1`), Telegram Bot API, DynamoDB, AgentCore Runtime, OTel, uv, pytest.
+- **ADR-001** — Agronomy core: GDD anchored to `transplant_date`;
+  `T_BASE_C=10.0` sourced; ADT 45 maturity threshold derived, not sourced;
+  Open-Meteo archive/forecast seam detected and bridged, not assumed.
+- **ADR-002** — Scheduling core: GDD rate reconciled against real 5-year
+  climatology; overripe decay is a derived linear proxy; capacity budget,
+  route ordering; "too green" is a hard exclusion, not a ranking position.
+- **ADR-003** — Strands agents: facts are always computed, never trusted
+  from the model; one real Strands Agent construction per advocate call;
+  negotiation is pairwise, capped at 3 rounds, escalates on no resolution.
+- **ADR-004** — Telegram interface: raw Bot API via httpx, no library;
+  registration is a pure FSM; "not ready" is a distinct message;
+  escalation is one message, two tap targets, idempotent.
+- **ADR-005** — Persistence: AgentCore Memory skipped deliberately;
+  FileStorage (not DynamoDB Local) for dev; single-table DynamoDB design;
+  fairness ledger accumulated/decayed/capped.
+- **ADR-006** — Deployment: AgentCore Runtime (`codeConfiguration`,
+  `PUBLIC`), Lambda shim for EventBridge→`InvokeAgentRuntime`, real
+  DynamoDB, native ADOT tracing, prompt-cached Nova Pro cost (64% cut).
+  Two redeploy rounds fixed a chat_id int/float bug, an Open-Meteo
+  horizon gap, a missing bot token, two Tamil half-translations. Live
+  version 11 (2026-08-18) = commit `1f2fd01` — everything below this
+  line postdates the live deployed artifact.
+- **ADR-007** — number never assigned; no such document exists.
+- **ADR-008** — TN generalization + Tamil: multi-cluster/multi-climate
+  support, per-cluster calibrated GDD; Tamil interface, hand-authored
+  strings only (Nova Pro can't reliably produce valid Tamil).
+- **ADR-009** — Harvest lifecycle: 2025 Kuruvai backtest; plot harvest
+  lifecycle; harvest confirmation loop (`bool | None` tri-state, silence
+  is never a no-show); projected maturity date stored at registration;
+  post-harvest drying-window rain alert.
+- **ADR-010** — Reporting: persisted `DecisionRecord` per plot per
+  trigger day; decision replay script; equity report; machinery gap
+  report; CHC positioning in README (no real CHC integration).
+- **ADR-011** — Seasonal rollover (opt back in per season, silence
+  excludes); machine breakdown (one-tap recompute, tracked separately
+  from the fairness ledger); rain event classification (duration/
+  accumulation-scaled urgency); advance harvest notice (~1 week before
+  maturity, stored-record only, never a live recompute).
+- **ADR-012** — Callback authorization audit (closed 3 unchecked
+  handlers) + operator self-enrollment via one-time code. Owns the
+  authorization audit table every new callback must be added to.
+- **ADR-013** — Part 1: route proposal, Accept/Modify, operator
+  override. Part 2: proxy registration (`/addfarmer`), farmer linking
+  (`/linkfarmer`), bounded-window Undo. Part 3: farmer-facing "why?"
+  answers for not-ready/lost, from stored records only.
+- **ADR-014** — `/help`: read-only status command (farmer's plot /
+  operator's cluster+commands); farmer view wins when the operator also
+  farms; the one deliberate exception to "no new farmer-initiated surface."
+- **ADR-015** — *Proposed, awaiting go-ahead.* Fixes `DynamoStorage`'s
+  float/int coercion bug (`Plot`/`Cluster`/`DecisionRecord` float fields)
+  with explicit per-type deserializers + a reflection-based completeness
+  test guarding against a repeat.
 
 ## The one architectural rule
 
@@ -34,6 +96,10 @@ wrong regardless of how it tests.
 - **ADR before code, every time.** Write it, show it, wait for explicit
   go-ahead before implementing — including for each part of a
   multi-part ADR where the ADR says to stop and report.
+- **From ADR-016 onward, keep ADRs to decisions and consequences, with
+  reasoning compressed.** The argument matters; the exploration of it
+  doesn't need to survive at full length. Existing ADRs (through
+  ADR-015) stay as written — don't retroactively trim them.
 - **Failure paths are designed up front, not discovered later.** Every
   ADR needs an explicit answer for the obvious ways a new flow breaks
   (double-tap, stale state, missing chat_id, weather unavailable,
