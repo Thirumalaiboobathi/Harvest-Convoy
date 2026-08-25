@@ -33,9 +33,9 @@ figure out which those are. All Implemented unless marked otherwise.
   `PUBLIC`), Lambda shim for EventBridge→`InvokeAgentRuntime`, real
   DynamoDB, native ADOT tracing, prompt-cached Nova Pro cost (64% cut).
   Two redeploy rounds fixed a chat_id int/float bug, an Open-Meteo
-  horizon gap, a missing bot token, two Tamil half-translations. Live
-  version 11 (2026-08-18) = commit `1f2fd01` — everything below this
-  line postdates the live deployed artifact.
+  horizon gap, a missing bot token, two Tamil half-translations.
+  Redeployed again 2026-08-25 to **live version 12** (Decision 11) with
+  HEAD's code through ADR-015 — rollback mechanics recorded there too.
 - **ADR-007** — number never assigned; no such document exists.
 - **ADR-008** — TN generalization + Tamil: multi-cluster/multi-climate
   support, per-cluster calibrated GDD; Tamil interface, hand-authored

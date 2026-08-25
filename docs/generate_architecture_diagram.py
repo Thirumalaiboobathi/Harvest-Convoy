@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw, ImageFont
 
-W, H = 1760, 1260
+W, H = 1760, 1300
 BG = (255, 255, 255)
 INK = (30, 34, 40)
 MUTED = (110, 118, 128)
@@ -21,6 +21,13 @@ INFRA_FILL = (232, 236, 245)
 INFRA_EDGE = (90, 100, 130)
 EXTERNAL_FILL = (238, 238, 240)
 EXTERNAL_EDGE = (120, 120, 128)
+# Not part of the original legend -- added alongside ADR-016 specifically
+# to make "code exists" visually distinct from "code is deployed", so
+# this diagram can't independently drift from that ADR's correction the
+# way it already had (see ADR-016's note on the generator encoding the
+# same wrong belief the prose did).
+NOT_DEPLOYED_FILL = (250, 228, 228)
+NOT_DEPLOYED_EDGE = (176, 62, 62)
 ARROW = (60, 66, 76)
 
 FONT_DIR = "C:/Windows/Fonts/"
@@ -107,12 +114,11 @@ centered_text(W / 2, 22, "Harvest Convoy — Architecture", f_title)
 centered_text(W / 2, 70, "One shared harvester, eight plots, one rule: math decides, judgment only argues", f_small, MUTED)
 
 # ---- External services row ----
-tg = (60, 120, 300, 190)
-om = (340, 120, 580, 190)
-rounded_box(tg, EXTERNAL_FILL, EXTERNAL_EDGE)
-centered_text((tg[0]+tg[2])/2, 133, "Telegram Bot API", f_box_title)
-wrapped_lines((tg[0]+tg[2])/2, 158, ["farmer registration,", "notifications, escalation msgs"], f_small, MUTED)
-
+# Telegram Bot API used to sit here too, with an arrow INTO the runtime --
+# wrong: the deployed runtime never receives anything from Telegram, only
+# sends to it. It's drawn below instead, downstream of notify.py, as the
+# outbound-only destination it actually is. See ADR-016.
+om = (60, 120, 300, 190)
 rounded_box(om, EXTERNAL_FILL, EXTERNAL_EDGE)
 centered_text((om[0]+om[2])/2, 133, "Open-Meteo API", f_box_title)
 wrapped_lines((om[0]+om[2])/2, 158, ["Archive + Forecast,", "gap-bridged, cached"], f_small, MUTED)
@@ -141,7 +147,6 @@ d.line([(lam_cx, lam[3]), (lam_cx, 320), (1210, 320), (1210, 335)], fill=ARROW, 
 arrowhead((1210, 335), 1.5708)
 centered_text(lam_cx + 90, lam[3] + 6, "payload: cluster_id, season_id", f_small, MUTED)
 
-elbow_arrow_hv((tg[0]+120, tg[3]+8), (90, 335), bend_y=225, color=EXTERNAL_EDGE)
 elbow_arrow_hv((om[0]+120, om[3]+8), (160, 335), bend_y=210, color=EXTERNAL_EDGE)
 
 # ---- Deterministic core box ----
@@ -205,7 +210,7 @@ centered_text((dynamo[0]+dynamo[2])/2, row_y+12, "DynamoDB (harvest_convoy)", f_
 wrapped_lines((dynamo[0]+dynamo[2])/2, row_y+38, ["single-table, PK/SK + GSI1", "plots, farmers, ledger, watcher marker"], f_small, MUTED)
 
 rounded_box(notify, EXTERNAL_FILL, EXTERNAL_EDGE)
-centered_text((notify[0]+notify[2])/2, row_y+12, "Telegram notify.py / webhook.py", f_box_title)
+centered_text((notify[0]+notify[2])/2, row_y+12, "Telegram notify.py — outbound only", f_box_title)
 wrapped_lines((notify[0]+notify[2])/2, row_y+38, ["harvest_scheduled, not_ready, route_summary, escalation", "Tamil default / English opt-in — messages_ta.py / _en.py"], f_small, MUTED)
 
 elbow_arrow((det_box[0]+150, det_box[3]+2), (dynamo[0]+145, row_y))
@@ -218,11 +223,26 @@ centered_text((otel[0]+otel[2])/2, row_y+12, "ADOT → CloudWatch / X-Ray", f_bo
 wrapped_lines((otel[0]+otel[2])/2, row_y+38, ["coordinator.negotiate →", "negotiation.round spans, aws/spans"], f_small, MUTED)
 elbow_arrow((llm_box[2]-100, llm_box[3]+2), (otel[0]+145, row_y), color=LLM_EDGE)
 
+# ---- Outbound destination + the never-deployed inbound half (ADR-016) ----
+telegram = (110, 950, 480, 1050)
+rounded_box(telegram, EXTERNAL_FILL, EXTERNAL_EDGE)
+centered_text((telegram[0]+telegram[2])/2, 966, "Telegram Bot API", f_box_title)
+wrapped_lines((telegram[0]+telegram[2])/2, 996, ["outbound only: harvest_scheduled,", "not_ready, route_summary, escalation"], f_small, MUTED, line_h=22)
+
+webhook = (530, 950, 1000, 1050)
+rounded_box(webhook, NOT_DEPLOYED_FILL, NOT_DEPLOYED_EDGE, width=2)
+centered_text((webhook[0]+webhook[2])/2, 960, "webhook.py, registration.py", f_box_title)
+centered_text((webhook[0]+webhook[2])/2, 982, "NOT DEPLOYED", f_box_title, NOT_DEPLOYED_EDGE)
+wrapped_lines((webhook[0]+webhook[2])/2, 1006, ["registration, /help, taps, replies — tested via", "run_polling.py / suite only. No live entry point. ADR-016."], f_small, MUTED, line_h=20)
+
+notify_cx = notify[0] + (notify[2] - notify[0]) / 2
+elbow_arrow((notify_cx, notify[3]), ((telegram[0]+telegram[2])/2, telegram[1]), color=EXTERNAL_EDGE)
+
 # ---- Bottom note bar ----
-note_box = (60, 960, 1260, 1030)
+note_box = (60, 1070, 1260, 1140)
 rounded_box(note_box, (255, 255, 255), (150, 150, 158), width=1, radius=10)
-d.text((80, 972), "Escalation is the product, not a fallback:", font=f_box_title, fill=INK)
-d.text((80, 1002), "the LLM never computes a number — GDD, capacity, fairness score, and route are all deterministic Python. It only argues, and only when the math is genuinely tied.", font=f_small, fill=MUTED)
+d.text((80, 1082), "Escalation is the product, not a fallback:", font=f_box_title, fill=INK)
+d.text((80, 1112), "the LLM never computes a number — GDD, capacity, fairness score, and route are all deterministic Python. It only argues, and only when the math is genuinely tied.", font=f_small, fill=MUTED)
 
 # ---- Legend (right side) ----
 lx = 1310
@@ -234,6 +254,7 @@ legend = [
     (LLM_FILL, LLM_EDGE, "LLM (Strands + Nova Pro)"),
     (INFRA_FILL, INFRA_EDGE, "AWS infrastructure"),
     (EXTERNAL_FILL, EXTERNAL_EDGE, "External service"),
+    (NOT_DEPLOYED_FILL, NOT_DEPLOYED_EDGE, "Code exists, not deployed"),
 ]
 for fill, edge, label in legend:
     rounded_box((lx, ly, lx + 34, ly + 24), fill, edge, width=2, radius=6)

@@ -77,10 +77,16 @@ This split is enforced in code, not just documented as intent — see
    script (see "What we learned building Tamil support" in the README).
    `concedes` stays a genuine live model judgment either way.
 6. Results persist to **DynamoDB** (route, fairness ledger, watcher
-   marker) and go out via **Telegram** (`notify.py` for farmers,
-   `webhook.py` for the operator's escalation response) — Tamil by
-   default per farmer, English on request
-   (`telegram/messages_ta.py`/`messages_en.py`).
+   marker) and go out via **Telegram** (`notify.py`) — Tamil by default
+   per farmer, English on request
+   (`telegram/messages_ta.py`/`messages_en.py`). This is the only
+   live Telegram traffic the deployed system produces: the escalation
+   message reaching the operator is real. The operator's *reply* —
+   tapping a resolution button — would be handled by `webhook.py`, but
+   nothing deployed can receive it: no webhook is registered with
+   Telegram, no inbound endpoint exists. `webhook.py` is real, tested
+   code with no live entry point — see
+   [ADR-016](docs/adr/ADR-016-no-live-inbound-path.md).
 7. Every step is wrapped in **OpenTelemetry spans**
    (`app.daily_watch` → `coordinator.run_cluster` →
    `coordinator.negotiate` → `negotiation.round` → `advocate.get_claim` →
@@ -117,7 +123,10 @@ project, not something changed the same week as filming.
 | `agents/advocate.py` | One Strands agent per plot; structured `AdvocateClaim` output. `argument` is model-generated for English, templated from facts for Tamil (`concedes` is model judgment either way) | **Yes** (`concedes`, and `argument` for English) |
 | `agents/coordinator.py` | Pairwise negotiation, round-capping, escalation | Orchestrates LLM calls; the negotiation *logic* (round counting, score comparison, escalation payload) is deterministic |
 | `storage/interface.py`, `file_storage.py`, `dynamo.py` | Shared `Storage` Protocol, two interchangeable backends | No |
-| `telegram/client.py`, `notify.py`, `registration.py`, `webhook.py` | Bot API wrapper, outbound messages, registration flow, inbound/callback handling — dispatches by `Farmer.language`/`Cluster.operator_language` | No |
+| `telegram/client.py` | Bot API wrapper | No — **verified against a real phone**, via the deployed outbound path (ADR-006 Decisions 9/10/11) |
+| `telegram/notify.py` | Outbound farmer/operator messages, dispatched by `Farmer.language`/`Cluster.operator_language` | No — **verified against a real phone**, live, deployed, repeatedly |
+| `telegram/registration.py` | Registration FSM | No — **verified against a real phone**, but only locally via `run_polling.py` (the "yes-words widened for real phone typing" work, ADR-008) — no live entry point exists on the deployed system |
+| `telegram/webhook.py` | Inbound/callback dispatch — registration, `/addfarmer`/`/linkfarmer`, `/help`, escalation/breakdown/rollover taps, route Accept/Modify, confirmation replies | No — **verified against a real phone locally** for the sessions above that ran through it (registration, proxy registration — receipted on a real device per ADR-013 Decision 21); **tested only** (suite, no device) for the rest of its callback branches. No live entry point exists on the deployed system either way — see [ADR-016](docs/adr/ADR-016-no-live-inbound-path.md) |
 | `telegram/messages_ta.py`, `messages_en.py` | Hand-authored message templates per language, same function shape in both | No |
 | `weather/openmeteo.py` | Archive + Forecast client, gap-bridged, cached; trims a trailing not-yet-computed forecast day instead of failing the whole request | No |
 | `observability/otel.py` | Tracing setup: console locally, AWS ADOT distro when deployed | No |

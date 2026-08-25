@@ -11,7 +11,10 @@
   proposal, all found live and fixed the same session they were found:
   Decision 7 (Scheduler can't call `InvokeAgentRuntime` directly),
   Decision 8 (ADOT needs one more env var than Decision 5 assumed).
-- Date: 2026-08-17; redeploy rounds 2026-08-18
+  **Redeployed again 2026-08-25 to version 12 with HEAD's code (ADR-009
+  through ADR-015) — see Decision 11, which also records rollback
+  mechanics next to the build recipe.**
+- Date: 2026-08-17; redeploy rounds 2026-08-18, 2026-08-25
 
 ## Provisioning summary — read this first
 
@@ -567,6 +570,65 @@ this session's transcript. Recommended the token be rotated via
 @BotFather as a precaution; that decision was left to you rather than
 rotated unilaterally, since doing so would invalidate the token
 everywhere it's already configured.
+
+## Decision 11: redeploying to v12 (2026-08-25) with rollback mechanics recorded next to the build recipe
+
+Redeployed with HEAD's code (ADR-009 through ADR-015) the same way as
+Decisions 9/10: rebuilt via the Decision 9 recipe (confirmed clean end to
+end -- same dependency footprint as the live zip, all `.py` files
+compile), uploaded to a new S3 key, `update-agent-runtime`. Version 11 →
+12. One env var added, `HARVEST_CONVOY_CLUSTER_ID=kamatchipuram` --
+introduced by ADR-009 Part 3, never added to the runtime until now (see
+ADR-016 for the finding this surfaced: the code paths that read it have
+no live way to be reached regardless). No dependency changed
+(`pyproject.toml`/`uv.lock` byte-identical to the v11 deploy commit), so
+the recipe itself needed no changes.
+
+**One real gap found doing this**: `main.py`, the entrypoint wrapper
+Decision 9 called "unchanged" and copied in alongside `src/harvest_convoy/`,
+was never committed to this repo -- it only existed inside the deployed
+zip. Recovered it by downloading the live v11 artifact from S3 (read-only)
+and extracting it, rather than reconstructing it from memory, and it's
+now committed at the repo root (`main.py`) so a lost S3 object can't
+block a future rebuild the way it nearly did this one.
+
+**Rollback mechanics, so this isn't worked out under pressure at 6 AM**:
+AgentCore Runtime versions are append-only. There is no revert call --
+`update-agent-runtime` always produces a *new* version number, even when
+the artifact it points at is old. To roll back:
+
+1. Call `update-agent-runtime` again with `agentRuntimeArtifact.
+   codeConfiguration.code.s3.prefix` set back to the older artifact's
+   key -- for the pre-this-redeploy state, that's
+   `harvest-convoy-watcher/deployment_package_v11.zip` (bucket
+   `bedrock-agentcore-code-675613597178-ap-south-1`, confirmed still
+   present, untouched by this redeploy since it uploaded to a new key).
+   Same `roleArn`, `networkConfiguration`, `lifecycleConfiguration` as
+   today's call.
+2. This produces a new version (13, not "11" again) running v11's exact
+   code. There is no way to reactivate version 11 itself -- the DEFAULT
+   endpoint always tracks whatever version was most recently created.
+3. Environment variables: safe to leave `HARVEST_CONVOY_CLUSTER_ID` set
+   even when rolling back to v11's code -- v11 never reads it, so it's
+   inert, not harmful. Every other env var is unchanged by this redeploy.
+4. The EventBridge Schedule and Lambda shim need no changes either way
+   -- confirmed both still target the runtime by its stable ARN, not a
+   pinned version (`LastModificationDate`/`LastModified` both unchanged
+   since the original Decision 7 setup, checked before and after this
+   redeploy).
+
+**Verification, live, before calling this done**: direct invoke (200, no
+error), the same invoke via the real Lambda shim (200, no error), the
+watcher idempotency marker read directly from DynamoDB (`2026-08-25`,
+correctly a no-op on a same-day second call), `HARVEST_CONVOY_CLUSTER_ID`
+resolving a real cluster and a real farmer (`find_farmer_by_chat_id`)
+against production data, and real trace spans landing in CloudWatch for
+both new-version invocations (single-span, since both hit the
+idempotency no-op path -- deep nesting on v12 specifically was not
+re-proven, since forcing a full pipeline run risked sending real
+duplicate messages to real farmers and wasn't asked for). **Not
+verified**: the full pipeline (weather → solve → negotiate → dispatch)
+on v12's actual code, since nothing triggered it live today.
 
 ## Consequences
 

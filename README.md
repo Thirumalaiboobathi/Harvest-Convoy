@@ -212,20 +212,28 @@ bash scripts/teardown.sh
 ## Architecture summary
 
 ```
-Telegram Bot API          Open-Meteo API         EventBridge Schedule
-       │                        │                        │ (daily, 06:00 IST)
-       │                        ▼                         ▼
-       │              ┌── AgentCore Runtime ──────────────────────┐
-       │              │                                            │
-       │              │  ┌─ DETERMINISTIC CORE ─┐  ┌─ LLM JUDGMENT ─┐
-       │              │  │ GDD, capacity/route,  │─▶│ coordinator +  │
-       │              │  │ fairness decay        │  │ advocates      │
-       │              │  │ (pure Python)         │  │ (Strands+Nova) │
-       │              │  └───────────────────────┘  └────────────────┘
-       │              │           │                        │
-       │              │      DynamoDB              CloudWatch / X-Ray
-       └──────────────┴───────────┴────────────────────────┘
-                    notify.py / webhook.py (escalation → human)
+     Open-Meteo API              EventBridge Schedule
+           │                             │ (daily, 06:00 IST)
+           ▼                             ▼
+┌── AgentCore Runtime (deployed) ──────────────────────┐
+│                                                        │
+│  ┌─ DETERMINISTIC CORE ─┐    ┌─ LLM JUDGMENT ─┐        │
+│  │ GDD, capacity/route,  │──▶│ coordinator +   │       │
+│  │ fairness decay        │   │ advocates       │       │
+│  │ (pure Python)         │   │ (Strands+Nova)  │       │
+│  └───────────────────────┘   └─────────────────┘       │
+│           │                          │                 │
+│      DynamoDB                CloudWatch / X-Ray        │
+│           │                          │                 │
+└───────────┴──────────────┬───────────┴─────────────────┘
+                            │ notify.py — outbound only
+                            ▼
+                    Telegram Bot API ──▶ farmer / operator phones
+
+Not deployed — code-complete, verified via run_polling.py and the test
+suite only (no live receiver exists): registration.py, webhook.py
+(registration, /addfarmer, /help, escalation taps, confirmation replies,
+route Accept/Modify). See ADR-016.
 ```
 
 Full diagram: [docs/architecture.png](docs/architecture.png), detailed
@@ -255,9 +263,24 @@ and — most importantly — actual ADT45 GDD-to-maturity ground truth from
 an agronomist or a season of paired measurements, replacing the derived
 estimate below.
 
+**Outbound is live; every inbound feature is not, and that's not a
+secret held back deliberately — see [ADR-016](docs/adr/ADR-016-no-live-inbound-path.md).**
+The deployed AgentCore Runtime has exactly one entrypoint: the daily
+watcher. Its outbound messages (harvest-scheduled, not-ready, route
+summary, escalation) are real and verified live, repeatedly. But nothing
+deployed calls `webhook.py` — no webhook is registered with Telegram, no
+API Gateway exists for one — so registration, `/help`, `/addfarmer`/
+`/linkfarmer`, escalation taps, and every confirmation reply are real,
+tested code with no live way to be reached. They've been exercised
+against a real phone locally (`scripts/run_polling.py`), not through the
+deployed system. Any demo footage of these features is running the same
+way.
+
 **Farmer and operator onboarding are deliberately asymmetric, not an
 oversight.** A farmer self-onboards entirely by messaging the bot
-(`telegram/registration.py`) — no code, no external step. The operator
+(`telegram/registration.py`) — no code, no external step, **when running
+locally via `run_polling.py`; not reachable on the deployed system, per
+the disclosure above.** The operator
 does not: they enroll with a one-time code (`/operator <code>`,
 `telegram/operator_enrollment.py`) that a human — whoever provisions the
 cluster — generates and hands them out-of-band (phone call, WhatsApp,
@@ -719,6 +742,24 @@ them, not assumed. Both instances point at the same discipline: when a
 round trip or a substring is what you're actually verifying, assert the
 specific property that would fail if the thing were subtly wrong, not a
 looser check that happens to also be true of the broken version.
+
+**A finding different in kind from all ten above, and larger in scope:
+every one of them was "this code has a bug"; this one is "this code was
+correct, and nothing ever checked whether it could be reached in
+production."** Redeploying to verify ADR-015 surfaced it: the deployed
+AgentCore Runtime has exactly one entrypoint, the daily watcher.
+Registration, `/help`, `/addfarmer`/`/linkfarmer`, escalation taps, and
+every confirmation reply are real, correct, tested code — and none of
+it has ever been reachable from the deployed system, because no webhook
+is registered and no inbound path exists (`webhook.py` has no live
+entry point; see [ADR-016](docs/adr/ADR-016-no-live-inbound-path.md)).
+Every ADR since ADR-004 tested `webhook.handle_update()` correctly and
+none asked whether the deployed artifact could ever call it. Tests
+confirm behavior given an input; nothing confirmed the input could
+arrive. Found the same way as the rest of this section — by tracing an
+actual path end to end (what does the deployed runtime actually invoke?)
+instead of trusting that passing tests meant the feature worked in
+production.
 
 ## Cost
 
