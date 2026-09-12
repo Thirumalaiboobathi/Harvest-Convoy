@@ -57,6 +57,32 @@ a plot's case when two plots are genuinely tied, and write the messages
 farmers read. See [ARCHITECTURE.md](ARCHITECTURE.md) for why that split
 matters and how it's enforced in code, not just convention.
 
+## What is deployed, and what runs locally
+
+**The deployed AgentCore Runtime has exactly one entrypoint, and it's
+outbound-only.** Every day it runs, it checks the weather, recomputes the
+schedule, and sends Telegram messages — that half is real, deployed, and
+verified live against a real phone. Nothing deployed listens for a reply:
+no webhook is registered with Telegram, no API Gateway exists for one, so
+every farmer- or operator-initiated interaction — registration, `/help`,
+`/addfarmer`/`/linkfarmer`, an escalation tap, a harvest-confirmation
+reply, a route Accept/Modify — is real, tested code with no live way to
+be reached today. Those features run when a developer runs
+`scripts/run_polling.py` locally against a real bot token, not on the
+deployed system. Any demo footage of an inbound interaction is running
+this way.
+
+| Runs live on the deployed system today | Requires `run_polling.py` locally |
+|---|---|
+| Daily rain check, GDD/capacity scheduling, negotiation | Registration, `/help`, `/addfarmer`, `/linkfarmer` |
+| harvest-scheduled / not-ready / route-summary / escalation messages | Every callback tap: confirm, rollover, breakdown, route edits, operator enrollment, "why?" |
+| Drying-window rain alert, advance harvest notice | Escalation resolution, and anything that replies to a farmer or operator's own message |
+
+See [docs/FEATURES.md](docs/FEATURES.md) for the full, code-cited feature
+inventory and [ADR-016](docs/adr/ADR-016-no-live-inbound-path.md) for how
+this gap was found and the decision to disclose it rather than quietly
+build around it.
+
 ## Where this fits: Tamil Nadu's Custom Hiring Centres
 
 Tamil Nadu runs a Custom Hiring Centre (CHC) scheme, funded through
