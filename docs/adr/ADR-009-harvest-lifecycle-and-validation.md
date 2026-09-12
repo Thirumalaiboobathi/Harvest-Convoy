@@ -578,6 +578,15 @@ here so it's on record what the line is.
 
 ### Decision 6: fairness ledger integration — no reply after N days = treated as bumped
 
+**Superseded before implementation — do not read this heading at face
+value.** The design below was reversed per direct instruction before any
+code shipped: silence is not evidence, and the ledger is never credited
+for an unanswered confirmation. See "Implemented — design revised from
+Decision 6's original draft" later in this Part for what was actually
+built and why the reversal is correct. The paragraphs immediately below
+are kept verbatim as the original (wrong) draft, not silently edited out,
+per this project's own discipline for recording corrected decisions.
+
 A farmer with `confirmed is None` and `asked_at` more than
 `UNCONFIRMED_HARVEST_WINDOW_DAYS` old gets a `record_bump(...,
 days_bumped=DEFAULT_DAYS_BUMPED, outcome="unconfirmed")` write, same
@@ -1079,3 +1088,22 @@ answer.
 
 Implementation proceeds Part 1 → 2 → 3 → 4, stop-and-report after each,
 commit at each boundary. Starting Part 1 now.
+
+## Resolved on review (2026-09-12)
+
+A later code-and-docs audit (`docs/FEATURES.md`) flagged that Decision 6's
+heading and opening paragraphs, read on their own, claim the opposite of
+what ships: they say silence after `UNCONFIRMED_HARVEST_WINDOW_DAYS` gets
+`record_bump(..., outcome="unconfirmed")`. That was true only of the
+original draft, and it was corrected before implementation started — see
+"Implemented — design revised from Decision 6's original draft" above,
+which has been in this document since Part 2 was implemented. The
+heading and the original draft text were left as originally written,
+per this project's discipline of recording a wrong draft rather than
+silently editing it out, but that meant a reader who stopped at the
+heading or skimmed only the draft paragraphs came away with the
+reversed, incorrect claim — exactly what happened during the audit. A
+forward-pointer has now been added directly under the Decision 6
+heading so this cannot happen again. No behavior changed: silence was
+never penalized in the shipped code, is not penalized now, and the
+"Implemented" section's account of what was built remains accurate.
