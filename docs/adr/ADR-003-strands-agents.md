@@ -70,6 +70,17 @@ ones.
 
 ## Decision 2: fairness ledger is a read-only stub tool this phase
 
+**Superseded the next day by ADR-005 Decision 4.** `agents/fairness_stub.py`
+was deleted and replaced with the real, storage-backed ledger
+(`storage/fairness.py` — `weighted_bump_days`, `record_bump`,
+`get_ledger_history`) described there, exposed to the advocate through
+the same `@tool`-decorated lookup signature this phase built. Nothing in
+the shipped codebase imports `fairness_stub` any more; the module itself
+no longer exists as source. The paragraph below is kept as the original
+Phase 3 design record, not silently edited out — see "Resolved on
+review" at the end of this document for when and why this note was
+added.
+
 `agents/fairness_stub.py` holds an in-memory dict (`{farmer_id: bumped_last_season}`)
 seeded so the Kamatchipuram scenario has a genuine fairness-vs-urgency
 tension to negotiate over (see Decision 4), exposed to the advocate as a
@@ -178,3 +189,14 @@ deterministic paths are.
   than this demo; noted for Phase 5+ if the cluster size assumption changes.
 - Bedrock is confirmed live for this AWS account/region/model combination
   as of 2026-08-16 — no stub fallback shipped, since none was needed.
+
+## Resolved on review (2026-09-12)
+
+A later code-and-docs audit (`docs/FEATURES.md`) found this document still
+describing `agents/fairness_stub.py` as the current fairness mechanism,
+with the DynamoDB migration framed as future "Phase 5" work — a file that
+no longer exists in source, and a migration that in fact shipped the very
+next day, in ADR-005 Decision 4. A forward-pointer has been added to
+Decision 2 above recording this. No behavior changed: the real ledger in
+`storage/fairness.py` has been the shipped mechanism since ADR-005, this
+document's Decision 2 was simply never updated to say so.
